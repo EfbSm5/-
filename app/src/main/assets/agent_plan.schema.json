@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent Plan",
+  "description": "模型生成的待校验 Agent 计划。最终可信边界仍由 AgentPlanDecoder 负责。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "goal",
+    "actions"
+  ],
+  "properties": {
+    "goal": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "[^\\s]",
+      "description": "用户目标，首尾空白会被 Decoder 去除。"
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "items": {
+        "$ref": "#/$defs/action"
+      }
+    }
+  },
+  "$defs": {
+    "action": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/createTodoAction"
+        },
+        {
+          "$ref": "#/$defs/openAppAction"
+        },
+        {
+          "$ref": "#/$defs/askUserAction"
+        }
+      ]
+    },
+    "createTodoAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "title"
+      ],
+      "properties": {
+        "type": {
+          "const": "create_todo"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "[^\\s]"
+        },
+        "due_at": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$",
+          "description": "RFC 3339 兼容的 OffsetDateTime 子集；真实日期合法性由 Decoder 严格解析。"
+        }
+      }
+    },
+    "openAppAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "package_name"
+      ],
+      "properties": {
+        "type": {
+          "const": "open_app"
+        },
+        "package_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$"
+        }
+      }
+    },
+    "askUserAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "question"
+      ],
+      "properties": {
+        "type": {
+          "const": "ask_user"
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "[^\\s]"
+        }
+      }
+    }
+  }
+}
