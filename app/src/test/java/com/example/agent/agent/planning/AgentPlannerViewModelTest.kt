@@ -3,6 +3,7 @@ package com.example.agent.agent.planning
 import com.example.agent.agent.model.AgentPlan
 import com.example.agent.agent.model.AskUser
 import com.example.agent.agent.model.CreateTodo
+import com.example.agent.agent.model.OpenApp
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -253,6 +254,44 @@ class AgentPlannerViewModelTest {
         }
     }
 
+    @Test
+    fun executionFailure_exposesAlreadyOpenedApps() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+        try {
+            val viewModel = AgentPlannerViewModel(
+                planner = AgentPlanner(
+                    FakeAgentModelClient(
+                        AgentModelResult.Success(
+                            """{"goal":"打开设置并创建待办","actions":[{"type":"open_app","package_name":"com.android.settings"},{"type":"create_todo","title":"投递 Android 岗位"}]}""",
+                        ),
+                    ),
+                ),
+                executionEngine = AgentExecutionEngine(
+                    todoRepository = FailingTodoRepository(),
+                    appLauncher = ReadyAppLauncher(),
+                ),
+                dispatcher = dispatcher,
+            )
+
+            viewModel.submit("打开设置并创建待办")
+            advanceUntilIdle()
+            viewModel.confirmExecution()
+            advanceUntilIdle()
+
+            assertEquals(
+                AgentRunState.Failure(
+                    message = "待办保存失败",
+                    canRetry = false,
+                    openedPackages = listOf("com.android.settings"),
+                ),
+                viewModel.uiState.value,
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     private fun createViewModel(
         dispatcher: kotlinx.coroutines.CoroutineDispatcher,
         modelResult: AgentModelResult,
@@ -265,5 +304,19 @@ class AgentPlannerViewModelTest {
         private val result: AgentModelResult,
     ) : AgentModelClient {
         override suspend fun generatePlanJson(userRequest: String): AgentModelResult = result
+    }
+
+    private class FailingTodoRepository : TodoRepository {
+        override suspend fun addAll(todos: List<CreateTodo>) {
+            error("写入失败")
+        }
+
+        override suspend fun list(): List<CreateTodo> = emptyList()
+    }
+
+    private class ReadyAppLauncher : AppLauncher {
+        override fun preflight(packageName: String): AppLaunchPreflight = AppLaunchPreflight.Ready
+
+        override suspend fun launch(packageName: String): AppLaunchResult = AppLaunchResult.Launched
     }
 }

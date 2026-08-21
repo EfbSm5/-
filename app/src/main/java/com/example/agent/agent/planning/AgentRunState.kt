@@ -52,10 +52,12 @@ sealed interface AgentRunState {
     data class Completed(
         val plan: AgentPlan,
         val createdTodos: List<com.example.agent.agent.model.CreateTodo>,
+        val openedPackages: List<String> = emptyList(),
     ) : AgentRunState
 
     data class Failure(
         val message: String,
         val canRetry: Boolean,
+        val openedPackages: List<String> = emptyList(),
     ) : AgentRunState
 }

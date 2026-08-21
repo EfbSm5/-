@@ -124,11 +124,13 @@ class AgentPlannerViewModel(
                             is ToolExecutionResult.Success -> AgentRunState.Completed(
                                 plan = plan,
                                 createdTodos = result.createdTodos,
+                                openedPackages = result.openedPackages,
                             )
 
                             is ToolExecutionResult.Failure -> AgentRunState.Failure(
                                 message = result.message,
                                 canRetry = false,
+                                openedPackages = result.openedPackages,
                             )
                         }
                     }

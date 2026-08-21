@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">Agent</string>
+
+    <string-array name="agent_allowed_app_packages">
+        <item>com.android.settings</item>
+    </string-array>
 </resources>

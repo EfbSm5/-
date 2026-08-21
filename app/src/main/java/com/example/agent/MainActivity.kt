@@ -41,6 +41,7 @@ import com.example.agent.agent.model.OpenApp
 import com.example.agent.agent.planning.AgentPlanner
 import com.example.agent.agent.planning.AgentPlannerViewModel
 import com.example.agent.agent.planning.AgentExecutionEngine
+import com.example.agent.agent.planning.AndroidAppLauncher
 import com.example.agent.agent.planning.AgentRunState
 import com.example.agent.agent.planning.DemoAgentModelClient
 import com.example.agent.agent.planning.FileTodoRepository
@@ -66,6 +67,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val appLauncher by lazy {
+        AndroidAppLauncher(
+            context = applicationContext,
+            allowedPackages = resources.getStringArray(R.array.agent_allowed_app_packages).toSet(),
+        )
+    }
+
     private val plannerViewModel: AgentPlannerViewModel by viewModels {
         AgentPlannerViewModel.Factory(
             planner = AgentPlanner(
@@ -73,6 +81,7 @@ class MainActivity : ComponentActivity() {
             ),
             executionEngine = AgentExecutionEngine(
                 FileTodoRepository(File(applicationContext.filesDir, "agent_todos.json")),
+                appLauncher = appLauncher,
             ),
         )
     }
@@ -192,11 +201,17 @@ fun AgentScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 PlanCard(state.plan)
-                Text("执行完成：创建了 ${state.createdTodos.size} 个待办。")
+                Text(
+                    "执行完成：创建了 ${state.createdTodos.size} 个待办，打开了 " +
+                        "${state.openedPackages.size} 个应用。",
+                )
             }
 
             is AgentRunState.Failure -> {
                 Text(state.message, color = MaterialTheme.colorScheme.error)
+                if (state.openedPackages.isNotEmpty()) {
+                    Text("此前已打开：${state.openedPackages.joinToString()}")
+                }
                 if (state.canRetry) {
                     TextButton(onClick = onRetry) {
                         Text("重试")
