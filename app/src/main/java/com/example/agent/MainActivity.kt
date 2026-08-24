@@ -61,23 +61,31 @@ import java.io.File
 
 class MainActivity : ComponentActivity() {
     private val onDeviceModelStore by lazy { OnDeviceModelStore(applicationContext) }
+    private val appLauncher by lazy {
+        AndroidAppLauncher(
+            context = applicationContext,
+            allowedPackages = resources.getStringArray(R.array.agent_allowed_app_packages).toSet(),
+        )
+    }
+    private val toolRegistry by lazy {
+        ToolRegistry(
+            tools = listOf(
+                CreateTodoTool(),
+                OpenAppTool(appLauncher),
+            ),
+        )
+    }
     private val modelClient by lazy {
         if (onDeviceModelStore.isInstalled()) {
             LiteRtLmAgentModelClient(
                 context = applicationContext,
                 modelFile = onDeviceModelStore.modelFile,
                 backends = OnDeviceAcceleration.GPU_PREFERRED.backends(applicationContext),
+                toolRegistry = toolRegistry,
             )
         } else {
             DemoAgentModelClient()
         }
-    }
-
-    private val appLauncher by lazy {
-        AndroidAppLauncher(
-            context = applicationContext,
-            allowedPackages = resources.getStringArray(R.array.agent_allowed_app_packages).toSet(),
-        )
     }
 
     private val plannerViewModel: AgentPlannerViewModel by viewModels {
@@ -89,12 +97,7 @@ class MainActivity : ComponentActivity() {
                 todoRepository = FileTodoRepository(
                     File(applicationContext.filesDir, "agent_todos.json"),
                 ),
-                toolRegistry = ToolRegistry(
-                    tools = listOf(
-                        CreateTodoTool(),
-                        OpenAppTool(appLauncher),
-                    ),
-                ),
+                toolRegistry = toolRegistry,
             ),
         )
     }

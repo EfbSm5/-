@@ -4,7 +4,22 @@ import com.example.agent.agent.model.AgentAction
 import com.example.agent.agent.model.CreateTodo
 
 class CreateTodoTool : AgentTool {
-    override val name: String = AgentToolNames.CREATE_TODO
+    override val descriptor: ToolDescriptor = ToolDescriptor(
+        name = AgentToolNames.CREATE_TODO,
+        description = "创建一个待办事项。",
+        parameters = listOf(
+            ToolParameterDescriptor(
+                name = "title",
+                description = "待办标题。",
+                required = true,
+            ),
+            ToolParameterDescriptor(
+                name = "due_at",
+                description = "RFC 3339 时间；没有截止时间时省略。",
+                required = false,
+            ),
+        ),
+    )
 
     override fun supports(action: AgentAction): Boolean = action is CreateTodo
 

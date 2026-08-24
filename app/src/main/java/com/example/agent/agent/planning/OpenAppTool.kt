@@ -6,7 +6,24 @@ import com.example.agent.agent.model.OpenApp
 class OpenAppTool(
     private val appLauncher: AppLauncher,
 ) : AgentTool {
-    override val name: String = AgentToolNames.OPEN_APP
+    override val descriptor: ToolDescriptor = ToolDescriptor(
+        name = AgentToolNames.OPEN_APP,
+        description = "打开一个已安装且被允许的 Android 应用。",
+        parameters = listOf(
+            ToolParameterDescriptor(
+                name = "package_name",
+                description = "Android 应用包名。",
+                required = true,
+            ),
+        ),
+        constraints = listOf(
+            if (appLauncher.allowedPackageNames.isEmpty()) {
+                "package_name 必须通过运行时白名单校验。"
+            } else {
+                "package_name 只能是：${appLauncher.allowedPackageNames.sorted().joinToString()}。"
+            },
+        ),
+    )
 
     override fun supports(action: AgentAction): Boolean = action is OpenApp
 

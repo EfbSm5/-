@@ -8,6 +8,19 @@ object AgentToolNames {
     const val OPEN_APP = "open_app"
 }
 
+data class ToolParameterDescriptor(
+    val name: String,
+    val description: String,
+    val required: Boolean,
+)
+
+data class ToolDescriptor(
+    val name: String,
+    val description: String,
+    val parameters: List<ToolParameterDescriptor> = emptyList(),
+    val constraints: List<String> = emptyList(),
+)
+
 enum class ActionExecutionStatus {
     STAGED,
     SUCCEEDED,
@@ -50,7 +63,10 @@ class ToolExecutionContext internal constructor() {
 }
 
 interface AgentTool {
+    val descriptor: ToolDescriptor
+
     val name: String
+        get() = descriptor.name
 
     fun supports(action: AgentAction): Boolean
 
@@ -71,6 +87,31 @@ class ToolRegistry(tools: List<AgentTool>) {
 
     fun resolve(action: AgentAction): AgentTool? =
         registeredTools.firstOrNull { it.supports(action) }
+
+    fun describeForModel(): String = registeredTools.joinToString(separator = "\n\n") { tool ->
+        buildString {
+            append("- ")
+            append(tool.descriptor.name)
+            append(": ")
+            append(tool.descriptor.description)
+            if (tool.descriptor.parameters.isNotEmpty()) {
+                append("\n  parameters:")
+                tool.descriptor.parameters.forEach { parameter ->
+                    append("\n  - ")
+                    append(parameter.name)
+                    append(if (parameter.required) " (required): " else " (optional): ")
+                    append(parameter.description)
+                }
+            }
+            if (tool.descriptor.constraints.isNotEmpty()) {
+                append("\n  constraints:")
+                tool.descriptor.constraints.forEach { constraint ->
+                    append("\n  - ")
+                    append(constraint)
+                }
+            }
+        }
+    }
 
     companion object {
         fun default(): ToolRegistry = ToolRegistry(

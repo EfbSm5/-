@@ -22,6 +22,9 @@ sealed interface AppLaunchResult {
 }
 
 interface AppLauncher {
+    val allowedPackageNames: Set<String>
+        get() = emptySet()
+
     fun preflight(packageName: String): AppLaunchPreflight
 
     suspend fun launch(packageName: String): AppLaunchResult
@@ -41,7 +44,7 @@ class AndroidAppLauncher(
     private val packageManager: PackageManager = context.packageManager,
 ) : AppLauncher {
     private val appContext = context.applicationContext
-    private val allowedPackageNames = allowedPackages.toSet()
+    override val allowedPackageNames: Set<String> = allowedPackages.toSet()
 
     init {
         require(allowedPackageNames.all(PACKAGE_NAME_PATTERN::matches)) {

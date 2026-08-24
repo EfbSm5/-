@@ -18,6 +18,7 @@ class LiteRtLmAgentModelClient(
     context: Context,
     private val modelFile: File,
     private val backends: List<Backend> = listOf(Backend.CPU()),
+    private val toolRegistry: ToolRegistry = ToolRegistry.default(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : AgentModelClient, AutoCloseable {
     private val appContext = context.applicationContext
@@ -27,6 +28,7 @@ class LiteRtLmAgentModelClient(
     private val schemaText by lazy {
         appContext.assets.open(SCHEMA_ASSET_NAME).bufferedReader().use { it.readText() }
     }
+    private val promptBuilder by lazy { AgentPlannerPrompt(schemaText, toolRegistry) }
 
     override suspend fun generatePlanJson(userRequest: String): AgentModelResult = withContext(dispatcher) {
         if (!modelFile.isFile || modelFile.length() == 0L) {
@@ -43,7 +45,7 @@ class LiteRtLmAgentModelClient(
                         systemInstruction = Contents.of(SYSTEM_INSTRUCTION),
                     ),
                 ).use { conversation ->
-                    val response = conversation.sendMessage(buildPrompt(userRequest))
+                    val response = conversation.sendMessage(promptBuilder.build(userRequest))
                     val text = response.contents.contents
                         .filterIsInstance<Content.Text>()
                         .joinToString(separator = "") { it.text }
@@ -93,18 +95,6 @@ class LiteRtLmAgentModelClient(
         throw lastError ?: IllegalStateException("没有可用的 LiteRT-LM backend")
     }
 
-    private fun buildPrompt(userRequest: String): String = """
-        $PLANNER_PROMPT
-
-        JSON Schema:
-        $schemaText
-
-        User request:
-        <user_request>
-        $userRequest
-        </user_request>
-    """.trimIndent()
-
     private companion object {
         const val TAG = "LiteRtLmAgentModelClient"
         const val SCHEMA_ASSET_NAME = "agent_plan.schema.json"
@@ -112,10 +102,6 @@ class LiteRtLmAgentModelClient(
             You are an Android task planner.
             Return only one JSON object. Do not use Markdown fences or explanations.
             The JSON must follow the provided schema. Never invent tool results.
-        """
-        const val PLANNER_PROMPT = """
-            Convert the user request into a safe, not-yet-executed Agent plan.
-            Use ask_user when important information is missing.
         """
     }
 }
