@@ -27,6 +27,14 @@ interface AppLauncher {
     suspend fun launch(packageName: String): AppLaunchResult
 }
 
+internal object UnconfiguredAppLauncher : AppLauncher {
+    override fun preflight(packageName: String): AppLaunchPreflight =
+        AppLaunchPreflight.Failure("OpenApp Tool 未配置")
+
+    override suspend fun launch(packageName: String): AppLaunchResult =
+        AppLaunchResult.Failure("OpenApp Tool 未配置")
+}
+
 class AndroidAppLauncher(
     context: Context,
     allowedPackages: Set<String>,

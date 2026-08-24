@@ -43,11 +43,17 @@ import com.example.agent.agent.planning.AgentPlannerViewModel
 import com.example.agent.agent.planning.AgentExecutionEngine
 import com.example.agent.agent.planning.AndroidAppLauncher
 import com.example.agent.agent.planning.AgentRunState
+import com.example.agent.agent.planning.AgentToolNames
+import com.example.agent.agent.planning.CreateTodoTool
 import com.example.agent.agent.planning.DemoAgentModelClient
 import com.example.agent.agent.planning.FileTodoRepository
 import com.example.agent.agent.planning.LiteRtLmAgentModelClient
+import com.example.agent.agent.planning.OpenAppTool
 import com.example.agent.agent.planning.OnDeviceAcceleration
 import com.example.agent.agent.planning.OnDeviceModelStore
+import com.example.agent.agent.planning.ToolExecutionReport
+import com.example.agent.agent.planning.ActionExecutionStatus
+import com.example.agent.agent.planning.ToolRegistry
 import com.example.agent.agent.planning.backends
 import com.example.agent.agent.planning.RetryingAgentModelClient
 import com.example.agent.ui.theme.AgentTheme
@@ -80,8 +86,15 @@ class MainActivity : ComponentActivity() {
                 modelClient = RetryingAgentModelClient(modelClient),
             ),
             executionEngine = AgentExecutionEngine(
-                FileTodoRepository(File(applicationContext.filesDir, "agent_todos.json")),
-                appLauncher = appLauncher,
+                todoRepository = FileTodoRepository(
+                    File(applicationContext.filesDir, "agent_todos.json"),
+                ),
+                toolRegistry = ToolRegistry(
+                    tools = listOf(
+                        CreateTodoTool(),
+                        OpenAppTool(appLauncher),
+                    ),
+                ),
             ),
         )
     }
@@ -202,15 +215,18 @@ fun AgentScreen(
             ) {
                 PlanCard(state.plan)
                 Text(
-                    "执行完成：创建了 ${state.createdTodos.size} 个待办，打开了 " +
-                        "${state.openedPackages.size} 个应用。",
+                    "执行完成：创建了 ${state.report.succeededCount(AgentToolNames.CREATE_TODO)} " +
+                        "个待办，打开了 ${state.report.succeededCount(AgentToolNames.OPEN_APP)} 个应用。",
                 )
             }
 
             is AgentRunState.Failure -> {
                 Text(state.message, color = MaterialTheme.colorScheme.error)
-                if (state.openedPackages.isNotEmpty()) {
-                    Text("此前已打开：${state.openedPackages.joinToString()}")
+                val completedDetails = state.report.actionResults
+                    .filter { it.status == ActionExecutionStatus.SUCCEEDED }
+                    .mapNotNull { it.detail }
+                if (completedDetails.isNotEmpty()) {
+                    Text("此前已完成：${completedDetails.joinToString()}")
                 }
                 if (state.canRetry) {
                     TextButton(onClick = onRetry) {
@@ -220,6 +236,10 @@ fun AgentScreen(
             }
         }
     }
+}
+
+private fun ToolExecutionReport.succeededCount(toolName: String): Int = actionResults.count {
+    it.toolName == toolName && it.status == ActionExecutionStatus.SUCCEEDED
 }
 
 @Composable

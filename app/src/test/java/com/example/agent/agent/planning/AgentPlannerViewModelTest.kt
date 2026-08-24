@@ -246,7 +246,19 @@ class AgentPlannerViewModelTest {
             advanceUntilIdle()
 
             assertEquals(
-                AgentRunState.Completed(plan = plan, createdTodos = plan.actions.map { it as CreateTodo }),
+                AgentRunState.Completed(
+                    plan = plan,
+                    report = ToolExecutionReport(
+                        actionResults = listOf(
+                            ActionExecutionRecord(
+                                actionIndex = 0,
+                                toolName = AgentToolNames.CREATE_TODO,
+                                status = ActionExecutionStatus.SUCCEEDED,
+                                detail = "投递 Android 岗位",
+                            ),
+                        ),
+                    ),
+                ),
                 viewModel.uiState.value,
             )
         } finally {
@@ -269,7 +281,12 @@ class AgentPlannerViewModelTest {
                 ),
                 executionEngine = AgentExecutionEngine(
                     todoRepository = FailingTodoRepository(),
-                    appLauncher = ReadyAppLauncher(),
+                    toolRegistry = ToolRegistry(
+                        tools = listOf(
+                            CreateTodoTool(),
+                            OpenAppTool(ReadyAppLauncher()),
+                        ),
+                    ),
                 ),
                 dispatcher = dispatcher,
             )
@@ -283,7 +300,22 @@ class AgentPlannerViewModelTest {
                 AgentRunState.Failure(
                     message = "待办保存失败",
                     canRetry = false,
-                    openedPackages = listOf("com.android.settings"),
+                    report = ToolExecutionReport(
+                        actionResults = listOf(
+                            ActionExecutionRecord(
+                                actionIndex = 0,
+                                toolName = AgentToolNames.OPEN_APP,
+                                status = ActionExecutionStatus.SUCCEEDED,
+                                detail = "com.android.settings",
+                            ),
+                            ActionExecutionRecord(
+                                actionIndex = 1,
+                                toolName = AgentToolNames.CREATE_TODO,
+                                status = ActionExecutionStatus.STAGED,
+                                detail = "投递 Android 岗位",
+                            ),
+                        ),
+                    ),
                 ),
                 viewModel.uiState.value,
             )

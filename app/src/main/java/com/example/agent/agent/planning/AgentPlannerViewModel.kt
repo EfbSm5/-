@@ -123,14 +123,13 @@ class AgentPlannerViewModel(
                         _uiState.value = when (result) {
                             is ToolExecutionResult.Success -> AgentRunState.Completed(
                                 plan = plan,
-                                createdTodos = result.createdTodos,
-                                openedPackages = result.openedPackages,
+                                report = result.report,
                             )
 
                             is ToolExecutionResult.Failure -> AgentRunState.Failure(
                                 message = result.message,
                                 canRetry = false,
-                                openedPackages = result.openedPackages,
+                                report = result.report,
                             )
                         }
                     }

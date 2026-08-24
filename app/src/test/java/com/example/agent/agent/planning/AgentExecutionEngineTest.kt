@@ -4,36 +4,55 @@ import com.example.agent.agent.model.AgentPlan
 import com.example.agent.agent.model.AskUser
 import com.example.agent.agent.model.CreateTodo
 import com.example.agent.agent.model.OpenApp
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
-import org.junit.Test
-import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
+import org.junit.Test
 
 class AgentExecutionEngineTest {
     @Test
     fun planWithAskUser_isRejectedBeforeToolExecution() = runTest {
         val repository = RecordingTodoRepository()
         val plan = AgentPlan(
-                goal = "准备投递",
-                actions = listOf(AskUser("你准备投递哪个岗位？")),
-            )
-        val result = AgentExecutionEngine(repository).execute(ExecutionConfirmation.issue(plan))
+            goal = "准备投递",
+            actions = listOf(AskUser("你准备投递哪个岗位？")),
+        )
+
+        val result = AgentExecutionEngine(repository)
+            .execute(ExecutionConfirmation.issue(plan))
 
         assertEquals(ToolExecutionResult.Failure("计划仍需要用户补充信息"), result)
         assertTrue(repository.todos.isEmpty())
     }
 
     @Test
-    fun createTodoAction_isExecutedAfterConfirmation() = runTest {
+    fun createTodoAction_isStagedAndCommittedAfterConfirmation() = runTest {
         val repository = RecordingTodoRepository()
         val todo = CreateTodo("投递 Android 岗位", dueAt = null)
         val plan = AgentPlan(goal = "准备投递", actions = listOf(todo))
-        val result = AgentExecutionEngine(repository).execute(ExecutionConfirmation.issue(plan))
 
-        assertEquals(ToolExecutionResult.Success(listOf(todo)), result)
+        val result = AgentExecutionEngine(repository)
+            .execute(ExecutionConfirmation.issue(plan))
+
+        assertEquals(
+            ToolExecutionResult.Success(
+                report = ToolExecutionReport(
+                    actionResults = listOf(
+                        ActionExecutionRecord(
+                            actionIndex = 0,
+                            toolName = AgentToolNames.CREATE_TODO,
+                            status = ActionExecutionStatus.SUCCEEDED,
+                            detail = todo.title,
+                        ),
+                    ),
+                ),
+            ),
+            result,
+        )
         assertEquals(listOf(todo), repository.todos)
     }
 
@@ -41,23 +60,22 @@ class AgentExecutionEngineTest {
     fun openAppWithoutLauncher_isRejectedBeforeTodoWrite() = runTest {
         val repository = RecordingTodoRepository()
         val plan = AgentPlan(
-                goal = "打开应用并创建待办",
-                actions = listOf(
-                    CreateTodo("投递 Android 岗位", dueAt = null),
-                    OpenApp("com.example.other"),
-                ),
-            )
-        val result = AgentExecutionEngine(repository).execute(ExecutionConfirmation.issue(plan))
-
-        assertEquals(
-            ToolExecutionResult.Failure("OpenApp Tool 未配置"),
-            result,
+            goal = "打开应用并创建待办",
+            actions = listOf(
+                CreateTodo("投递 Android 岗位", dueAt = null),
+                OpenApp("com.example.other"),
+            ),
         )
+
+        val result = AgentExecutionEngine(repository)
+            .execute(ExecutionConfirmation.issue(plan))
+
+        assertEquals(ToolExecutionResult.Failure("OpenApp Tool 未配置"), result)
         assertTrue(repository.todos.isEmpty())
     }
 
     @Test
-    fun openAppAction_isExecutedThroughLauncher() = runTest {
+    fun openAppAction_isDispatchedThroughRegistry() = runTest {
         val repository = RecordingTodoRepository()
         val launcher = RecordingAppLauncher(
             preflightResult = AppLaunchPreflight.Ready,
@@ -68,18 +86,25 @@ class AgentExecutionEngineTest {
             actions = listOf(OpenApp("com.android.settings")),
         )
 
-        val result = AgentExecutionEngine(repository, launcher)
+        val result = AgentExecutionEngine(repository, registry(launcher))
             .execute(ExecutionConfirmation.issue(plan))
 
         assertEquals(
             ToolExecutionResult.Success(
-                createdTodos = emptyList(),
-                openedPackages = listOf("com.android.settings"),
+                report = ToolExecutionReport(
+                    actionResults = listOf(
+                        ActionExecutionRecord(
+                            actionIndex = 0,
+                            toolName = AgentToolNames.OPEN_APP,
+                            status = ActionExecutionStatus.SUCCEEDED,
+                            detail = "com.android.settings",
+                        ),
+                    ),
+                ),
             ),
             result,
         )
         assertEquals(listOf("com.android.settings"), launcher.requestedPackages)
-        assertTrue(repository.todos.isEmpty())
     }
 
     @Test
@@ -95,13 +120,10 @@ class AgentExecutionEngineTest {
             actions = listOf(todo, OpenApp("com.example.other")),
         )
 
-        val result = AgentExecutionEngine(repository, launcher)
+        val result = AgentExecutionEngine(repository, registry(launcher))
             .execute(ExecutionConfirmation.issue(plan))
 
-        assertEquals(
-            ToolExecutionResult.Failure("未授权打开应用：com.example.other"),
-            result,
-        )
+        assertEquals(ToolExecutionResult.Failure("未授权打开应用：com.example.other"), result)
         assertTrue(repository.todos.isEmpty())
     }
 
@@ -123,19 +145,15 @@ class AgentExecutionEngineTest {
             ),
         )
 
-        val result = AgentExecutionEngine(repository, launcher)
+        val result = AgentExecutionEngine(repository, registry(launcher))
             .execute(ExecutionConfirmation.issue(plan))
 
-        assertEquals(
-            ToolExecutionResult.Failure("未授权打开应用：com.example.second"),
-            result,
-        )
+        assertEquals(ToolExecutionResult.Failure("未授权打开应用：com.example.second"), result)
         assertTrue(launcher.requestedPackages.isEmpty())
     }
 
     @Test
-    fun todoPersistenceFailure_reportsAlreadyOpenedApps() = runTest {
-        val repository = FailingTodoRepository()
+    fun todoPersistenceFailure_reportsStagedAndOpenedActions() = runTest {
         val launcher = RecordingAppLauncher(
             preflightResult = AppLaunchPreflight.Ready,
             launchResult = AppLaunchResult.Launched,
@@ -148,13 +166,28 @@ class AgentExecutionEngineTest {
             ),
         )
 
-        val result = AgentExecutionEngine(repository, launcher)
+        val result = AgentExecutionEngine(FailingTodoRepository(), registry(launcher))
             .execute(ExecutionConfirmation.issue(plan))
 
         assertEquals(
             ToolExecutionResult.Failure(
                 message = "待办保存失败",
-                openedPackages = listOf("com.android.settings"),
+                report = ToolExecutionReport(
+                    actionResults = listOf(
+                        ActionExecutionRecord(
+                            actionIndex = 0,
+                            toolName = AgentToolNames.OPEN_APP,
+                            status = ActionExecutionStatus.SUCCEEDED,
+                            detail = "com.android.settings",
+                        ),
+                        ActionExecutionRecord(
+                            actionIndex = 1,
+                            toolName = AgentToolNames.CREATE_TODO,
+                            status = ActionExecutionStatus.STAGED,
+                            detail = "投递 Android 岗位",
+                        ),
+                    ),
+                ),
             ),
             result,
         )
@@ -162,7 +195,6 @@ class AgentExecutionEngineTest {
 
     @Test
     fun laterLaunchFailure_reportsEarlierOpenedApp() = runTest {
-        val repository = RecordingTodoRepository()
         val launcher = RecordingAppLauncher(
             preflightResult = AppLaunchPreflight.Ready,
             launchResult = AppLaunchResult.Launched,
@@ -178,21 +210,35 @@ class AgentExecutionEngineTest {
             ),
         )
 
-        val result = AgentExecutionEngine(repository, launcher)
+        val result = AgentExecutionEngine(RecordingTodoRepository(), registry(launcher))
             .execute(ExecutionConfirmation.issue(plan))
 
         assertEquals(
             ToolExecutionResult.Failure(
                 message = "启动失败",
-                openedPackages = listOf("com.android.settings"),
+                report = ToolExecutionReport(
+                    actionResults = listOf(
+                        ActionExecutionRecord(
+                            actionIndex = 0,
+                            toolName = AgentToolNames.OPEN_APP,
+                            status = ActionExecutionStatus.SUCCEEDED,
+                            detail = "com.android.settings",
+                        ),
+                        ActionExecutionRecord(
+                            actionIndex = 1,
+                            toolName = AgentToolNames.OPEN_APP,
+                            status = ActionExecutionStatus.FAILED,
+                            detail = "启动失败",
+                        ),
+                    ),
+                ),
             ),
             result,
         )
     }
 
     @Test
-    fun launcherException_reportsEarlierOpenedApp() = runTest {
-        val repository = RecordingTodoRepository()
+    fun launcherException_isConvertedToToolFailure() = runTest {
         val launcher = RecordingAppLauncher(
             preflightResult = AppLaunchPreflight.Ready,
             launchResult = AppLaunchResult.Launched,
@@ -206,13 +252,28 @@ class AgentExecutionEngineTest {
             ),
         )
 
-        val result = AgentExecutionEngine(repository, launcher)
+        val result = AgentExecutionEngine(RecordingTodoRepository(), registry(launcher))
             .execute(ExecutionConfirmation.issue(plan))
 
         assertEquals(
             ToolExecutionResult.Failure(
-                message = "打开应用失败",
-                openedPackages = listOf("com.android.settings"),
+                message = "open_app Tool 执行失败",
+                report = ToolExecutionReport(
+                    actionResults = listOf(
+                        ActionExecutionRecord(
+                            actionIndex = 0,
+                            toolName = AgentToolNames.OPEN_APP,
+                            status = ActionExecutionStatus.SUCCEEDED,
+                            detail = "com.android.settings",
+                        ),
+                        ActionExecutionRecord(
+                            actionIndex = 1,
+                            toolName = AgentToolNames.OPEN_APP,
+                            status = ActionExecutionStatus.FAILED,
+                            detail = "open_app Tool 执行失败",
+                        ),
+                    ),
+                ),
             ),
             result,
         )
@@ -230,8 +291,8 @@ class AgentExecutionEngineTest {
         )
 
         assertThrows(kotlinx.coroutines.CancellationException::class.java) {
-            kotlinx.coroutines.runBlocking {
-                AgentExecutionEngine(InMemoryTodoRepository(), launcher)
+            runBlocking {
+                AgentExecutionEngine(InMemoryTodoRepository(), registry(launcher))
                     .execute(ExecutionConfirmation.issue(plan)) {
                         currentCoroutineContext().cancel()
                     }
@@ -239,6 +300,10 @@ class AgentExecutionEngineTest {
         }
         assertTrue(launcher.requestedPackages.isEmpty())
     }
+
+    private fun registry(launcher: AppLauncher): ToolRegistry = ToolRegistry(
+        tools = listOf(CreateTodoTool(), OpenAppTool(launcher)),
+    )
 
     private class RecordingTodoRepository : TodoRepository {
         val todos = mutableListOf<CreateTodo>()
