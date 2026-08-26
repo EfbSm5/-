@@ -28,6 +28,7 @@ class InMemoryTodoRepository : TodoRepository {
 class AgentExecutionEngine(
     private val todoRepository: TodoRepository = InMemoryTodoRepository(),
     private val toolRegistry: ToolRegistry = ToolRegistry.default(),
+    private val executionJournal: ExecutionJournal = InMemoryExecutionJournal(),
 ) {
     suspend fun execute(
         confirmation: ExecutionConfirmation,
@@ -40,6 +41,23 @@ class AgentExecutionEngine(
         if (plan.actions.isEmpty()) {
             return ToolExecutionResult.Failure("计划没有可执行 Action")
         }
+        val existingRecord = try {
+            executionJournal.read(confirmation.runId)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            return ToolExecutionResult.Failure("执行记录读取失败")
+        }
+        if (existingRecord?.status == ExecutionRunStatus.SUCCEEDED) {
+            return ToolExecutionResult.Success(existingRecord.report)
+        }
+        if (existingRecord?.status == ExecutionRunStatus.RUNNING) {
+            return ToolExecutionResult.Failure(
+                message = "上一次执行状态不确定，请人工确认后再试",
+                report = existingRecord.report,
+            )
+        }
+
         val preparedActions = mutableListOf<PreparedAction>()
         plan.actions.forEachIndexed { index, action ->
             val tool = toolRegistry.resolve(action)
@@ -63,8 +81,48 @@ class AgentExecutionEngine(
         }
 
         val context = ToolExecutionContext()
-        val actionResults = mutableListOf<ActionExecutionRecord>()
+        val actionResults = existingRecord?.report?.actionResults
+            ?.filterNot { it.status == ActionExecutionStatus.RUNNING }
+            ?.toMutableList()
+            ?: mutableListOf()
+        if (!persist(
+                runId = confirmation.runId,
+                status = ExecutionRunStatus.RUNNING,
+                actionResults = actionResults,
+            )
+        ) {
+            return ToolExecutionResult.Failure(
+                message = "执行记录保存失败",
+                report = ToolExecutionReport(actionResults.toList()),
+            )
+        }
+
         preparedActions.forEach { preparedAction ->
+            if (actionResults.any {
+                    it.actionIndex == preparedAction.index &&
+                        it.status == ActionExecutionStatus.SUCCEEDED
+                }
+            ) {
+                return@forEach
+            }
+
+            actionResults.removeAll { it.actionIndex == preparedAction.index }
+            actionResults += ActionExecutionRecord(
+                actionIndex = preparedAction.index,
+                toolName = preparedAction.tool.name,
+                status = ActionExecutionStatus.RUNNING,
+            )
+            if (!persist(
+                    runId = confirmation.runId,
+                    status = ExecutionRunStatus.RUNNING,
+                    actionResults = actionResults,
+                )
+            ) {
+                return ToolExecutionResult.Failure(
+                    message = "执行记录保存失败",
+                    report = ToolExecutionReport(actionResults.toList()),
+                )
+            }
             onActionStarted(preparedAction.index)
             currentCoroutineContext().ensureActive()
             val outcome = try {
@@ -75,26 +133,38 @@ class AgentExecutionEngine(
                 ToolActionOutcome.Failed("${preparedAction.tool.name} Tool 执行失败")
             }
             when (outcome) {
-                is ToolActionOutcome.Staged -> actionResults += ActionExecutionRecord(
-                    actionIndex = preparedAction.index,
-                    toolName = preparedAction.tool.name,
-                    status = ActionExecutionStatus.STAGED,
-                    detail = outcome.detail,
+                is ToolActionOutcome.Staged -> actionResults.replace(
+                    ActionExecutionRecord(
+                        actionIndex = preparedAction.index,
+                        toolName = preparedAction.tool.name,
+                        status = ActionExecutionStatus.STAGED,
+                        detail = outcome.detail,
+                    ),
                 )
 
-                is ToolActionOutcome.Succeeded -> actionResults += ActionExecutionRecord(
-                    actionIndex = preparedAction.index,
-                    toolName = preparedAction.tool.name,
-                    status = ActionExecutionStatus.SUCCEEDED,
-                    detail = outcome.detail,
+                is ToolActionOutcome.Succeeded -> actionResults.replace(
+                    ActionExecutionRecord(
+                        actionIndex = preparedAction.index,
+                        toolName = preparedAction.tool.name,
+                        status = ActionExecutionStatus.SUCCEEDED,
+                        detail = outcome.detail,
+                    ),
                 )
 
                 is ToolActionOutcome.Failed -> {
-                    actionResults += ActionExecutionRecord(
-                        actionIndex = preparedAction.index,
-                        toolName = preparedAction.tool.name,
-                        status = ActionExecutionStatus.FAILED,
-                        detail = outcome.message,
+                    actionResults.replace(
+                        ActionExecutionRecord(
+                            actionIndex = preparedAction.index,
+                            toolName = preparedAction.tool.name,
+                            status = ActionExecutionStatus.FAILED,
+                            detail = outcome.message,
+                        ),
+                    )
+                    persist(
+                        runId = confirmation.runId,
+                        status = ExecutionRunStatus.FAILED,
+                        actionResults = actionResults,
+                        failureMessage = outcome.message,
                     )
                     return ToolExecutionResult.Failure(
                         message = outcome.message,
@@ -111,22 +181,64 @@ class AgentExecutionEngine(
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
+            persist(
+                runId = confirmation.runId,
+                status = ExecutionRunStatus.FAILED,
+                actionResults = actionResults,
+                failureMessage = "待办保存失败",
+            )
             return ToolExecutionResult.Failure(
                 message = "待办保存失败",
                 report = ToolExecutionReport(actionResults.toList()),
             )
         }
-        return ToolExecutionResult.Success(
-            report = ToolExecutionReport(
-                actionResults = actionResults.map { result ->
-                    if (result.status == ActionExecutionStatus.STAGED) {
-                        result.copy(status = ActionExecutionStatus.SUCCEEDED)
-                    } else {
-                        result
-                    }
-                },
+        val completedReport = ToolExecutionReport(
+            actionResults = actionResults.map { result ->
+                if (result.status == ActionExecutionStatus.STAGED) {
+                    result.copy(status = ActionExecutionStatus.SUCCEEDED)
+                } else {
+                    result
+                }
+            },
+        )
+        if (!persist(
+                runId = confirmation.runId,
+                status = ExecutionRunStatus.SUCCEEDED,
+                actionResults = completedReport.actionResults,
+            )
+        ) {
+            return ToolExecutionResult.Failure(
+                message = "执行记录保存失败",
+                report = completedReport,
+            )
+        }
+        return ToolExecutionResult.Success(completedReport)
+    }
+
+    private suspend fun persist(
+        runId: String,
+        status: ExecutionRunStatus,
+        actionResults: List<ActionExecutionRecord>,
+        failureMessage: String? = null,
+    ): Boolean = try {
+        executionJournal.write(
+            ExecutionRecord(
+                runId = runId,
+                status = status,
+                report = ToolExecutionReport(actionResults.toList()),
+                failureMessage = failureMessage,
             ),
         )
+        true
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun MutableList<ActionExecutionRecord>.replace(record: ActionExecutionRecord) {
+        removeAll { it.actionIndex == record.actionIndex }
+        add(record)
     }
 
     private data class PreparedAction(

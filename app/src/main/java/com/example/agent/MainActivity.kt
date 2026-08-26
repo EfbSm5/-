@@ -48,6 +48,7 @@ import com.example.agent.agent.planning.CreateTodoTool
 import com.example.agent.agent.planning.DemoAgentModelClient
 import com.example.agent.agent.planning.DeepSeekRelayAgentModelClient
 import com.example.agent.agent.planning.FileTodoRepository
+import com.example.agent.agent.planning.FileExecutionJournal
 import com.example.agent.agent.planning.LiteRtLmAgentModelClient
 import com.example.agent.agent.planning.OpenAppTool
 import com.example.agent.agent.planning.OnDeviceAcceleration
@@ -109,6 +110,9 @@ class MainActivity : ComponentActivity() {
                     File(applicationContext.filesDir, "agent_todos.json"),
                 ),
                 toolRegistry = toolRegistry,
+                executionJournal = FileExecutionJournal(
+                    File(applicationContext.filesDir, "agent_execution_journal.json"),
+                ),
             ),
         )
     }

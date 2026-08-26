@@ -301,6 +301,82 @@ class AgentExecutionEngineTest {
         assertTrue(launcher.requestedPackages.isEmpty())
     }
 
+    @Test
+    fun rerunningSucceededConfirmation_skipsToolExecution() = runTest {
+        val launcher = RecordingAppLauncher(
+            preflightResult = AppLaunchPreflight.Ready,
+            launchResult = AppLaunchResult.Launched,
+        )
+        val journal = InMemoryExecutionJournal()
+        val engine = AgentExecutionEngine(
+            todoRepository = RecordingTodoRepository(),
+            toolRegistry = registry(launcher),
+            executionJournal = journal,
+        )
+        val plan = AgentPlan(
+            goal = "打开设置",
+            actions = listOf(OpenApp("com.android.settings")),
+        )
+        val confirmation = ExecutionConfirmation.issue(plan)
+
+        assertTrue(engine.execute(confirmation) is ToolExecutionResult.Success)
+        assertTrue(engine.execute(confirmation) is ToolExecutionResult.Success)
+
+        assertEquals(listOf("com.android.settings"), launcher.requestedPackages)
+    }
+
+    @Test
+    fun runningRecord_blocksAutomaticReplay() = runTest {
+        val launcher = RecordingAppLauncher(
+            preflightResult = AppLaunchPreflight.Ready,
+            launchResult = AppLaunchResult.Launched,
+        )
+        val journal = InMemoryExecutionJournal()
+        val plan = AgentPlan(
+            goal = "打开设置",
+            actions = listOf(OpenApp("com.android.settings")),
+        )
+        val confirmation = ExecutionConfirmation.issue(plan)
+        journal.write(
+            ExecutionRecord(
+                runId = confirmation.runId,
+                status = ExecutionRunStatus.RUNNING,
+                report = ToolExecutionReport(
+                    actionResults = listOf(
+                        ActionExecutionRecord(
+                            actionIndex = 0,
+                            toolName = AgentToolNames.OPEN_APP,
+                            status = ActionExecutionStatus.RUNNING,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val result = AgentExecutionEngine(
+            todoRepository = RecordingTodoRepository(),
+            toolRegistry = registry(launcher),
+            executionJournal = journal,
+        ).execute(confirmation)
+
+        assertEquals(
+            ToolExecutionResult.Failure(
+                message = "上一次执行状态不确定，请人工确认后再试",
+                report = ToolExecutionReport(
+                    actionResults = listOf(
+                        ActionExecutionRecord(
+                            actionIndex = 0,
+                            toolName = AgentToolNames.OPEN_APP,
+                            status = ActionExecutionStatus.RUNNING,
+                        ),
+                    ),
+                ),
+            ),
+            result,
+        )
+        assertTrue(launcher.requestedPackages.isEmpty())
+    }
+
     private fun registry(launcher: AppLauncher): ToolRegistry = ToolRegistry(
         tools = listOf(CreateTodoTool(), OpenAppTool(launcher)),
     )

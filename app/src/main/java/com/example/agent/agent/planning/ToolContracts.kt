@@ -2,6 +2,7 @@ package com.example.agent.agent.planning
 
 import com.example.agent.agent.model.AgentAction
 import com.example.agent.agent.model.CreateTodo
+import kotlinx.serialization.Serializable
 
 object AgentToolNames {
     const val CREATE_TODO = "create_todo"
@@ -21,12 +22,15 @@ data class ToolDescriptor(
     val constraints: List<String> = emptyList(),
 )
 
+@Serializable
 enum class ActionExecutionStatus {
+    RUNNING,
     STAGED,
     SUCCEEDED,
     FAILED,
 }
 
+@Serializable
 data class ActionExecutionRecord(
     val actionIndex: Int,
     val toolName: String,
@@ -34,6 +38,7 @@ data class ActionExecutionRecord(
     val detail: String? = null,
 )
 
+@Serializable
 data class ToolExecutionReport(
     val actionResults: List<ActionExecutionRecord> = emptyList(),
 )

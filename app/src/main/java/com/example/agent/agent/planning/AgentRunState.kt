@@ -4,6 +4,8 @@ import com.example.agent.agent.model.AgentPlan
 import com.example.agent.agent.model.AskUser
 
 class ExecutionConfirmation private constructor(internal val plan: AgentPlan) {
+    internal val runId: String = newExecutionRunId()
+
     companion object {
         internal fun issue(plan: AgentPlan): ExecutionConfirmation = ExecutionConfirmation(plan)
     }
