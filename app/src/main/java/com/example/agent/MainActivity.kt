@@ -46,6 +46,7 @@ import com.example.agent.agent.planning.AgentRunState
 import com.example.agent.agent.planning.AgentToolNames
 import com.example.agent.agent.planning.CreateTodoTool
 import com.example.agent.agent.planning.DemoAgentModelClient
+import com.example.agent.agent.planning.DeepSeekRelayAgentModelClient
 import com.example.agent.agent.planning.FileTodoRepository
 import com.example.agent.agent.planning.LiteRtLmAgentModelClient
 import com.example.agent.agent.planning.OpenAppTool
@@ -76,15 +77,25 @@ class MainActivity : ComponentActivity() {
         )
     }
     private val modelClient by lazy {
-        if (onDeviceModelStore.isInstalled()) {
-            LiteRtLmAgentModelClient(
+        when (BuildConfig.AGENT_MODEL_BACKEND) {
+            "deepseek_relay" -> DeepSeekRelayAgentModelClient(
                 context = applicationContext,
-                modelFile = onDeviceModelStore.modelFile,
-                backends = OnDeviceAcceleration.GPU_PREFERRED.backends(applicationContext),
                 toolRegistry = toolRegistry,
+                baseUrl = BuildConfig.AGENT_DEEPSEEK_RELAY_BASE_URL,
             )
-        } else {
-            DemoAgentModelClient()
+
+            "local_litert" -> if (onDeviceModelStore.isInstalled()) {
+                LiteRtLmAgentModelClient(
+                    context = applicationContext,
+                    modelFile = onDeviceModelStore.modelFile,
+                    backends = OnDeviceAcceleration.GPU_PREFERRED.backends(applicationContext),
+                    toolRegistry = toolRegistry,
+                )
+            } else {
+                DemoAgentModelClient()
+            }
+
+            else -> DemoAgentModelClient()
         }
     }
 
@@ -111,11 +122,7 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     AgentScreen(
                         uiState = uiState,
-                        modelLabel = if (onDeviceModelStore.isInstalled()) {
-                            "端侧 LiteRT-LM 模型"
-                        } else {
-                            "本地 Demo 模型；模型文件未安装"
-                        },
+                        modelLabel = modelLabel(),
                         onSubmit = plannerViewModel::submit,
                         onAnswer = plannerViewModel::answerClarification,
                         onConfirmExecution = plannerViewModel::confirmExecution,
@@ -125,6 +132,17 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun modelLabel(): String = when (BuildConfig.AGENT_MODEL_BACKEND) {
+        "deepseek_relay" -> "DeepSeek Relay 模型"
+        "local_litert" -> if (onDeviceModelStore.isInstalled()) {
+            "端侧 LiteRT-LM 模型"
+        } else {
+            "本地 Demo 模型；模型文件未安装"
+        }
+
+        else -> "本地 Demo 模型；未知 backend"
     }
 }
 

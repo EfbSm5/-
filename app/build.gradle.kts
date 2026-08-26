@@ -1,5 +1,14 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
+val agentModelBackend = providers.gradleProperty("agentModelBackend")
+    .orElse("local_litert")
+    .get()
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+val agentRelayPort = providers.gradleProperty("agentRelayPort")
+    .orElse("8765")
+    .get()
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -17,6 +26,12 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+        buildConfigField("String", "AGENT_MODEL_BACKEND", "\"$agentModelBackend\"")
+        buildConfigField(
+            "String",
+            "AGENT_DEEPSEEK_RELAY_BASE_URL",
+            "\"http://localhost:$agentRelayPort\"",
+        )
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -36,6 +51,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
