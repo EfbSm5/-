@@ -17,19 +17,22 @@ class RelayHandler(BaseHTTPRequestHandler):
         if self.path != "/chat/completions":
             self._send_json(404, {"error": "not_found"})
             return
-        if not API_KEY:
+        authorization = self.headers.get("Authorization") or (
+            f"Bearer {API_KEY}" if API_KEY else ""
+        )
+        if not authorization:
             self._send_json(500, {"error": "DEEPSEEK_API_KEY is not configured"})
             return
 
         try:
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             payload = json.loads(body)
-            payload["model"] = MODEL
+            payload.setdefault("model", MODEL)
             request = urllib.request.Request(
                 "https://api.deepseek.com/chat/completions",
                 data=json.dumps(payload).encode("utf-8"),
                 headers={
-                    "Authorization": f"Bearer {API_KEY}",
+                    "Authorization": authorization,
                     "Content-Type": "application/json",
                 },
                 method="POST",
@@ -59,7 +62,5 @@ class RelayHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    if not API_KEY:
-        raise SystemExit("DEEPSEEK_API_KEY is not configured")
     print(f"DeepSeek relay listening on http://{HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), RelayHandler).serve_forever()
