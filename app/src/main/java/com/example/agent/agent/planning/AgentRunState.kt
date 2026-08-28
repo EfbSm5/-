@@ -3,11 +3,30 @@ package com.example.agent.agent.planning
 import com.example.agent.agent.model.AgentPlan
 import com.example.agent.agent.model.AskUser
 
-class ExecutionConfirmation private constructor(internal val plan: AgentPlan) {
-    internal val runId: String = newExecutionRunId()
+class ExecutionConfirmation private constructor(
+    internal val plan: AgentPlan,
+    internal val runId: String,
+    internal val ownerToken: String,
+    internal val isRecovery: Boolean,
+) {
 
     companion object {
-        internal fun issue(plan: AgentPlan): ExecutionConfirmation = ExecutionConfirmation(plan)
+        internal fun issue(plan: AgentPlan): ExecutionConfirmation = ExecutionConfirmation(
+            plan = plan,
+            runId = newExecutionRunId(),
+            ownerToken = newExecutionRunId(),
+            isRecovery = false,
+        )
+
+        internal fun recover(execution: RecoverableExecution): ExecutionConfirmation {
+            val plan = requireNotNull(execution.plan) { "缺少可恢复的计划快照" }
+            return ExecutionConfirmation(
+                plan = plan,
+                runId = execution.record.runId,
+                ownerToken = newExecutionRunId(),
+                isRecovery = true,
+            )
+        }
     }
 }
 
@@ -32,6 +51,14 @@ fun AgentPlan.assessReadiness(): PlanReadiness {
 
 sealed interface AgentRunState {
     data object Idle : AgentRunState
+
+    data object RecoveryScanning : AgentRunState
+
+    data class RecoveryRequired(
+        val executions: List<RecoverableExecution>,
+        val message: String? = null,
+        val busyRunId: String? = null,
+    ) : AgentRunState
 
     data class Planning(val request: String) : AgentRunState
 

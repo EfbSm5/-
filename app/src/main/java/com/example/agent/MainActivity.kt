@@ -131,6 +131,8 @@ class MainActivity : ComponentActivity() {
                         onAnswer = plannerViewModel::answerClarification,
                         onConfirmExecution = plannerViewModel::confirmExecution,
                         onRetry = plannerViewModel::retry,
+                        onResumeRecovery = plannerViewModel::resumeRecovery,
+                        onDiscardRecovery = plannerViewModel::discardRecovery,
                         modifier = Modifier.padding(innerPadding),
                     )
                 }
@@ -157,12 +159,16 @@ fun AgentScreen(
     onAnswer: (String) -> Unit,
     onConfirmExecution: () -> Unit,
     onRetry: () -> Unit,
+    onResumeRecovery: (String) -> Unit,
+    onDiscardRecovery: (String) -> Unit,
     modifier: Modifier = Modifier,
     modelLabel: String = "本地 Demo 模型",
 ) {
     var request by rememberSaveable { mutableStateOf("") }
     val isBusy = uiState is AgentRunState.Planning || uiState is AgentRunState.Executing
     val needsClarification = uiState is AgentRunState.NeedsClarification
+    val recoveryRequired = uiState is AgentRunState.RecoveryRequired
+    val recoveryScanning = uiState is AgentRunState.RecoveryScanning
 
     LaunchedEffect(needsClarification) {
         if (needsClarification) {
@@ -186,7 +192,7 @@ fun AgentScreen(
             value = request,
             onValueChange = { request = it },
             modifier = Modifier.fillMaxWidth(),
-            enabled = !isBusy,
+            enabled = !isBusy && !recoveryRequired && !recoveryScanning,
             label = {
                 Text(if (needsClarification) "补充信息" else "你想让助手完成什么？")
             },
@@ -196,7 +202,7 @@ fun AgentScreen(
             onClick = {
                 if (needsClarification) onAnswer(request) else onSubmit(request)
             },
-            enabled = request.isNotBlank() && !isBusy,
+            enabled = request.isNotBlank() && !isBusy && !recoveryRequired && !recoveryScanning,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text(if (needsClarification) "继续规划" else "生成计划")
@@ -204,6 +210,55 @@ fun AgentScreen(
 
         when (val state = uiState) {
             AgentRunState.Idle -> Text("等待输入目标")
+            AgentRunState.RecoveryScanning -> Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                CircularProgressIndicator()
+                Text("正在检查未完成任务…")
+            }
+
+            is AgentRunState.RecoveryRequired -> Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("发现未完成任务", style = MaterialTheme.typography.titleMedium)
+                Text("这些任务可能已经产生外部副作用，请确认后再恢复。")
+                state.message?.let { message ->
+                    Text(message, color = MaterialTheme.colorScheme.error)
+                }
+                state.executions.forEach { execution ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(execution.plan?.goal ?: "无法解析的旧任务")
+                            Text("状态：${execution.record.status}")
+                            execution.plan?.let { plan ->
+                                RecoveryPlanActions(
+                                    plan = plan,
+                                    report = execution.record.report,
+                                )
+                            } ?: run {
+                                Text("该任务缺少计划快照，只能放弃。")
+                            }
+                            if (execution.plan != null) {
+                                Button(onClick = {
+                                    onResumeRecovery(execution.record.runId)
+                                }, enabled = state.busyRunId == null) {
+                                    Text("确认恢复")
+                                }
+                            }
+                            TextButton(
+                                onClick = { onDiscardRecovery(execution.record.runId) },
+                                enabled = state.busyRunId == null,
+                            ) {
+                                Text("放弃任务")
+                            }
+                        }
+                    }
+                }
+            }
+
             is AgentRunState.Planning -> Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 CircularProgressIndicator()
                 Text("正在生成计划…")
@@ -268,6 +323,28 @@ private fun ToolExecutionReport.succeededCount(toolName: String): Int = actionRe
 }
 
 @Composable
+private fun RecoveryPlanActions(
+    plan: AgentPlan,
+    report: ToolExecutionReport,
+) {
+    Text("计划 Actions")
+    plan.actions.forEachIndexed { index, action ->
+        val actionResult = report.actionResults.firstOrNull { it.actionIndex == index }
+        Text(
+            "${index + 1}. ${action.describe()} · " +
+                (actionResult?.status?.displayName() ?: "待执行"),
+        )
+    }
+}
+
+private fun ActionExecutionStatus.displayName(): String = when (this) {
+    ActionExecutionStatus.RUNNING -> "执行中断"
+    ActionExecutionStatus.STAGED -> "已暂存，未确认提交"
+    ActionExecutionStatus.SUCCEEDED -> "已完成"
+    ActionExecutionStatus.FAILED -> "失败"
+}
+
+@Composable
 private fun PlanCard(plan: AgentPlan) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -305,6 +382,8 @@ private fun AgentScreenPreview() {
             onAnswer = {},
             onConfirmExecution = {},
             onRetry = {},
+            onResumeRecovery = {},
+            onDiscardRecovery = {},
         )
     }
 }

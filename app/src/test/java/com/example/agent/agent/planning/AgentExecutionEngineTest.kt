@@ -377,6 +377,99 @@ class AgentExecutionEngineTest {
         assertTrue(launcher.requestedPackages.isEmpty())
     }
 
+    @Test
+    fun recoveryConfirmation_replaysRunningActionAfterExplicitApproval() = runTest {
+        val launcher = RecordingAppLauncher(
+            preflightResult = AppLaunchPreflight.Ready,
+            launchResult = AppLaunchResult.Launched,
+        )
+        val journal = InMemoryExecutionJournal()
+        val plan = AgentPlan(
+            goal = "打开设置",
+            actions = listOf(OpenApp("com.android.settings")),
+        )
+        val confirmation = ExecutionConfirmation.issue(plan)
+        val record = ExecutionRecord(
+            runId = confirmation.runId,
+            status = ExecutionRunStatus.RUNNING,
+            report = ToolExecutionReport(
+                actionResults = listOf(
+                    ActionExecutionRecord(
+                        actionIndex = 0,
+                        toolName = AgentToolNames.OPEN_APP,
+                        status = ActionExecutionStatus.RUNNING,
+                    ),
+                ),
+            ),
+            plan = PersistedAgentPlan.fromDomain(plan),
+        )
+        journal.write(record)
+
+        val result = AgentExecutionEngine(
+            todoRepository = RecordingTodoRepository(),
+            toolRegistry = registry(launcher),
+            executionJournal = journal,
+        ).execute(
+            ExecutionConfirmation.recover(
+                RecoverableExecution(record = record, plan = plan),
+            ),
+        )
+
+        assertTrue(result is ToolExecutionResult.Success)
+        assertEquals(listOf("com.android.settings"), launcher.requestedPackages)
+    }
+
+    @Test
+    fun recovery_skipsSuccessfulActionBeforeResolvingItsTool() = runTest {
+        val repository = RecordingTodoRepository()
+        val journal = InMemoryExecutionJournal()
+        val plan = AgentPlan(
+            goal = "打开设置并创建待办",
+            actions = listOf(
+                OpenApp("com.android.settings"),
+                CreateTodo("投递 Android 岗位", dueAt = null),
+            ),
+        )
+        val record = ExecutionRecord(
+            runId = "run-skip-preflight",
+            status = ExecutionRunStatus.FAILED,
+            report = ToolExecutionReport(
+                actionResults = listOf(
+                    ActionExecutionRecord(
+                        actionIndex = 0,
+                        toolName = AgentToolNames.OPEN_APP,
+                        status = ActionExecutionStatus.SUCCEEDED,
+                        detail = "com.android.settings",
+                    ),
+                    ActionExecutionRecord(
+                        actionIndex = 1,
+                        toolName = AgentToolNames.CREATE_TODO,
+                        status = ActionExecutionStatus.FAILED,
+                        detail = "之前失败",
+                    ),
+                ),
+            ),
+            plan = PersistedAgentPlan.fromDomain(plan),
+        )
+        journal.write(record)
+
+        val result = AgentExecutionEngine(
+            todoRepository = repository,
+            toolRegistry = ToolRegistry(listOf(CreateTodoTool())),
+            executionJournal = journal,
+        ).execute(
+            ExecutionConfirmation.recover(
+                RecoverableExecution(record = record, plan = plan),
+            ),
+        )
+
+        assertTrue(result is ToolExecutionResult.Success)
+        assertEquals(
+            listOf(CreateTodo("投递 Android 岗位", dueAt = null)),
+            repository.todos,
+        )
+    }
+
     private fun registry(launcher: AppLauncher): ToolRegistry = ToolRegistry(
         tools = listOf(CreateTodoTool(), OpenAppTool(launcher)),
     )

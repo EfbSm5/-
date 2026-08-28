@@ -3,6 +3,7 @@ package com.example.agent.agent.planning
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.agent.agent.model.AgentPlan
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -19,18 +20,36 @@ class AgentPlannerViewModel(
     private val executionEngine: AgentExecutionEngine = AgentExecutionEngine(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : ViewModel() {
-    private val _uiState = MutableStateFlow<AgentRunState>(AgentRunState.Idle)
+    private val _uiState = MutableStateFlow<AgentRunState>(AgentRunState.RecoveryScanning)
     val uiState: StateFlow<AgentRunState> = _uiState.asStateFlow()
 
     private val stateLock = Any()
     private var planningJob: Job? = null
     private var lastRequest: String? = null
     private var requestGeneration = 0L
+    private var pendingRequest: String? = null
+
+    init {
+        loadRecoverableExecutions()
+    }
 
     fun submit(userRequest: String) {
         val normalizedRequest = userRequest.trim()
         val generation: Long
         synchronized(stateLock) {
+            if (_uiState.value is AgentRunState.RecoveryScanning) {
+                if (normalizedRequest.isEmpty()) {
+                    pendingRequest = null
+                    _uiState.value = AgentRunState.Failure(
+                        message = "请输入你想让助手完成的目标",
+                        canRetry = false,
+                    )
+                } else {
+                    pendingRequest = normalizedRequest
+                }
+                return
+            }
+            if (_uiState.value is AgentRunState.RecoveryRequired) return
             planningJob?.cancel()
             generation = ++requestGeneration
             if (normalizedRequest.isEmpty()) {
@@ -95,43 +114,58 @@ class AgentPlannerViewModel(
     }
 
     fun confirmExecution() {
-        val generation: Long
         synchronized(stateLock) {
             val confirmationState = _uiState.value as? AgentRunState.AwaitingConfirmation ?: return
-            val plan = confirmationState.plan
-            val confirmation = confirmationState.confirmation
+            startExecutionLocked(confirmationState.plan, confirmationState.confirmation)
+        }
+    }
+
+    fun resumeRecovery(runId: String) {
+        synchronized(stateLock) {
+            val recoveryState = _uiState.value as? AgentRunState.RecoveryRequired ?: return
+            val execution = recoveryState.executions.firstOrNull { it.record.runId == runId }
+                ?: return
+            val plan = execution.plan ?: return
+            startExecutionLocked(plan, ExecutionConfirmation.recover(execution))
+        }
+    }
+
+    fun discardRecovery(runId: String) {
+        val generation: Long
+        synchronized(stateLock) {
+            val recoveryState = _uiState.value as? AgentRunState.RecoveryRequired ?: return
+            if (recoveryState.executions.none { it.record.runId == runId }) return
             planningJob?.cancel()
             generation = ++requestGeneration
-            _uiState.value = AgentRunState.Executing(plan, actionIndex = 0)
-            planningJob = viewModelScope.launch(dispatcher) {
-                val result = try {
-                    executionEngine.execute(confirmation) { actionIndex ->
-                        synchronized(stateLock) {
-                            if (generation == requestGeneration) {
-                                _uiState.value = AgentRunState.Executing(plan, actionIndex)
-                            }
-                        }
-                    }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (_: Exception) {
-                    ToolExecutionResult.Failure("Tool 执行失败")
-                }
-                currentCoroutineContext().ensureActive()
+            _uiState.value = recoveryState.copy(busyRunId = runId, message = null)
+        }
+        viewModelScope.launch(dispatcher) {
+            try {
+                val deleted = executionEngine.discardExecution(runId)
+                val remaining = executionEngine.listRecoverableExecutions()
                 synchronized(stateLock) {
                     if (generation == requestGeneration) {
-                        _uiState.value = when (result) {
-                            is ToolExecutionResult.Success -> AgentRunState.Completed(
-                                plan = plan,
-                                report = result.report,
+                        _uiState.value = if (!deleted) {
+                            AgentRunState.RecoveryRequired(
+                                executions = remaining,
+                                message = "任务正在执行，暂时不能放弃",
                             )
-
-                            is ToolExecutionResult.Failure -> AgentRunState.Failure(
-                                message = result.message,
-                                canRetry = false,
-                                report = result.report,
-                            )
+                        } else if (remaining.isEmpty()) {
+                            AgentRunState.Idle
+                        } else {
+                            AgentRunState.RecoveryRequired(remaining)
                         }
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                synchronized(stateLock) {
+                    if (generation == requestGeneration) {
+                        _uiState.value = AgentRunState.Failure(
+                            message = "放弃任务失败",
+                            canRetry = false,
+                        )
                     }
                 }
             }
@@ -196,6 +230,113 @@ class AgentPlannerViewModel(
                 planner = planner,
                 executionEngine = executionEngine,
             ) as T
+        }
+    }
+
+    private fun loadRecoverableExecutions() {
+        val generation = synchronized(stateLock) { requestGeneration }
+        viewModelScope.launch(dispatcher) {
+            try {
+                val executions = executionEngine.listRecoverableExecutions()
+                var requestToStart: String? = null
+                synchronized(stateLock) {
+                    if (generation == requestGeneration &&
+                        _uiState.value is AgentRunState.RecoveryScanning
+                    ) {
+                        if (executions.isNotEmpty()) {
+                            pendingRequest = null
+                            _uiState.value = AgentRunState.RecoveryRequired(executions)
+                        } else {
+                            _uiState.value = AgentRunState.Idle
+                            requestToStart = pendingRequest
+                            pendingRequest = null
+                        }
+                    }
+                }
+                requestToStart?.let(::submit)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                synchronized(stateLock) {
+                    if (generation == requestGeneration &&
+                        _uiState.value is AgentRunState.RecoveryScanning
+                    ) {
+                        _uiState.value = AgentRunState.Failure(
+                            message = "执行记录读取失败",
+                            canRetry = false,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startExecutionLocked(
+        plan: AgentPlan,
+        confirmation: ExecutionConfirmation,
+    ) {
+        planningJob?.cancel()
+        val generation = ++requestGeneration
+        _uiState.value = AgentRunState.Executing(plan, actionIndex = 0)
+        planningJob = viewModelScope.launch(dispatcher) {
+            val result = try {
+                executionEngine.execute(confirmation) { actionIndex ->
+                    synchronized(stateLock) {
+                        if (generation == requestGeneration) {
+                            _uiState.value = AgentRunState.Executing(plan, actionIndex)
+                        }
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                ToolExecutionResult.Failure("Tool 执行失败")
+            }
+            currentCoroutineContext().ensureActive()
+            val recoveryExecutions = if (result is ToolExecutionResult.Failure &&
+                confirmation.isRecovery
+            ) {
+                try {
+                    executionEngine.listRecoverableExecutions()
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            } else {
+                emptyList()
+            }
+            synchronized(stateLock) {
+                if (generation == requestGeneration) {
+                    _uiState.value = when (result) {
+                        is ToolExecutionResult.Success -> AgentRunState.Completed(
+                            plan = plan,
+                            report = result.report,
+                        )
+
+                        is ToolExecutionResult.Failure -> if (confirmation.isRecovery) {
+                            if (recoveryExecutions.any { it.record.runId == confirmation.runId }) {
+                                AgentRunState.RecoveryRequired(
+                                    executions = recoveryExecutions,
+                                    message = result.message,
+                                )
+                            } else {
+                                AgentRunState.Failure(
+                                    message = result.message,
+                                    canRetry = false,
+                                    report = result.report,
+                                )
+                            }
+                        } else {
+                            AgentRunState.Failure(
+                                message = result.message,
+                                canRetry = false,
+                                report = result.report,
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

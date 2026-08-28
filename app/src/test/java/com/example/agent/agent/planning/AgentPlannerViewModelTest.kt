@@ -324,6 +324,189 @@ class AgentPlannerViewModelTest {
         }
     }
 
+    @Test
+    fun startup_exposesRecoverableExecution() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+        try {
+            val journal = InMemoryExecutionJournal()
+            val plan = AgentPlan(
+                goal = "恢复投递任务",
+                actions = listOf(CreateTodo("投递 Android 岗位", dueAt = null)),
+            )
+            journal.write(
+                ExecutionRecord(
+                    runId = "run-recovery",
+                    status = ExecutionRunStatus.RUNNING,
+                    report = ToolExecutionReport(),
+                    plan = PersistedAgentPlan.fromDomain(plan),
+                ),
+            )
+
+            val viewModel = AgentPlannerViewModel(
+                planner = AgentPlanner(FakeAgentModelClient(AgentModelResult.Success(""))),
+                executionEngine = AgentExecutionEngine(executionJournal = journal),
+                dispatcher = dispatcher,
+            )
+            advanceUntilIdle()
+
+            assertEquals(
+                AgentRunState.RecoveryRequired(
+                    executions = listOf(
+                        RecoverableExecution(
+                            record = journal.read("run-recovery")!!,
+                            plan = plan,
+                        ),
+                    ),
+                ),
+                viewModel.uiState.value,
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun discardRecovery_returnsToIdle() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+        try {
+            val journal = InMemoryExecutionJournal()
+            val plan = AgentPlan(
+                goal = "放弃任务",
+                actions = listOf(CreateTodo("测试待办", dueAt = null)),
+            )
+            journal.write(
+                ExecutionRecord(
+                    runId = "run-discard",
+                    status = ExecutionRunStatus.FAILED,
+                    report = ToolExecutionReport(),
+                    plan = PersistedAgentPlan.fromDomain(plan),
+                ),
+            )
+            val viewModel = AgentPlannerViewModel(
+                planner = AgentPlanner(FakeAgentModelClient(AgentModelResult.Success(""))),
+                executionEngine = AgentExecutionEngine(executionJournal = journal),
+                dispatcher = dispatcher,
+            )
+            advanceUntilIdle()
+
+            viewModel.discardRecovery("run-discard")
+            advanceUntilIdle()
+
+            assertEquals(AgentRunState.Idle, viewModel.uiState.value)
+            assertEquals(null, journal.read("run-discard"))
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun resumeRecovery_executesStoredPlan() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+        try {
+            val journal = InMemoryExecutionJournal()
+            val plan = AgentPlan(
+                goal = "恢复投递任务",
+                actions = listOf(CreateTodo("投递 Android 岗位", dueAt = null)),
+            )
+            journal.write(
+                ExecutionRecord(
+                    runId = "run-resume",
+                    status = ExecutionRunStatus.RUNNING,
+                    report = ToolExecutionReport(),
+                    plan = PersistedAgentPlan.fromDomain(plan),
+                ),
+            )
+            val viewModel = AgentPlannerViewModel(
+                planner = AgentPlanner(FakeAgentModelClient(AgentModelResult.Success(""))),
+                executionEngine = AgentExecutionEngine(executionJournal = journal),
+                dispatcher = dispatcher,
+            )
+            advanceUntilIdle()
+
+            viewModel.resumeRecovery("run-resume")
+            advanceUntilIdle()
+
+            assertTrue(viewModel.uiState.value is AgentRunState.Completed)
+            assertEquals(
+                ExecutionRunStatus.SUCCEEDED,
+                journal.read("run-resume")?.status,
+            )
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun submitWaitsForRecoveryScanBeforePlanning() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+        try {
+            val viewModel = AgentPlannerViewModel(
+                planner = AgentPlanner(
+                    FakeAgentModelClient(
+                        AgentModelResult.Success(
+                            """{"goal":"测试","actions":[{"type":"create_todo","title":"测试待办"}]}""",
+                        ),
+                    ),
+                ),
+                dispatcher = dispatcher,
+            )
+
+            assertEquals(AgentRunState.RecoveryScanning, viewModel.uiState.value)
+            viewModel.submit("测试")
+            assertEquals(AgentRunState.RecoveryScanning, viewModel.uiState.value)
+
+            advanceUntilIdle()
+
+            assertTrue(viewModel.uiState.value is AgentRunState.AwaitingConfirmation)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun failedRecovery_returnsToRecoveryStateWithDiscardOption() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+        try {
+            val journal = InMemoryExecutionJournal()
+            val plan = AgentPlan(
+                goal = "恢复失败任务",
+                actions = listOf(CreateTodo("测试待办", dueAt = null)),
+            )
+            journal.write(
+                ExecutionRecord(
+                    runId = "run-failed-recovery",
+                    status = ExecutionRunStatus.RUNNING,
+                    report = ToolExecutionReport(),
+                    plan = PersistedAgentPlan.fromDomain(plan),
+                ),
+            )
+            val viewModel = AgentPlannerViewModel(
+                planner = AgentPlanner(FakeAgentModelClient(AgentModelResult.Success(""))),
+                executionEngine = AgentExecutionEngine(
+                    todoRepository = FailingTodoRepository(),
+                    executionJournal = journal,
+                ),
+                dispatcher = dispatcher,
+            )
+            advanceUntilIdle()
+
+            viewModel.resumeRecovery("run-failed-recovery")
+            advanceUntilIdle()
+
+            val state = viewModel.uiState.value
+            assertTrue(state is AgentRunState.RecoveryRequired)
+            assertEquals("待办保存失败", (state as AgentRunState.RecoveryRequired).message)
+            assertEquals("run-failed-recovery", state.executions.single().record.runId)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     private fun createViewModel(
         dispatcher: kotlinx.coroutines.CoroutineDispatcher,
         modelResult: AgentModelResult,

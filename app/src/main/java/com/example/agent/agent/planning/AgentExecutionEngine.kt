@@ -1,9 +1,14 @@
 package com.example.agent.agent.planning
 
+import com.example.agent.agent.model.AgentAction
+import com.example.agent.agent.model.AgentPlan
+import com.example.agent.agent.model.AskUser
 import com.example.agent.agent.model.CreateTodo
+import com.example.agent.agent.model.OpenApp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 
 interface TodoRepository {
     suspend fun add(todo: CreateTodo) = addAll(listOf(todo))
@@ -41,7 +46,10 @@ class AgentExecutionEngine(
         if (plan.actions.isEmpty()) {
             return ToolExecutionResult.Failure("计划没有可执行 Action")
         }
-        val existingRecord = try {
+        currentCoroutineContext().job.invokeOnCompletion {
+            executionJournal.release(confirmation.runId, confirmation.ownerToken)
+        }
+        var existingRecord = try {
             executionJournal.read(confirmation.runId)
         } catch (error: CancellationException) {
             throw error
@@ -51,17 +59,60 @@ class AgentExecutionEngine(
         if (existingRecord?.status == ExecutionRunStatus.SUCCEEDED) {
             return ToolExecutionResult.Success(existingRecord.report)
         }
-        if (existingRecord?.status == ExecutionRunStatus.RUNNING) {
+        var claimedRecovery = false
+        if (confirmation.isRecovery) {
+            existingRecord = try {
+                executionJournal.claim(confirmation.runId, confirmation.ownerToken)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                return ToolExecutionResult.Failure("执行记录占用失败")
+            } ?: return ToolExecutionResult.Failure("恢复任务不存在或已被其他执行者占用")
+            claimedRecovery = true
+        } else if (existingRecord?.status == ExecutionRunStatus.RUNNING ||
+            existingRecord?.status == ExecutionRunStatus.RECOVERING
+        ) {
             return ToolExecutionResult.Failure(
                 message = "上一次执行状态不确定，请人工确认后再试",
                 report = existingRecord.report,
             )
         }
 
+        suspend fun failAfterClaim(
+            message: String,
+            report: ToolExecutionReport = existingRecord?.report ?: ToolExecutionReport(),
+        ): ToolExecutionResult.Failure {
+            if (claimedRecovery) {
+                persist(
+                    runId = confirmation.runId,
+                    plan = plan,
+                    ownerToken = confirmation.ownerToken,
+                    version = existingRecord?.version ?: 0L,
+                    status = ExecutionRunStatus.FAILED,
+                    actionResults = report.actionResults,
+                    failureMessage = message,
+                )
+            }
+            return ToolExecutionResult.Failure(message = message, report = report)
+        }
+
+        val successfulActionRecords = existingRecord?.report?.actionResults
+            ?.filter { it.status == ActionExecutionStatus.SUCCEEDED }
+            .orEmpty()
+        successfulActionRecords.forEach { record ->
+            val action = plan.actions.getOrNull(record.actionIndex)
+                ?: return failAfterClaim("执行记录与计划不一致")
+            if (action.expectedToolName() != record.toolName) {
+                return failAfterClaim("执行记录与计划不一致")
+            }
+        }
+        val completedActionIndices = successfulActionRecords.map { it.actionIndex }.toSet()
+
         val preparedActions = mutableListOf<PreparedAction>()
         plan.actions.forEachIndexed { index, action ->
+            if (index in completedActionIndices) return@forEachIndexed
             val tool = toolRegistry.resolve(action)
-                ?: return ToolExecutionResult.Failure(
+                ?: return failAfterClaim(
                     "没有注册可以执行 actions[$index] 的 Tool",
                 )
             val preflight = try {
@@ -70,11 +121,11 @@ class AgentExecutionEngine(
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
-                return ToolExecutionResult.Failure("${tool.name} Tool 预检失败")
+                return failAfterClaim("${tool.name} Tool 预检失败")
             }
             when (preflight) {
                 ToolPreflightResult.Ready -> preparedActions += PreparedAction(index, action, tool)
-                is ToolPreflightResult.Rejected -> return ToolExecutionResult.Failure(
+                is ToolPreflightResult.Rejected -> return failAfterClaim(
                     preflight.message,
                 )
             }
@@ -87,11 +138,14 @@ class AgentExecutionEngine(
             ?: mutableListOf()
         if (!persist(
                 runId = confirmation.runId,
+                plan = plan,
+                ownerToken = confirmation.ownerToken,
+                version = existingRecord?.version ?: 0L,
                 status = ExecutionRunStatus.RUNNING,
                 actionResults = actionResults,
             )
         ) {
-            return ToolExecutionResult.Failure(
+            return failAfterClaim(
                 message = "执行记录保存失败",
                 report = ToolExecutionReport(actionResults.toList()),
             )
@@ -114,11 +168,14 @@ class AgentExecutionEngine(
             )
             if (!persist(
                     runId = confirmation.runId,
+                    plan = plan,
+                    ownerToken = confirmation.ownerToken,
+                    version = existingRecord?.version ?: 0L,
                     status = ExecutionRunStatus.RUNNING,
                     actionResults = actionResults,
                 )
             ) {
-                return ToolExecutionResult.Failure(
+                return failAfterClaim(
                     message = "执行记录保存失败",
                     report = ToolExecutionReport(actionResults.toList()),
                 )
@@ -162,6 +219,9 @@ class AgentExecutionEngine(
                     )
                     persist(
                         runId = confirmation.runId,
+                        plan = plan,
+                        ownerToken = confirmation.ownerToken,
+                        version = existingRecord?.version ?: 0L,
                         status = ExecutionRunStatus.FAILED,
                         actionResults = actionResults,
                         failureMessage = outcome.message,
@@ -183,6 +243,9 @@ class AgentExecutionEngine(
         } catch (_: Exception) {
             persist(
                 runId = confirmation.runId,
+                plan = plan,
+                ownerToken = confirmation.ownerToken,
+                version = existingRecord?.version ?: 0L,
                 status = ExecutionRunStatus.FAILED,
                 actionResults = actionResults,
                 failureMessage = "待办保存失败",
@@ -203,6 +266,9 @@ class AgentExecutionEngine(
         )
         if (!persist(
                 runId = confirmation.runId,
+                plan = plan,
+                ownerToken = confirmation.ownerToken,
+                version = existingRecord?.version ?: 0L,
                 status = ExecutionRunStatus.SUCCEEDED,
                 actionResults = completedReport.actionResults,
             )
@@ -217,6 +283,9 @@ class AgentExecutionEngine(
 
     private suspend fun persist(
         runId: String,
+        plan: AgentPlan,
+        ownerToken: String,
+        version: Long,
         status: ExecutionRunStatus,
         actionResults: List<ActionExecutionRecord>,
         failureMessage: String? = null,
@@ -227,6 +296,9 @@ class AgentExecutionEngine(
                 status = status,
                 report = ToolExecutionReport(actionResults.toList()),
                 failureMessage = failureMessage,
+                plan = PersistedAgentPlan.fromDomain(plan),
+                ownerToken = ownerToken,
+                version = version,
             ),
         )
         true
@@ -239,6 +311,24 @@ class AgentExecutionEngine(
     private fun MutableList<ActionExecutionRecord>.replace(record: ActionExecutionRecord) {
         removeAll { it.actionIndex == record.actionIndex }
         add(record)
+    }
+
+    private fun AgentAction.expectedToolName(): String? = when (this) {
+        is CreateTodo -> AgentToolNames.CREATE_TODO
+        is OpenApp -> AgentToolNames.OPEN_APP
+        is AskUser -> null
+    }
+
+    suspend fun listRecoverableExecutions(): List<RecoverableExecution> =
+        executionJournal.listUnfinished().map { record ->
+            RecoverableExecution(
+                record = record,
+                plan = record.plan?.toDomainOrNull(),
+            )
+        }
+
+    suspend fun discardExecution(runId: String): Boolean {
+        return executionJournal.delete(runId)
     }
 
     private data class PreparedAction(
