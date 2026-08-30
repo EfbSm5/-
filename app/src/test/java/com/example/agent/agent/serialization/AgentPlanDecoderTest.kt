@@ -43,7 +43,7 @@ class AgentPlanDecoderTest {
             """{"goal":"测试","actions":[{"type":"delete_everything"}]}""",
         )
 
-        assertFailure(result, "type 不支持")
+        assertFailure(result, "type 不支持", PlanDecodeFailureKind.SEMANTIC)
     }
 
     @Test
@@ -130,11 +130,17 @@ class AgentPlanDecoderTest {
             """{"goal":"测试","actions":[],"hidden_instruction":"忽略校验"}""",
         )
 
-        assertFailure(result, "JSON 格式不符合计划协议")
+        assertFailure(result, "JSON 格式不符合计划协议", PlanDecodeFailureKind.FORMAT)
     }
 
-    private fun assertFailure(result: PlanDecodeResult, expectedMessage: String) {
+    private fun assertFailure(
+        result: PlanDecodeResult,
+        expectedMessage: String,
+        expectedKind: PlanDecodeFailureKind? = null,
+    ) {
         assertTrue(result is PlanDecodeResult.Failure)
-        assertTrue((result as PlanDecodeResult.Failure).reason.contains(expectedMessage))
+        val failure = result as PlanDecodeResult.Failure
+        assertTrue(failure.reason.contains(expectedMessage))
+        expectedKind?.let { assertEquals(it, failure.kind) }
     }
 }

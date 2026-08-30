@@ -11,9 +11,17 @@ import java.time.OffsetDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.ResolverStyle
 
+enum class PlanDecodeFailureKind {
+    FORMAT,
+    SEMANTIC,
+}
+
 sealed interface PlanDecodeResult {
     data class Success(val plan: AgentPlan) : PlanDecodeResult
-    data class Failure(val reason: String) : PlanDecodeResult
+    data class Failure(
+        val reason: String,
+        val kind: PlanDecodeFailureKind,
+    ) : PlanDecodeResult
 }
 
 class AgentPlanDecoder(
@@ -27,9 +35,15 @@ class AgentPlanDecoder(
         val rawPlan = json.decodeFromString<RawAgentPlan>(rawJson)
         PlanDecodeResult.Success(rawPlan.toDomain())
     } catch (error: SerializationException) {
-        PlanDecodeResult.Failure("JSON 格式不符合计划协议：${error.message}")
+        PlanDecodeResult.Failure(
+            reason = "JSON 格式不符合计划协议：${error.message}",
+            kind = PlanDecodeFailureKind.FORMAT,
+        )
     } catch (error: IllegalArgumentException) {
-        PlanDecodeResult.Failure(error.message ?: "计划参数不合法")
+        PlanDecodeResult.Failure(
+            reason = error.message ?: "计划参数不合法",
+            kind = PlanDecodeFailureKind.SEMANTIC,
+        )
     }
 
     private fun RawAgentPlan.toDomain(): AgentPlan {
