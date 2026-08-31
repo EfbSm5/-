@@ -116,6 +116,7 @@ class SuRootExecutor(
 
     private suspend fun runProcess(command: String, readBinary: Boolean): BinaryCommandResult =
         withContext(dispatcher) {
+            currentCoroutineContext().ensureActive()
             val operationGeneration = synchronized(processLock) { cancellationGeneration }
             val process = try {
                 ProcessBuilder("su", "-c", command)
@@ -124,6 +125,7 @@ class SuRootExecutor(
             } catch (_: IOException) {
                 return@withContext BinaryCommandResult.Failure("无法启动 su")
             }
+            currentCoroutineContext().ensureActive()
             val registered = synchronized(processLock) {
                 if (operationGeneration == cancellationGeneration) {
                     activeProcess = process

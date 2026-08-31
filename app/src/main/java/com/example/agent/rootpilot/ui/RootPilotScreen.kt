@@ -50,6 +50,8 @@ fun RootPilotScreen(
     onAutoExecute: () -> Unit,
     onStop: () -> Unit,
     onConfirmAction: () -> Unit,
+    onRecoverInterruptedRun: () -> Unit,
+    onDiscardInterruptedRun: () -> Unit,
     onManualConfirmationChanged: (Boolean) -> Unit,
     onScreenUploadChanged: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
@@ -59,7 +61,9 @@ fun RootPilotScreen(
         RootPilotStatus.REQUESTING_MODEL,
         RootPilotStatus.EXECUTING,
         RootPilotStatus.WAITING_SCREEN,
+        RootPilotStatus.WAITING_CONFIRMATION,
     )
+    val recoveryRequired = state.status == RootPilotStatus.RECOVERY_REQUIRED
     val image = state.frame?.let { frame ->
         remember(frame.bytes) {
             BitmapFactory.decodeByteArray(frame.bytes, 0, frame.bytes.size)?.asImageBitmap()
@@ -129,13 +133,13 @@ fun RootPilotScreen(
                 style = MaterialTheme.typography.bodySmall,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onTestRoot, enabled = !busy) { Text("测试 Root") }
-                Button(onClick = onCaptureScreen, enabled = !busy) { Text("截取屏幕") }
+                Button(onClick = onTestRoot, enabled = !busy && !recoveryRequired) { Text("测试 Root") }
+                Button(onClick = onCaptureScreen, enabled = !busy && !recoveryRequired) { Text("截取屏幕") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onSingleStep, enabled = !busy) { Text("单步执行") }
-                Button(onClick = onAutoExecute, enabled = !busy) { Text("自动执行") }
-                Button(onClick = onStop, enabled = busy || state.status == RootPilotStatus.WAITING_CONFIRMATION) {
+                Button(onClick = onSingleStep, enabled = !busy && !recoveryRequired) { Text("单步执行") }
+                Button(onClick = onAutoExecute, enabled = !busy && !recoveryRequired) { Text("自动执行") }
+                Button(onClick = onStop, enabled = busy) {
                     Text("立即停止")
                 }
             }
@@ -148,6 +152,28 @@ fun RootPilotScreen(
                             "确认执行当前动作"
                         },
                     )
+                }
+            }
+
+            if (recoveryRequired) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("上次任务中断", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "无法确认上一步 Root 动作是否已经生效，不会自动重放。" +
+                                "请确认当前屏幕后重新规划，或放弃上次任务。",
+                        )
+                        state.errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                        Button(onClick = onRecoverInterruptedRun) {
+                            Text("从当前屏幕重新规划")
+                        }
+                        TextButton(onClick = onDiscardInterruptedRun) {
+                            Text("放弃上次任务")
+                        }
+                    }
                 }
             }
 
@@ -209,6 +235,7 @@ private fun RootPilotStatus.displayName(): String = when (this) {
     RootPilotStatus.COMPLETED -> "已完成"
     RootPilotStatus.FAILED -> "失败"
     RootPilotStatus.STOPPED -> "已停止"
+    RootPilotStatus.RECOVERY_REQUIRED -> "需要恢复确认"
 }
 
 private fun RootPilotAction.describe(): String = when (this) {

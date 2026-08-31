@@ -12,6 +12,7 @@ enum class RootPilotStatus {
     COMPLETED,
     FAILED,
     STOPPED,
+    RECOVERY_REQUIRED,
 }
 
 data class RootPilotUiState(
