@@ -1,6 +1,7 @@
 package com.example.agent.rootpilot.root
 
 import com.example.agent.rootpilot.model.ExecutableRootAction
+import com.example.agent.rootpilot.model.RootPilotApp
 import com.example.agent.rootpilot.model.RootPilotKey
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -22,6 +23,13 @@ sealed interface RootScreenshotResult {
     data class Success(val pngBytes: ByteArray) : RootScreenshotResult
 
     data class Failure(val message: String) : RootScreenshotResult
+}
+
+internal object RootCommandBuilder {
+    fun openApp(app: RootPilotApp): String = when (app) {
+        RootPilotApp.SETTINGS ->
+            "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.android.settings"
+    }
 }
 
 interface RootExecutor {
@@ -77,6 +85,10 @@ class SuRootExecutor(
             )
         } else {
             RootExecutionResult.Failure("swipe 参数不合法")
+        }
+
+        is ExecutableRootAction.OpenApp -> when (action.app) {
+            RootPilotApp.SETTINGS -> runTextCommand(RootCommandBuilder.openApp(action.app))
         }
 
         is ExecutableRootAction.Type -> if (TYPE_TEXT_PATTERN.matches(action.text)) {

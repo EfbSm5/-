@@ -18,6 +18,11 @@ sealed interface RootPilotAction {
         override val reason: String,
     ) : RootPilotAction
 
+    data class OpenApp(
+        val packageName: String,
+        override val reason: String,
+    ) : RootPilotAction
+
     data class Type(
         val text: String,
         override val reason: String,
@@ -53,6 +58,17 @@ enum class RootPilotKey {
     ENTER,
 }
 
+enum class RootPilotApp(val packageName: String) {
+    SETTINGS("com.android.settings"),
+    ;
+
+    companion object {
+        fun fromPackageName(packageName: String): RootPilotApp? = entries.firstOrNull {
+            it.packageName == packageName
+        }
+    }
+}
+
 data class ScreenSize(
     val width: Int,
     val height: Int,
@@ -68,6 +84,8 @@ sealed interface ExecutableRootAction {
         val y2: Int,
         val durationMillis: Int,
     ) : ExecutableRootAction
+
+    data class OpenApp(val app: RootPilotApp) : ExecutableRootAction
 
     data class Type(val text: String) : ExecutableRootAction
 

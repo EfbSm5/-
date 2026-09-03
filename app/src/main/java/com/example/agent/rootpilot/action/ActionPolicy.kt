@@ -2,6 +2,7 @@ package com.example.agent.rootpilot.action
 
 import com.example.agent.rootpilot.model.ExecutableRootAction
 import com.example.agent.rootpilot.model.RootPilotAction
+import com.example.agent.rootpilot.model.RootPilotApp
 import com.example.agent.rootpilot.model.ScreenSize
 
 sealed interface ActionPolicyResult {
@@ -17,6 +18,7 @@ class ActionPolicy {
     ): Boolean = when (action) {
         is RootPilotAction.Tap,
         is RootPilotAction.Swipe,
+        is RootPilotAction.OpenApp,
         -> manualConfirmation
 
         is RootPilotAction.Type,
@@ -50,6 +52,11 @@ class ActionPolicy {
                     durationMillis = action.durationMillis,
                 ),
             )
+
+            is RootPilotAction.OpenApp -> RootPilotApp
+                .fromPackageName(action.packageName)
+                ?.let { app -> ActionPolicyResult.Allowed(ExecutableRootAction.OpenApp(app)) }
+                ?: ActionPolicyResult.Rejected("不允许打开该应用")
 
             is RootPilotAction.Type -> ActionPolicyResult.Allowed(
                 ExecutableRootAction.Type(action.text),

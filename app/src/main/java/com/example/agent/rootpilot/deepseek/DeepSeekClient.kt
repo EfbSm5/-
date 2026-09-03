@@ -196,6 +196,7 @@ class HttpDeepSeekClient(
             Allowed actions and fields are exactly:
             {"action":"tap","x":0,"y":0,"reason":"short reason"}
             {"action":"swipe","x1":0,"y1":0,"x2":0,"y2":0,"duration_ms":300,"reason":"short reason"}
+            {"action":"open_app","package_name":"com.android.settings","reason":"short reason"}
             {"action":"type","text":"safe ASCII text","reason":"short reason"}
             {"action":"key","key":"BACK","reason":"short reason"}
             {"action":"wait","duration_ms":500,"reason":"short reason"}
@@ -203,6 +204,8 @@ class HttpDeepSeekClient(
             {"action":"finish","success":true,"message":"result"}
             Coordinates must be integers from 0 to 1000. Use only BACK, HOME, or ENTER for key.
             Type text must contain only letters, digits, dot, underscore, at-sign, plus, or hyphen.
+            The only allowed open_app package_name is com.android.settings. Prefer open_app for Android Settings
+            instead of key HOME or guessing a launcher icon.
             Ask the user before passwords, verification codes, payment, deletion, authorization,
             biometric actions, sending messages, or other sensitive operations.
             Use ask_user only when human takeover is genuinely required; use key, tap, and swipe

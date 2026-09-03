@@ -18,6 +18,14 @@ class ActionParserTest {
             ) is ActionParseResult.Success,
         )
         assertEquals(
+            ActionParseResult.Success(
+                RootPilotAction.OpenApp("com.android.settings", "打开设置"),
+            ),
+            parser.parse(
+                """{"action":"open_app","package_name":"com.android.settings","reason":"打开设置"}""",
+            ),
+        )
+        assertEquals(
             ActionParseResult.Success(RootPilotAction.Type("hello", "输入")),
             parser.parse("""{"action":"type","text":"hello","reason":"输入"}"""),
         )
@@ -64,6 +72,11 @@ class ActionParserTest {
         assertTrue(
             parser.parse("""{"action":"type","text":"hello;rm","reason":"输入"}""")
                 is ActionParseResult.Failure,
+        )
+        assertTrue(
+            parser.parse(
+                """{"action":"open_app","package_name":"com.android.settings;rm","reason":"打开设置"}""",
+            ) is ActionParseResult.Failure,
         )
         assertTrue(
             parser.parse(

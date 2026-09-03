@@ -563,6 +563,7 @@ class RootPilotService : Service() {
     private fun RootPilotAction.describeForSnapshot(): String = when (this) {
         is RootPilotAction.Tap -> "tap($x,$y)"
         is RootPilotAction.Swipe -> "swipe($x1,$y1,$x2,$y2,$durationMillis)"
+        is RootPilotAction.OpenApp -> "open_app($packageName)"
         is RootPilotAction.Type -> "type(length=${text.length})"
         is RootPilotAction.Key -> "key($key)"
         is RootPilotAction.Wait -> "wait($durationMillis)"

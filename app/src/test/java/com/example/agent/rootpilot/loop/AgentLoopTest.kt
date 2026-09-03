@@ -5,6 +5,7 @@ import com.example.agent.rootpilot.deepseek.DeepSeekClient
 import com.example.agent.rootpilot.deepseek.DeepSeekVisionRequest
 import com.example.agent.rootpilot.model.ExecutableRootAction
 import com.example.agent.rootpilot.model.RootPilotAction
+import com.example.agent.rootpilot.model.RootPilotApp
 import com.example.agent.rootpilot.model.RootPilotConfig
 import com.example.agent.rootpilot.root.RootExecutionResult
 import com.example.agent.rootpilot.root.RootExecutor
@@ -238,6 +239,47 @@ class AgentLoopTest {
             listOf(ExecutableRootAction.Swipe(9, 9, 19, 19, 300)),
             root.actions,
         )
+    }
+
+    @Test
+    fun automaticMode_executesAllowlistedOpenAppWithoutConfirmation() = runTest {
+        val root = RecordingRootExecutor()
+
+        AgentLoop(
+            screenshotProvider = IncrementingScreenshotProvider(),
+            deepSeekClient = QueueDeepSeekClient(
+                """{"action":"open_app","package_name":"com.android.settings","reason":"打开设置"}""",
+                """{"action":"finish","success":true,"message":"完成"}""",
+            ),
+            rootExecutor = root,
+        ).run(request(maxSteps = 2, manualConfirmation = false)) {}
+
+        assertEquals(
+            listOf(ExecutableRootAction.OpenApp(RootPilotApp.SETTINGS)),
+            root.actions,
+        )
+    }
+
+    @Test
+    fun manualConfirmation_requiresConfirmationForOpenApp() = runTest {
+        val root = RecordingRootExecutor()
+        val approvalReady = CompletableDeferred<ActionApproval>()
+        val job = async {
+            AgentLoop(
+                screenshotProvider = IncrementingScreenshotProvider(),
+                deepSeekClient = QueueDeepSeekClient(
+                    """{"action":"open_app","package_name":"com.android.settings","reason":"打开设置"}""",
+                ),
+                rootExecutor = root,
+            ).run(request(manualConfirmation = true)) {
+                if (it is AgentLoopEvent.AwaitingConfirmation) approvalReady.complete(it.approval)
+            }
+        }
+
+        approvalReady.await().reject()
+        job.await()
+
+        assertTrue(root.actions.isEmpty())
     }
 
     @Test

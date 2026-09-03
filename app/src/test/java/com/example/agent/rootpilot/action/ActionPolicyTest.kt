@@ -2,6 +2,7 @@ package com.example.agent.rootpilot.action
 
 import com.example.agent.rootpilot.model.ExecutableRootAction
 import com.example.agent.rootpilot.model.RootPilotAction
+import com.example.agent.rootpilot.model.RootPilotApp
 import com.example.agent.rootpilot.model.RootPilotKey
 import com.example.agent.rootpilot.model.ScreenSize
 import org.junit.Assert.assertEquals
@@ -82,6 +83,29 @@ class ActionPolicyTest {
                 action = RootPilotAction.Key(RootPilotKey.HOME, "返回桌面"),
                 manualConfirmation = false,
             ),
+        )
+        assertTrue(
+            policy.requiresConfirmation(
+                action = RootPilotAction.OpenApp("com.android.settings", "打开设置"),
+                manualConfirmation = false,
+            ).not(),
+        )
+    }
+
+    @Test
+    fun openAppOnlyAllowsSettingsPackage() {
+        assertEquals(
+            ActionPolicyResult.Allowed(ExecutableRootAction.OpenApp(RootPilotApp.SETTINGS)),
+            policy.toExecutable(
+                RootPilotAction.OpenApp("com.android.settings", "打开设置"),
+                ScreenSize(1_200, 2_640),
+            ),
+        )
+        assertTrue(
+            policy.toExecutable(
+                RootPilotAction.OpenApp("com.example.untrusted", "打开应用"),
+                ScreenSize(1_200, 2_640),
+            ) is ActionPolicyResult.Rejected,
         )
     }
 }

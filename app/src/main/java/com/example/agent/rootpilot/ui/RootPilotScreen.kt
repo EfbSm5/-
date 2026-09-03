@@ -241,6 +241,7 @@ private fun RootPilotStatus.displayName(): String = when (this) {
 private fun RootPilotAction.describe(): String = when (this) {
     is RootPilotAction.Tap -> "tap($x,$y)：$reason"
     is RootPilotAction.Swipe -> "swipe($x1,$y1,$x2,$y2,$durationMillis)：$reason"
+    is RootPilotAction.OpenApp -> "open_app($packageName)：$reason"
     is RootPilotAction.Type -> "type(${text.length} chars)：$reason"
     is RootPilotAction.Key -> "key($key)：$reason"
     is RootPilotAction.Wait -> "wait($durationMillis)：$reason"

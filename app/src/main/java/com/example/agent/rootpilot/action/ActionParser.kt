@@ -59,6 +59,14 @@ class ActionParser(
                 )
             }
 
+            "open_app" -> {
+                requireKeys(keys, "action", "package_name", "reason")
+                RootPilotAction.OpenApp(
+                    packageName = packageName.requirePackageName(),
+                    reason = reason.requireReason(),
+                )
+            }
+
             "type" -> {
                 requireKeys(keys, "action", "text", "reason")
                 val normalizedText = text.requireText()
@@ -132,6 +140,18 @@ class ActionParser(
         ?.also { require(it.isNotEmpty() && it.length <= MAX_TEXT_LENGTH) { "type.text 不合法" } }
         ?: throw IllegalArgumentException("type.text 不能为空")
 
+    private fun String?.requirePackageName(): String = this
+        ?.trim()
+        ?.also {
+            require(it.isNotEmpty() && it.length <= MAX_PACKAGE_NAME_LENGTH) {
+                "package_name 不合法"
+            }
+            require(PACKAGE_NAME_PATTERN.matches(it)) {
+                "package_name 格式不合法"
+            }
+        }
+        ?: throw IllegalArgumentException("package_name 不能为空")
+
     @Serializable
     private data class RawAction(
         val action: String,
@@ -143,6 +163,7 @@ class ActionParser(
         val y2: Int? = null,
         @SerialName("duration_ms") val durationMillis: Int? = null,
         val text: String? = null,
+        @SerialName("package_name") val packageName: String? = null,
         val key: String? = null,
         val reason: String? = null,
         val message: String? = null,
@@ -153,6 +174,8 @@ class ActionParser(
         const val MAX_REASON_LENGTH = 200
         const val MAX_MESSAGE_LENGTH = 500
         const val MAX_TEXT_LENGTH = 128
+        const val MAX_PACKAGE_NAME_LENGTH = 200
         val TYPE_TEXT_PATTERN = Regex("^[A-Za-z0-9._@+\\-]+$")
+        val PACKAGE_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
     }
 }
