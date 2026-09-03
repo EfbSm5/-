@@ -197,8 +197,10 @@ class AgentLoop(
             }
 
             val approval = if (
-                request.config.manualConfirmation ||
-                actionPolicy.requiresConfirmation(action)
+                actionPolicy.requiresConfirmation(
+                    action = action,
+                    manualConfirmation = request.config.manualConfirmation,
+                )
             ) {
                 ActionApproval(CompletableDeferred())
             } else {

@@ -11,9 +11,14 @@ sealed interface ActionPolicyResult {
 }
 
 class ActionPolicy {
-    fun requiresConfirmation(action: RootPilotAction): Boolean = when (action) {
+    fun requiresConfirmation(
+        action: RootPilotAction,
+        manualConfirmation: Boolean,
+    ): Boolean = when (action) {
         is RootPilotAction.Tap,
         is RootPilotAction.Swipe,
+        -> manualConfirmation
+
         is RootPilotAction.Type,
         is RootPilotAction.Key,
         -> true

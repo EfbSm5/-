@@ -44,4 +44,44 @@ class ActionPolicyTest {
             ),
         )
     }
+
+    @Test
+    fun manualConfirmationOnlyBypassesTapAndSwipeInAutomaticMode() {
+        assertTrue(
+            policy.requiresConfirmation(
+                action = RootPilotAction.Tap(1, 1, "点击"),
+                manualConfirmation = true,
+            ),
+        )
+        assertTrue(
+            policy.requiresConfirmation(
+                action = RootPilotAction.Swipe(1, 1, 2, 2, 300, "滑动"),
+                manualConfirmation = true,
+            ),
+        )
+        assertTrue(
+            policy.requiresConfirmation(
+                action = RootPilotAction.Tap(1, 1, "点击"),
+                manualConfirmation = false,
+            ).not(),
+        )
+        assertTrue(
+            policy.requiresConfirmation(
+                action = RootPilotAction.Swipe(1, 1, 2, 2, 300, "滑动"),
+                manualConfirmation = false,
+            ).not(),
+        )
+        assertTrue(
+            policy.requiresConfirmation(
+                action = RootPilotAction.Type("hello", "输入"),
+                manualConfirmation = false,
+            ),
+        )
+        assertTrue(
+            policy.requiresConfirmation(
+                action = RootPilotAction.Key(RootPilotKey.HOME, "返回桌面"),
+                manualConfirmation = false,
+            ),
+        )
+    }
 }

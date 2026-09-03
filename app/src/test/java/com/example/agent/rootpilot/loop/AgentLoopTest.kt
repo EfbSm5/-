@@ -201,6 +201,68 @@ class AgentLoopTest {
     }
 
     @Test
+    fun automaticMode_executesTapWithoutConfirmation() = runTest {
+        val root = RecordingRootExecutor()
+        val events = mutableListOf<AgentLoopEvent>()
+
+        AgentLoop(
+            screenshotProvider = IncrementingScreenshotProvider(),
+            deepSeekClient = QueueDeepSeekClient(
+                """{"action":"tap","x":500,"y":500,"reason":"点击"}""",
+                """{"action":"finish","success":true,"message":"完成"}""",
+            ),
+            rootExecutor = root,
+        ).run(request(maxSteps = 2, manualConfirmation = false)) {
+            events += it
+        }
+
+        assertEquals(listOf(ExecutableRootAction.Tap(49, 49)), root.actions)
+        assertTrue(events.none { it is AgentLoopEvent.AwaitingConfirmation })
+        assertTrue(events.last() is AgentLoopEvent.Completed)
+    }
+
+    @Test
+    fun automaticMode_executesSwipeWithoutConfirmation() = runTest {
+        val root = RecordingRootExecutor()
+
+        AgentLoop(
+            screenshotProvider = IncrementingScreenshotProvider(),
+            deepSeekClient = QueueDeepSeekClient(
+                """{"action":"swipe","x1":100,"y1":100,"x2":200,"y2":200,"duration_ms":300,"reason":"滑动"}""",
+                """{"action":"finish","success":true,"message":"完成"}""",
+            ),
+            rootExecutor = root,
+        ).run(request(maxSteps = 2, manualConfirmation = false)) {}
+
+        assertEquals(
+            listOf(ExecutableRootAction.Swipe(9, 9, 19, 19, 300)),
+            root.actions,
+        )
+    }
+
+    @Test
+    fun automaticMode_requiresConfirmationForSystemKey() = runTest {
+        val root = RecordingRootExecutor()
+        val approvalReady = CompletableDeferred<ActionApproval>()
+        val job = async {
+            AgentLoop(
+                screenshotProvider = IncrementingScreenshotProvider(),
+                deepSeekClient = QueueDeepSeekClient(
+                    """{"action":"key","key":"HOME","reason":"返回桌面"}""",
+                ),
+                rootExecutor = root,
+            ).run(request(manualConfirmation = false)) {
+                if (it is AgentLoopEvent.AwaitingConfirmation) approvalReady.complete(it.approval)
+            }
+        }
+
+        approvalReady.await().reject()
+        job.await()
+
+        assertTrue(root.actions.isEmpty())
+    }
+
+    @Test
     fun askUser_pausesUntilUserConfirmsThenContinues() = runTest {
         val root = RecordingRootExecutor()
         val approvalReady = CompletableDeferred<ActionApproval>()

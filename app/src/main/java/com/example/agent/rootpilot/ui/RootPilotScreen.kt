@@ -129,7 +129,7 @@ fun RootPilotScreen(
                 onCheckedChange = onManualConfirmationChanged,
             )
             Text(
-                "输入动作仅支持安全 ASCII（字母、数字和 ._@+-）；所有会改变手机状态的 Root 动作都会先请求确认。",
+                "输入动作仅支持安全 ASCII（字母、数字和 ._@+-）；自动模式会执行点击和滑动，输入文本及系统按键仍需确认。",
                 style = MaterialTheme.typography.bodySmall,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
