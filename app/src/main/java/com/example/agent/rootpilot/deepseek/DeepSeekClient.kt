@@ -25,6 +25,7 @@ data class DeepSeekVisionRequest(
     val frame: ScreenshotFrame,
     val history: List<String>,
     val remainingSteps: Int,
+    val step: Int = 0,
 )
 
 sealed interface DeepSeekActionResult {
@@ -139,6 +140,16 @@ class HttpDeepSeekClient(
         appendLine("根据当前 Android 截图执行用户任务。")
         appendLine("只返回一个动作 JSON，不要 Markdown、解释或 Shell 命令。")
         appendLine("用户任务：${request.config.task}")
+        appendLine("当前步骤：${request.step + 1}")
+        if (request.config.task.contains("系统设置") && request.step == 0) {
+            appendLine(
+                "入口约束：本任务要求打开 Android 系统设置，第一步必须返回 " +
+                    "{\"action\":\"open_app\",\"package_name\":\"com.android.settings\",\"reason\":\"...\"}；" +
+                    "不要先返回 HOME 或猜测启动器图标。",
+            )
+        } else if (request.config.task.contains("系统设置") && request.step > 0) {
+            appendLine("后续步骤约束：系统设置入口已经处理，不要重复返回 open_app，根据当前截图继续导航。")
+        }
         appendLine("视觉输入尺寸：${request.frame.width}x${request.frame.height}")
         appendLine("物理屏幕尺寸：${request.frame.physicalWidth}x${request.frame.physicalHeight}")
         appendLine(
@@ -204,14 +215,18 @@ class HttpDeepSeekClient(
             {"action":"finish","success":true,"message":"result"}
             Coordinates must be integers from 0 to 1000. Use only BACK, HOME, or ENTER for key.
             Type text must contain only letters, digits, dot, underscore, at-sign, plus, or hyphen.
-            The only allowed open_app package_name is com.android.settings. Prefer open_app for Android Settings
-            instead of key HOME or guessing a launcher icon.
+            The only allowed open_app package_name is com.android.settings. The user prompt includes the
+            current step number: only when it is the first step of a task asking for Android system Settings,
+            return open_app with that package. After the first step succeeds, never repeat open_app; choose
+            the next action from the current screenshot. Do not use key HOME or guess a launcher icon for the
+            first Settings action.
             Ask the user before passwords, verification codes, payment, deletion, authorization,
             biometric actions, sending messages, or other sensitive operations.
             Use ask_user only when human takeover is genuinely required; use key, tap, and swipe
             for ordinary navigation that is visible in the current or next screenshot.
-            If the current screenshot is the RootPilot control panel, never use key BACK because it
-            closes the agent. Use key HOME to leave RootPilot, then inspect the next screenshot.
+            If the current screenshot is the RootPilot control panel and the task does not ask for Android
+            system Settings, never use key BACK because it closes the agent. Use key HOME only when needed
+            to reach a target that cannot use open_app, then inspect the next screenshot.
             Use key BACK only after the screenshot shows the target app or another non-RootPilot page.
         """
     }

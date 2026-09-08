@@ -8,6 +8,7 @@ import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.DeepSeekClient
 import com.example.agent.rootpilot.deepseek.DeepSeekVisionRequest
 import com.example.agent.rootpilot.model.RootPilotAction
+import com.example.agent.rootpilot.model.RootPilotApp
 import com.example.agent.rootpilot.model.RootPilotConfig
 import com.example.agent.rootpilot.model.ScreenSize
 import com.example.agent.rootpilot.root.RootExecutionResult
@@ -119,7 +120,16 @@ class AgentLoop(
                 return
             }
 
-            var action: RootPilotAction? = null
+            var action: RootPilotAction? = if (
+                step == 0 && request.config.task.contains("系统设置")
+            ) {
+                RootPilotAction.OpenApp(
+                    packageName = RootPilotApp.SETTINGS.packageName,
+                    reason = "固定入口：打开系统设置",
+                )
+            } else {
+                null
+            }
             var parseRetryUsed = false
             var requestHistory: List<String> = history
             while (action == null) {
@@ -130,6 +140,7 @@ class AgentLoop(
                         frame = frame,
                         history = requestHistory,
                         remainingSteps = request.maxSteps - step,
+                        step = step,
                     ),
                 )
                 val rawActionJson = when (modelResult) {
@@ -151,6 +162,26 @@ class AgentLoop(
                         requestHistory = history + "上一响应未通过本地动作协议校验，请只返回合法的单个动作 JSON。"
                     }
                 }
+            }
+
+            if (step == 0 && request.config.task.contains("系统设置") &&
+                action !is RootPilotAction.OpenApp
+            ) {
+                onEvent(AgentLoopEvent.Failed("打开系统设置的第一步必须使用 open_app"))
+                return
+            }
+            if (step == 0 && request.config.task.contains("系统设置") &&
+                action is RootPilotAction.OpenApp &&
+                action.packageName != RootPilotApp.SETTINGS.packageName
+            ) {
+                onEvent(AgentLoopEvent.Failed("打开系统设置只允许使用 com.android.settings"))
+                return
+            }
+            if (step > 0 && request.config.task.contains("系统设置") &&
+                action is RootPilotAction.OpenApp
+            ) {
+                onEvent(AgentLoopEvent.Failed("系统设置入口已处理，后续步骤禁止重复 open_app"))
+                return
             }
 
             if (action is RootPilotAction.AskUser) {
