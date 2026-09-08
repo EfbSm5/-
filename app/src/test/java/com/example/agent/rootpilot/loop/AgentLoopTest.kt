@@ -261,6 +261,94 @@ class AgentLoopTest {
     }
 
     @Test
+    fun systemSettingsTask_usesFixedOpenAppEntry() = runTest {
+        val root = RecordingRootExecutor()
+        val client = QueueDeepSeekClient(
+            """{"action":"tap","x":500,"y":500,"reason":"点击"}""",
+        )
+
+        AgentLoop(
+            screenshotProvider = IncrementingScreenshotProvider(),
+            deepSeekClient = client,
+            rootExecutor = root,
+        ).run(
+            request(
+                maxSteps = 1,
+                manualConfirmation = false,
+                task = "打开系统设置",
+            ),
+        ) {}
+
+        assertEquals(
+            listOf(
+                ExecutableRootAction.OpenApp(RootPilotApp.SETTINGS),
+            ),
+            root.actions,
+        )
+        assertEquals(0, client.requestCount)
+    }
+
+    @Test
+    fun systemSettingsTask_doesNotRepeatOpenAppAfterFirstStep() = runTest {
+        val root = RecordingRootExecutor()
+        val client = QueueDeepSeekClient(
+            """{"action":"tap","x":500,"y":500,"reason":"进入显示"}""",
+            """{"action":"finish","success":true,"message":"完成"}""",
+        )
+
+        AgentLoop(
+            screenshotProvider = IncrementingScreenshotProvider(),
+            deepSeekClient = client,
+            rootExecutor = root,
+        ).run(
+            request(
+                maxSteps = 3,
+                manualConfirmation = false,
+                task = "打开系统设置，进入显示设置",
+            ),
+        ) {}
+
+        assertEquals(
+            listOf(
+                ExecutableRootAction.OpenApp(RootPilotApp.SETTINGS),
+                ExecutableRootAction.Tap(49, 49),
+            ),
+            root.actions,
+        )
+        assertEquals(listOf(1, 2), client.requests.map { it.step })
+    }
+
+    @Test
+    fun systemSettingsTask_rejectsRepeatedOpenAppAfterFirstStep() = runTest {
+        val root = RecordingRootExecutor()
+        val events = mutableListOf<AgentLoopEvent>()
+        val client = QueueDeepSeekClient(
+            """{"action":"open_app","package_name":"com.android.settings","reason":"重复打开设置"}""",
+        )
+
+        AgentLoop(
+            screenshotProvider = IncrementingScreenshotProvider(),
+            deepSeekClient = client,
+            rootExecutor = root,
+        ).run(
+            request(
+                maxSteps = 2,
+                manualConfirmation = false,
+                task = "打开系统设置，进入显示设置",
+            ),
+        ) { events += it }
+
+        assertEquals(
+            listOf(ExecutableRootAction.OpenApp(RootPilotApp.SETTINGS)),
+            root.actions,
+        )
+        assertEquals(
+            "系统设置入口已处理，后续步骤禁止重复 open_app",
+            (events.last() as AgentLoopEvent.Failed).message,
+        )
+    }
+
+    @Test
     fun manualConfirmation_requiresConfirmationForOpenApp() = runTest {
         val root = RecordingRootExecutor()
         val approvalReady = CompletableDeferred<ActionApproval>()
@@ -336,10 +424,11 @@ class AgentLoopTest {
     private fun request(
         maxSteps: Int = 1,
         manualConfirmation: Boolean = false,
+        task: String = "测试任务",
     ): AgentLoopRequest = AgentLoopRequest(
         config = RootPilotConfig(
             apiKey = "test-key",
-            task = "测试任务",
+            task = task,
             manualConfirmation = manualConfirmation,
             allowScreenUpload = true,
         ),
@@ -348,10 +437,12 @@ class AgentLoopTest {
 
     private class QueueDeepSeekClient(vararg private val responses: String) : DeepSeekClient {
         private val queue = ArrayDeque(responses.toList())
+        val requests = mutableListOf<DeepSeekVisionRequest>()
         var requestCount: Int = 0
 
         override suspend fun requestAction(request: DeepSeekVisionRequest): DeepSeekActionResult {
             requestCount++
+            requests += request
             return DeepSeekActionResult.Success(queue.removeFirst())
         }
     }
