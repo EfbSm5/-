@@ -261,7 +261,7 @@ class AgentLoopTest {
     }
 
     @Test
-    fun systemSettingsTask_usesFixedOpenAppEntry() = runTest {
+    fun systemSettingsTask_usesModelActionFromFirstStep() = runTest {
         val root = RecordingRootExecutor()
         val client = QueueDeepSeekClient(
             """{"action":"tap","x":500,"y":500,"reason":"点击"}""",
@@ -281,17 +281,18 @@ class AgentLoopTest {
 
         assertEquals(
             listOf(
-                ExecutableRootAction.OpenApp(RootPilotApp.SETTINGS),
+                ExecutableRootAction.Tap(49, 49),
             ),
             root.actions,
         )
-        assertEquals(0, client.requestCount)
+        assertEquals(1, client.requestCount)
     }
 
     @Test
-    fun systemSettingsTask_doesNotRepeatOpenAppAfterFirstStep() = runTest {
+    fun systemSettingsTask_modelChoosesLaunchThenNavigation() = runTest {
         val root = RecordingRootExecutor()
         val client = QueueDeepSeekClient(
+            """{"action":"open_app","package_name":"com.android.settings","reason":"打开目标应用"}""",
             """{"action":"tap","x":500,"y":500,"reason":"进入显示"}""",
             """{"action":"finish","success":true,"message":"完成"}""",
         )
@@ -315,15 +316,15 @@ class AgentLoopTest {
             ),
             root.actions,
         )
-        assertEquals(listOf(1, 2), client.requests.map { it.step })
+        assertEquals(listOf(0, 1, 2), client.requests.map { it.step })
     }
 
     @Test
-    fun systemSettingsTask_rejectsRepeatedOpenAppAfterFirstStep() = runTest {
+    fun systemSettingsTask_canFinishImmediatelyWhenTargetAlreadyVisible() = runTest {
         val root = RecordingRootExecutor()
         val events = mutableListOf<AgentLoopEvent>()
         val client = QueueDeepSeekClient(
-            """{"action":"open_app","package_name":"com.android.settings","reason":"重复打开设置"}""",
+            """{"action":"finish","success":true,"message":"已在目标页面"}""",
         )
 
         AgentLoop(
@@ -339,12 +340,12 @@ class AgentLoopTest {
         ) { events += it }
 
         assertEquals(
-            listOf(ExecutableRootAction.OpenApp(RootPilotApp.SETTINGS)),
+            emptyList<ExecutableRootAction>(),
             root.actions,
         )
         assertEquals(
-            "系统设置入口已处理，后续步骤禁止重复 open_app",
-            (events.last() as AgentLoopEvent.Failed).message,
+            "已在目标页面",
+            (events.last() as AgentLoopEvent.Completed).message,
         )
     }
 

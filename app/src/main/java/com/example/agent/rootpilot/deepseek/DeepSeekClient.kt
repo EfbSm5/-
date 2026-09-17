@@ -1,5 +1,6 @@
 package com.example.agent.rootpilot.deepseek
 
+import com.example.agent.rootpilot.model.RootPilotApp
 import com.example.agent.rootpilot.model.RootPilotConfig
 import com.example.agent.rootpilot.screen.ScreenshotFrame
 import java.io.IOException
@@ -141,15 +142,8 @@ class HttpDeepSeekClient(
         appendLine("只返回一个动作 JSON，不要 Markdown、解释或 Shell 命令。")
         appendLine("用户任务：${request.config.task}")
         appendLine("当前步骤：${request.step + 1}")
-        if (request.config.task.contains("系统设置") && request.step == 0) {
-            appendLine(
-                "入口约束：本任务要求打开 Android 系统设置，第一步必须返回 " +
-                    "{\"action\":\"open_app\",\"package_name\":\"com.android.settings\",\"reason\":\"...\"}；" +
-                    "不要先返回 HOME 或猜测启动器图标。",
-            )
-        } else if (request.config.task.contains("系统设置") && request.step > 0) {
-            appendLine("后续步骤约束：系统设置入口已经处理，不要重复返回 open_app，根据当前截图继续导航。")
-        }
+        appendLine("可通过 open_app 打开的应用：")
+        RootPilotApp.entries.forEach { appendLine(it.packageName) }
         appendLine("视觉输入尺寸：${request.frame.width}x${request.frame.height}")
         appendLine("物理屏幕尺寸：${request.frame.physicalWidth}x${request.frame.physicalHeight}")
         appendLine(
@@ -207,7 +201,7 @@ class HttpDeepSeekClient(
             Allowed actions and fields are exactly:
             {"action":"tap","x":0,"y":0,"reason":"short reason"}
             {"action":"swipe","x1":0,"y1":0,"x2":0,"y2":0,"duration_ms":300,"reason":"short reason"}
-            {"action":"open_app","package_name":"com.android.settings","reason":"short reason"}
+            {"action":"open_app","package_name":"package from the available apps list","reason":"short reason"}
             {"action":"type","text":"safe ASCII text","reason":"short reason"}
             {"action":"key","key":"BACK","reason":"short reason"}
             {"action":"wait","duration_ms":500,"reason":"short reason"}
@@ -215,18 +209,16 @@ class HttpDeepSeekClient(
             {"action":"finish","success":true,"message":"result"}
             Coordinates must be integers from 0 to 1000. Use only BACK, HOME, or ENTER for key.
             Type text must contain only letters, digits, dot, underscore, at-sign, plus, or hyphen.
-            The only allowed open_app package_name is com.android.settings. The user prompt includes the
-            current step number: only when it is the first step of a task asking for Android system Settings,
-            return open_app with that package. After the first step succeeds, never repeat open_app; choose
-            the next action from the current screenshot. Do not use key HOME or guess a launcher icon for the
-            first Settings action.
+            Use open_app to launch an app from the available apps list when needed.
+            If the target page is already visible, operate on that page without reopening the app.
+            Choose each action from the latest screenshot and action history, regardless of step number.
+            Only finish successfully when the screenshot shows the requested result.
             Ask the user before passwords, verification codes, payment, deletion, authorization,
             biometric actions, sending messages, or other sensitive operations.
             Use ask_user only when human takeover is genuinely required; use key, tap, and swipe
             for ordinary navigation that is visible in the current or next screenshot.
-            If the current screenshot is the RootPilot control panel and the task does not ask for Android
-            system Settings, never use key BACK because it closes the agent. Use key HOME only when needed
-            to reach a target that cannot use open_app, then inspect the next screenshot.
+            If the screenshot shows the RootPilot control panel, do not manipulate its task or configuration.
+            Prefer open_app when the target is in the available apps list; otherwise use HOME to navigate.
             Use key BACK only after the screenshot shows the target app or another non-RootPilot page.
         """
     }

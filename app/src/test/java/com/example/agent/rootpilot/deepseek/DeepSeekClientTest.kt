@@ -71,7 +71,7 @@ class DeepSeekClientTest {
     }
 
     @Test
-    fun systemSettingsPromptOnlyRequiresOpenAppOnFirstStep() = runTest {
+    fun promptIncludesCapabilitiesAndStepWithoutTaskSpecificConstraints() = runTest {
         ServerSocket(0).use { server ->
             val requestBodies = mutableListOf<String>()
             val responseBody =
@@ -113,16 +113,20 @@ class DeepSeekClientTest {
                     ),
                 )
 
-            request(0)
-            request(1)
+            assertTrue(request(0) is DeepSeekActionResult.Success)
+            assertTrue(request(1) is DeepSeekActionResult.Success)
             serverThread.join(5_000)
 
             assertEquals(2, requestBodies.size)
             assertTrue(requestBodies[0].contains("当前步骤：1"))
-            assertTrue(requestBodies[0].contains("第一步必须返回"))
+            assertTrue(requestBodies[0].contains("可通过 open_app 打开的应用"))
             assertTrue(requestBodies[1].contains("当前步骤：2"))
-            assertTrue(requestBodies[1].contains("后续步骤约束"))
-            assertTrue(requestBodies[1].contains("不要重复返回 open_app"))
+            requestBodies.forEach { body ->
+                assertTrue(body.contains("com.android.settings"))
+                assertTrue(!body.contains("入口约束"))
+                assertTrue(!body.contains("第一步必须返回"))
+                assertTrue(body.contains("image_url"))
+            }
         }
     }
 
