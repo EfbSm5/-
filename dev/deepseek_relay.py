@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("DEEPSEEK_RELAY_PORT", "8765"))
 API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
-MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
 
 
 class RelayHandler(BaseHTTPRequestHandler):
