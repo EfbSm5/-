@@ -98,7 +98,7 @@ class HttpDeepSeekClient(
     private fun buildRequest(request: DeepSeekVisionRequest): String = buildJsonObject {
         put("model", request.config.model)
         putJsonObject("thinking") {
-            put("type", "disabled")
+            put("type", "enabled")
         }
         putJsonObject("response_format") {
             put("type", "json_object")
@@ -127,7 +127,7 @@ class HttpDeepSeekClient(
                                 put("type", "image_url")
                                 putJsonObject("image_url") {
                                     put("url", request.frame.dataUrl)
-                                    put("detail", "low")
+                                    put("detail", "high")
                                 }
                             },
                         )
@@ -187,7 +187,7 @@ class HttpDeepSeekClient(
     private companion object {
         const val CONNECT_TIMEOUT_MILLIS = 10_000
         const val READ_TIMEOUT_MILLIS = 120_000
-        const val MAX_OUTPUT_TOKENS = 512
+        const val MAX_OUTPUT_TOKENS = 4_096
         const val MAX_HISTORY_ITEMS = 6
         val HTTP_SUCCESS_RANGE = 200..299
         val JSON = Json {
@@ -207,7 +207,11 @@ class HttpDeepSeekClient(
             {"action":"wait","duration_ms":500,"reason":"short reason"}
             {"action":"ask_user","message":"why user must take over"}
             {"action":"finish","success":true,"message":"result"}
-            Coordinates must be integers from 0 to 1000. Use only BACK, HOME, or ENTER for key.
+            Coordinates must be integers from 0 to 1000, normalized to the FULL screenshot:
+            top-left=(0,0), bottom-right=(1000,1000), including status and navigation bars.
+            Locate the center of the visible target in image pixels, then convert using
+            x=round(pixel_x/image_width*1000), y=round(pixel_y/image_height*1000).
+            Do not return image pixel coordinates. Use only BACK, HOME, or ENTER for key.
             Type text must contain only letters, digits, dot, underscore, at-sign, plus, or hyphen.
             Use open_app to launch an app from the available apps list when needed.
             If the target page is already visible, operate on that page without reopening the app.

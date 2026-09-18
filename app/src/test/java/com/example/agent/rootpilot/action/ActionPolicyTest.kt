@@ -24,6 +24,24 @@ class ActionPolicyTest {
     }
 
     @Test
+    fun mapsFullScreenshotCoordinatesWithoutInsetOffsets() {
+        assertEquals(
+            ActionPolicyResult.Allowed(ExecutableRootAction.Tap(563, 605)),
+            policy.toExecutable(
+                RootPilotAction.Tap(470, 227, "点击"),
+                ScreenSize(1_200, 2_670),
+            ),
+        )
+        assertEquals(
+            ActionPolicyResult.Allowed(ExecutableRootAction.Swipe(0, 0, 1_199, 2_669, 300)),
+            policy.toExecutable(
+                RootPilotAction.Swipe(0, 0, 1_000, 1_000, 300, "滑动"),
+                ScreenSize(1_200, 2_670),
+            ),
+        )
+    }
+
+    @Test
     fun rejectsNonExecutableControlActions() {
         assertTrue(
             policy.toExecutable(

@@ -8,6 +8,11 @@ import java.net.ServerSocket
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -126,6 +131,23 @@ class DeepSeekClientTest {
                 assertTrue(!body.contains("入口约束"))
                 assertTrue(!body.contains("第一步必须返回"))
                 assertTrue(body.contains("image_url"))
+                val payload = Json.parseToJsonElement(body).jsonObject
+                assertEquals(
+                    "enabled",
+                    payload.getValue("thinking").jsonObject.getValue("type").jsonPrimitive.content,
+                )
+                assertEquals(4_096, payload.getValue("max_tokens").jsonPrimitive.int)
+                val messages = payload.getValue("messages").jsonArray
+                val prompt = messages[0].jsonObject.getValue("content").jsonPrimitive.content
+                assertTrue(prompt.contains("normalized to the FULL screenshot"))
+                assertTrue(prompt.contains("including status and navigation bars"))
+                assertTrue(prompt.contains("y=round(pixel_y/image_height*1000)"))
+                val imagePart = messages[1].jsonObject.getValue("content").jsonArray
+                    .first { it.jsonObject["type"]?.jsonPrimitive?.content == "image_url" }
+                assertEquals(
+                    "high",
+                    imagePart.jsonObject.getValue("image_url").jsonObject.getValue("detail").jsonPrimitive.content,
+                )
             }
         }
     }
