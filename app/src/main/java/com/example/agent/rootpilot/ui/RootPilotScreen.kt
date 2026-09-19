@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -28,21 +29,33 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
-import com.example.agent.rootpilot.RootPilotViewModel
+import com.example.agent.rootpilot.ApiConfigUiState
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotUiState
 import com.example.agent.rootpilot.model.RootPilotStatus
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun RootPilotScreen(
     state: RootPilotUiState,
+    apiState: ApiConfigUiState,
     onApiKeyChanged: (String) -> Unit,
     onBaseUrlChanged: (String) -> Unit,
     onModelChanged: (String) -> Unit,
+    onSaveApiConfig: () -> Unit,
+    onEditApiConfig: () -> Unit,
+    onCancelApiConfigEdit: () -> Unit,
+    onClearApiConfig: () -> Unit,
+    onTestConnection: () -> Unit,
     onTaskChanged: (String) -> Unit,
     onTestRoot: () -> Unit,
     onCaptureScreen: () -> Unit,
@@ -66,6 +79,8 @@ fun RootPilotScreen(
         RootPilotStatus.WAITING_CONFIRMATION,
     )
     val recoveryRequired = state.status == RootPilotStatus.RECOVERY_REQUIRED
+    val apiControlsEnabled = !busy && !apiState.busy
+    val apiReady = apiState.configured && !apiState.editing && !apiState.busy
     val image = state.frame?.let { frame ->
         remember(frame.bytes) {
             BitmapFactory.decodeByteArray(frame.bytes, 0, frame.bytes.size)?.asImageBitmap()
@@ -76,6 +91,7 @@ fun RootPilotScreen(
         Column(
             modifier = Modifier
                 .padding(paddingValues)
+                .semantics { testTagsAsResourceId = true }
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -85,34 +101,66 @@ fun RootPilotScreen(
                 Text(if (overlayAllowed) "悬浮操作面板已授权 · 管理权限" else "开启悬浮操作面板")
             }
             Text(
-                "个人 Root 手机智能操作 Demo。截图会通过 Relay 上传给 DeepSeek。",
+                "截图会发送至所配置的 API 服务。默认手机直连 DeepSeek，也可自定义 Relay。",
                 style = MaterialTheme.typography.bodyMedium,
             )
-            OutlinedTextField(
-                value = state.config.apiKey,
-                onValueChange = onApiKeyChanged,
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("DeepSeek API Key（Relay 模式可留空）") },
-                visualTransformation = PasswordVisualTransformation(),
-                singleLine = true,
-                enabled = !busy,
-            )
-            OutlinedTextField(
-                value = state.config.baseUrl,
-                onValueChange = onBaseUrlChanged,
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("API Base URL / Relay 地址") },
-                singleLine = true,
-                enabled = !busy,
-            )
-            OutlinedTextField(
-                value = state.config.model,
-                onValueChange = onModelChanged,
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("模型名称") },
-                singleLine = true,
-                enabled = !busy,
-            )
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (apiState.configured) "API 已配置" else "API 未配置", modifier = Modifier.testTag("api_status"))
+                    if (apiState.editing) {
+                        if (apiState.configured) Text("更换配置需重新输入 Token；保存前仍保留原配置。")
+                        OutlinedTextField(
+                            value = apiState.draft.apiKey,
+                            onValueChange = onApiKeyChanged,
+                            modifier = Modifier.fillMaxWidth().testTag("api_token"),
+                            label = { Text("DeepSeek Token（Relay 可留空）") },
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            singleLine = true,
+                            enabled = apiControlsEnabled,
+                        )
+                        OutlinedTextField(
+                            value = apiState.draft.baseUrl,
+                            onValueChange = onBaseUrlChanged,
+                            modifier = Modifier.fillMaxWidth().testTag("api_base_url"),
+                            label = { Text("API Base URL / Relay 地址") },
+                            singleLine = true,
+                            enabled = apiControlsEnabled,
+                        )
+                        OutlinedTextField(
+                            value = apiState.draft.model,
+                            onValueChange = onModelChanged,
+                            modifier = Modifier.fillMaxWidth().testTag("api_model"),
+                            label = { Text("模型名称") },
+                            singleLine = true,
+                            enabled = apiControlsEnabled,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = onSaveApiConfig, enabled = apiControlsEnabled, modifier = Modifier.testTag("api_save")) {
+                                Text("保存配置")
+                            }
+                            if (apiState.configured) {
+                                TextButton(onClick = onCancelApiConfigEdit, enabled = apiControlsEnabled) { Text("取消") }
+                            }
+                        }
+                    } else {
+                        Text(apiState.draft.baseUrl)
+                        Text(apiState.draft.model)
+                        TextButton(onClick = onEditApiConfig, enabled = apiControlsEnabled, modifier = Modifier.testTag("api_edit")) {
+                            Text("更换配置")
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = onTestConnection, enabled = apiControlsEnabled, modifier = Modifier.testTag("api_test")) {
+                            Text("测试连接")
+                        }
+                        TextButton(onClick = onClearApiConfig, enabled = apiControlsEnabled, modifier = Modifier.testTag("api_clear")) {
+                            Text("清除配置")
+                        }
+                    }
+                    apiState.message?.let { Text(it, modifier = Modifier.testTag("api_message")) }
+                }
+            }
             OutlinedTextField(
                 value = state.config.task,
                 onValueChange = onTaskChanged,
@@ -142,8 +190,8 @@ fun RootPilotScreen(
                 Button(onClick = onCaptureScreen, enabled = !busy && !recoveryRequired) { Text("截取屏幕") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onSingleStep, enabled = !busy && !recoveryRequired) { Text("单步执行") }
-                Button(onClick = onAutoExecute, enabled = !busy && !recoveryRequired) { Text("自动执行") }
+                Button(onClick = onSingleStep, enabled = !busy && !recoveryRequired && apiReady) { Text("单步执行") }
+                Button(onClick = onAutoExecute, enabled = !busy && !recoveryRequired && apiReady) { Text("自动执行") }
                 Button(onClick = onStop, enabled = busy) {
                     Text("立即停止")
                 }
@@ -172,7 +220,7 @@ fun RootPilotScreen(
                                 "请确认当前屏幕后重新规划，或放弃上次任务。",
                         )
                         state.errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                        Button(onClick = onRecoverInterruptedRun) {
+                        Button(onClick = onRecoverInterruptedRun, enabled = apiReady) {
                             Text("从当前屏幕重新规划")
                         }
                         TextButton(onClick = onDiscardInterruptedRun) {

@@ -43,18 +43,37 @@ class HttpDeepSeekClient(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : DeepSeekClient {
     override suspend fun requestAction(request: DeepSeekVisionRequest): DeepSeekActionResult =
+        request(request.config, buildRequest(request))
+
+    suspend fun testConnection(config: RootPilotConfig): DeepSeekActionResult = request(
+        config,
+        buildJsonObject {
+            put("model", config.model)
+            put("stream", false)
+            put("max_tokens", 16)
+            putJsonObject("thinking") { put("type", "disabled") }
+            putJsonArray("messages") {
+                add(buildJsonObject {
+                    put("role", "user")
+                    put("content", "Reply with OK.")
+                })
+            }
+        }.toString(),
+    )
+
+    private suspend fun request(config: RootPilotConfig, body: String): DeepSeekActionResult =
         withContext(dispatcher) {
-            if (request.config.baseUrl.isBlank() || request.config.model.isBlank()) {
-                return@withContext DeepSeekActionResult.Failure("API Base URL 和模型名称不能为空")
+            config.apiValidationError()?.let {
+                return@withContext DeepSeekActionResult.Failure(it)
             }
 
             val connection = try {
-                URL("${request.config.baseUrl.trimEnd('/')}/chat/completions")
+                URL("${config.baseUrl.trimEnd('/')}/chat/completions")
                     .openConnection() as HttpURLConnection
             } catch (_: IOException) {
-                return@withContext DeepSeekActionResult.Failure("DeepSeek Relay 地址不可用")
+                return@withContext DeepSeekActionResult.Failure("API 地址不可用")
             } catch (_: IllegalArgumentException) {
-                return@withContext DeepSeekActionResult.Failure("DeepSeek Relay 地址不可用")
+                return@withContext DeepSeekActionResult.Failure("API 地址不可用")
             }
 
             val cancellationHandle = currentCoroutineContext().job.invokeOnCompletion {
@@ -64,19 +83,28 @@ class HttpDeepSeekClient(
                 connection.connectTimeout = CONNECT_TIMEOUT_MILLIS
                 connection.readTimeout = READ_TIMEOUT_MILLIS
                 connection.requestMethod = "POST"
+                // Never forward credentials to a redirect target selected by the server.
+                connection.instanceFollowRedirects = false
                 connection.doOutput = true
                 connection.setRequestProperty("Content-Type", "application/json")
-                if (request.config.apiKey.isNotBlank()) {
-                    connection.setRequestProperty("Authorization", "Bearer ${request.config.apiKey}")
+                if (config.apiKey.isNotBlank()) {
+                    connection.setRequestProperty("Authorization", "Bearer ${config.apiKey}")
                 }
                 connection.outputStream.bufferedWriter().use { writer ->
-                    writer.write(buildRequest(request))
+                    writer.write(body)
                 }
 
                 val responseCode = connection.responseCode
                 if (responseCode !in HTTP_SUCCESS_RANGE) {
                     return@withContext DeepSeekActionResult.Failure(
-                        "DeepSeek 请求失败，HTTP $responseCode",
+                        when (responseCode) {
+                            401, 403 -> "鉴权失败，请检查 Token 或访问权限（HTTP $responseCode）"
+                            402 -> "账户余额不足（HTTP 402）"
+                            404 -> "API 路径或模型不可用（HTTP 404）"
+                            429 -> "请求频率或额度受限（HTTP 429），请稍后重试"
+                            in 300..399 -> "API 返回重定向，已拒绝转发凭据（HTTP $responseCode）"
+                            else -> "DeepSeek 请求失败，HTTP $responseCode"
+                        },
                     )
                 }
                 val responseBody = connection.inputStream.bufferedReader().use { it.readText() }
@@ -89,6 +117,8 @@ class HttpDeepSeekClient(
                 DeepSeekActionResult.Failure("DeepSeek 返回格式无法理解")
             } catch (_: IOException) {
                 DeepSeekActionResult.Failure("DeepSeek 网络请求失败")
+            } catch (_: IllegalArgumentException) {
+                DeepSeekActionResult.Failure("API 配置格式无效")
             } finally {
                 cancellationHandle.dispose()
                 connection.disconnect()

@@ -44,6 +44,12 @@
             android:name=".rootpilot.RootPilotService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <activity
+            android:name=".rootpilot.RootPilotNotificationActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.RootPilotNotification" />
     </application>
 
 </manifest>

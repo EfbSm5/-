@@ -1,5 +1,6 @@
 package com.example.agent.rootpilot
 
+import com.example.agent.rootpilot.model.RootPilotConfig
 import java.io.File
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
@@ -18,7 +19,14 @@ data class RootPilotRunSnapshot(
     val status: String,
     val step: Int,
     val actionSummary: String? = null,
-)
+) {
+    // API credentials and endpoint are owned by the saved configuration, never by a run.
+    fun restoreTask(config: RootPilotConfig): RootPilotConfig = config.copy(
+        task = task,
+        manualConfirmation = manualConfirmation,
+        allowScreenUpload = allowScreenUpload,
+    )
+}
 
 class RootPilotRunStore(
     private val storageFile: File,

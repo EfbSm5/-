@@ -10,6 +10,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.IBinder
+import android.net.Uri
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -54,6 +55,8 @@ class RootPilotService : Service() {
     private var pendingApproval: ActionApproval? = null
     private var latestStartId: Int = 0
     private lateinit var overlay: RootPilotOverlay
+    private var notificationApprovalToken: String? = null
+    private var notificationApprovalIntent: PendingIntent? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -82,6 +85,10 @@ class RootPilotService : Service() {
             ACTION_SINGLE_STEP -> startRun(singleStep = true, startId = startId)
             ACTION_AUTO_EXECUTE -> startRun(singleStep = false, startId = startId)
             ACTION_CONFIRM -> confirmAction()
+            ACTION_CONFIRM_NOTIFICATION -> {
+                confirmNotificationAction(intent.getStringExtra(EXTRA_APPROVAL_TOKEN))
+                if (synchronized(stateLock) { activeJob?.isActive != true }) stopSelfResult(startId)
+            }
             ACTION_STOP -> stopAgent(startId)
             ACTION_RECOVER -> startRun(singleStep = false, startId = startId, recovering = true)
             ACTION_DISCARD_RECOVERY -> discardInterruptedRun(startId)
@@ -96,6 +103,9 @@ class RootPilotService : Service() {
     override fun onDestroy() {
         overlay.hide()
         synchronized(stateLock) {
+            notificationApprovalIntent?.cancel()
+            notificationApprovalIntent = null
+            notificationApprovalToken = null
             pendingApproval?.reject()
             pendingApproval = null
             activeJob?.cancel()
@@ -215,7 +225,7 @@ class RootPilotService : Service() {
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                appendLog("AgentLoop 异常：${error.message ?: "未知错误"}")
+                appendLog("AgentLoop 执行异常")
                 clearRunSnapshot()
                 updateState(
                     status = RootPilotStatus.FAILED,
@@ -244,7 +254,7 @@ class RootPilotService : Service() {
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
-                    appendLog("RootPilot 操作异常：${error.message ?: "未知错误"}")
+                    appendLog("RootPilot 操作异常")
                     updateState(
                         status = RootPilotStatus.FAILED,
                         errorMessage = "RootPilot 操作异常",
@@ -261,6 +271,16 @@ class RootPilotService : Service() {
         synchronized(stateLock) {
             pendingApproval?.approve()
             pendingApproval = null
+            notifyState()
+        }
+    }
+
+    private fun confirmNotificationAction(token: String?) {
+        synchronized(stateLock) {
+            if (token != null && pendingApproval?.approve(token) == true) {
+                pendingApproval = null
+                notifyState()
+            }
         }
     }
 
@@ -302,7 +322,7 @@ class RootPilotService : Service() {
         }
         synchronized(stateLock) {
             _uiState.value = _uiState.value.copy(
-                config = snapshot.toConfig(),
+                config = snapshot.restoreTask(_uiState.value.config),
                 status = RootPilotStatus.RECOVERY_REQUIRED,
                 step = snapshot.step,
                 errorMessage = buildString {
@@ -521,7 +541,24 @@ class RootPilotService : Service() {
         )
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(): Notification = synchronized(stateLock) {
+        val state = uiState.value
+        val approval = pendingApproval?.takeIf { state.status == RootPilotStatus.WAITING_CONFIRMATION }
+        if (notificationApprovalToken != approval?.token) {
+            notificationApprovalIntent?.cancel()
+            notificationApprovalToken = approval?.token
+            notificationApprovalIntent = approval?.let {
+                PendingIntent.getActivity(
+                    this,
+                    CONFIRM_REQUEST_CODE,
+                    Intent(this, RootPilotNotificationActivity::class.java)
+                        .setData(Uri.parse("rootpilot://confirm/${it.token}"))
+                        .putExtra(EXTRA_APPROVAL_TOKEN, it.token)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+            }
+        }
         val openIntent = Intent(this, RootPilotActivity::class.java)
         val openPendingIntent = PendingIntent.getActivity(
             this,
@@ -536,13 +573,29 @@ class RootPilotService : Service() {
             stopIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val text = state.pendingAction?.takeIf { approval != null }?.let {
+            "${it.describeForSnapshot()}：${it.reason}"
+        } ?: state.status.notificationText()
+        NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("RootPilot")
-            .setContentText(uiState.value.status.notificationText())
+            .setContentTitle("RootPilot · 第 ${state.step + 1} 步")
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setContentIntent(openPendingIntent)
             .setAutoCancel(false)
             .setOngoing(activeJob?.isActive == true)
+            .apply {
+                notificationApprovalIntent?.let { confirmation ->
+                    addAction(
+                        NotificationCompat.Action.Builder(
+                            android.R.drawable.ic_menu_send,
+                            if (state.pendingAction is RootPilotAction.AskUser) "已处理，继续" else "确认当前动作",
+                            confirmation,
+                        ).setAuthenticationRequired(true).build(),
+                    )
+                }
+            }
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", stopPendingIntent)
             .build()
     }
@@ -562,10 +615,7 @@ class RootPilotService : Service() {
 
     private fun Intent.readConfig(): RootPilotConfig? {
         if (!hasExtra(EXTRA_TASK)) return null
-        return RootPilotConfig(
-            apiKey = getStringExtra(EXTRA_API_KEY).orEmpty(),
-            baseUrl = getStringExtra(EXTRA_BASE_URL).orEmpty(),
-            model = getStringExtra(EXTRA_MODEL).orEmpty(),
+        return uiState.value.config.copy(
             task = getStringExtra(EXTRA_TASK).orEmpty(),
             manualConfirmation = getBooleanExtra(EXTRA_MANUAL_CONFIRMATION, true),
             allowScreenUpload = getBooleanExtra(EXTRA_ALLOW_SCREEN_UPLOAD, false),
@@ -583,19 +633,12 @@ class RootPilotService : Service() {
         is RootPilotAction.Finish -> "finish($success)"
     }
 
-    private fun RootPilotRunSnapshot.toConfig(): RootPilotConfig = RootPilotConfig(
-        baseUrl = baseUrl,
-        model = model,
-        task = task,
-        manualConfirmation = manualConfirmation,
-        allowScreenUpload = allowScreenUpload,
-    )
-
     companion object {
         private const val CHANNEL_ID = "rootpilot_agent"
         private const val NOTIFICATION_ID = 2001
         private const val OPEN_REQUEST_CODE = 2003
         private const val STOP_REQUEST_CODE = 2002
+        private const val CONFIRM_REQUEST_CODE = 2004
         private const val MAX_STEPS = 20
 
         private val _uiState = MutableStateFlow(RootPilotUiState())
@@ -608,20 +651,35 @@ class RootPilotService : Service() {
         const val ACTION_SINGLE_STEP = "com.example.agent.rootpilot.SINGLE_STEP"
         const val ACTION_AUTO_EXECUTE = "com.example.agent.rootpilot.AUTO_EXECUTE"
         const val ACTION_CONFIRM = "com.example.agent.rootpilot.CONFIRM"
+        const val ACTION_CONFIRM_NOTIFICATION = "com.example.agent.rootpilot.CONFIRM_NOTIFICATION"
+        const val EXTRA_APPROVAL_TOKEN = "extra_approval_token"
         const val ACTION_STOP = "com.example.agent.rootpilot.STOP"
         const val ACTION_RECOVER = "com.example.agent.rootpilot.RECOVER"
         const val ACTION_DISCARD_RECOVERY = "com.example.agent.rootpilot.DISCARD_RECOVERY"
         const val ACTION_RESTORE = "com.example.agent.rootpilot.RESTORE"
-        const val EXTRA_API_KEY = "extra_api_key"
-        const val EXTRA_BASE_URL = "extra_base_url"
-        const val EXTRA_MODEL = "extra_model"
         const val EXTRA_TASK = "extra_task"
         const val EXTRA_MANUAL_CONFIRMATION = "extra_manual_confirmation"
         const val EXTRA_ALLOW_SCREEN_UPLOAD = "extra_allow_screen_upload"
 
         fun updateConfig(config: RootPilotConfig) {
             synchronized(stateLock) {
-                _uiState.value = _uiState.value.copy(config = config)
+                // Task edits may carry a stale snapshot; only updateApiConfig owns API fields.
+                _uiState.value = _uiState.value.copy(
+                    config = _uiState.value.config.copy(
+                        task = config.task,
+                        manualConfirmation = config.manualConfirmation,
+                        allowScreenUpload = config.allowScreenUpload,
+                    ),
+                )
+            }
+        }
+
+        fun updateApiConfig(api: RootPilotApiConfig?) {
+            synchronized(stateLock) {
+                _uiState.value = _uiState.value.copy(
+                    config = (api ?: RootPilotApiConfig()).applyTo(_uiState.value.config),
+                    apiConfigured = api != null,
+                )
             }
         }
 
@@ -634,9 +692,6 @@ class RootPilotService : Service() {
         fun send(context: Context, action: String, config: RootPilotConfig? = null) {
             val intent = Intent(context, RootPilotService::class.java).setAction(action)
             config?.let {
-                intent.putExtra(EXTRA_API_KEY, it.apiKey)
-                intent.putExtra(EXTRA_BASE_URL, it.baseUrl)
-                intent.putExtra(EXTRA_MODEL, it.model)
                 intent.putExtra(EXTRA_TASK, it.task)
                 intent.putExtra(EXTRA_MANUAL_CONFIRMATION, it.manualConfirmation)
                 intent.putExtra(EXTRA_ALLOW_SCREEN_UPLOAD, it.allowScreenUpload)

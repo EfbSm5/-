@@ -7,11 +7,13 @@ import android.net.Uri
 import android.provider.Settings
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -39,11 +41,23 @@ class RootPilotActivity : ComponentActivity() {
         setContent {
             AgentTheme {
                 val state by viewModel.uiState.collectAsState()
+                val apiState by viewModel.apiState.collectAsState()
+                DisposableEffect(apiState.editing) {
+                    if (apiState.editing) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    onDispose { window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+                }
                 RootPilotScreen(
                     state = state,
+                    apiState = apiState,
                     onApiKeyChanged = viewModel::updateApiKey,
                     onBaseUrlChanged = viewModel::updateBaseUrl,
                     onModelChanged = viewModel::updateModel,
+                    onSaveApiConfig = viewModel::saveApiConfig,
+                    onEditApiConfig = viewModel::editApiConfig,
+                    onCancelApiConfigEdit = viewModel::cancelApiConfigEdit,
+                    onClearApiConfig = viewModel::clearApiConfig,
+                    onTestConnection = viewModel::testConnection,
                     onTaskChanged = viewModel::updateTask,
                     onTestRoot = viewModel::testRoot,
                     onCaptureScreen = viewModel::captureScreen,

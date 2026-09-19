@@ -14,11 +14,88 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DeepSeekClientTest {
+    @Test
+    fun testConnection_usesSelectedModelAndBearerWithoutScreenshotOrTask() = runTest {
+        ServerSocket(0).use { server ->
+            val captured = AtomicReference<Pair<String, String>>()
+            val worker = thread {
+                server.accept().use { socket ->
+                    captured.set(readHttpRequest(socket.getInputStream()))
+                    val body = """{"choices":[{"message":{"content":"OK"}}]}""".toByteArray()
+                    socket.getOutputStream().write(
+                        "HTTP/1.1 200 OK\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n".toByteArray() + body,
+                    )
+                }
+            }
+            val result = HttpDeepSeekClient().testConnection(
+                RootPilotConfig(
+                    apiKey = "test-token-not-a-real-secret",
+                    baseUrl = "http://127.0.0.1:${server.localPort}",
+                    model = "chosen-model",
+                    task = "must-not-upload-this-task",
+                    allowScreenUpload = false,
+                ),
+            )
+            worker.join(5_000)
+            assertFalse(worker.isAlive)
+            assertTrue(result is DeepSeekActionResult.Success)
+            val (headers, body) = captured.get()
+            assertTrue(headers.contains("Authorization: Bearer test-token-not-a-real-secret", ignoreCase = true))
+            assertTrue(body.contains("chosen-model"))
+            assertFalse(body.contains("image_url"))
+            assertFalse(body.contains("must-not-upload-this-task"))
+            assertFalse(body.contains("test-token-not-a-real-secret"))
+        }
+    }
+
+    @Test
+    fun failures_doNotExposeServerBodyOrFollowRedirects() = runTest {
+        for (status in listOf(401, 302)) {
+            ServerSocket(0).use { server ->
+                val worker = thread {
+                    server.accept().use { socket ->
+                        readHttpBody(socket.getInputStream())
+                        val body = "private server diagnostic test-token".toByteArray()
+                        socket.getOutputStream().write(
+                            ("HTTP/1.1 $status Failure\r\nLocation: http://127.0.0.1:1/other\r\n" +
+                                "Content-Length: ${body.size}\r\nConnection: close\r\n\r\n").toByteArray() + body,
+                        )
+                    }
+                }
+                val result = HttpDeepSeekClient().testConnection(
+                    RootPilotConfig(apiKey = "test-token", baseUrl = "http://127.0.0.1:${server.localPort}"),
+                ) as DeepSeekActionResult.Failure
+                worker.join(5_000)
+                assertFalse(worker.isAlive)
+                assertTrue(result.message.contains(status.toString()))
+                assertFalse(result.message.contains("test-token"))
+                assertFalse(result.message.contains("private server"))
+            }
+        }
+    }
+
+    @Test
+    fun invalidConfig_failsLocallyWithoutExposingCredential() = runTest {
+        val configs = listOf(
+            RootPilotConfig(),
+            RootPilotConfig(apiKey = "test-token", baseUrl = "https://test-token@example.invalid"),
+            RootPilotConfig(apiKey = "test-token", baseUrl = "https://example.invalid?token=test-token"),
+            RootPilotConfig(apiKey = "test-token", baseUrl = "file:///test-token"),
+            RootPilotConfig(apiKey = "test-token", baseUrl = "http://example.invalid"),
+            RootPilotConfig(apiKey = "test-token\n"),
+        )
+        for (config in configs) {
+            val result = HttpDeepSeekClient().testConnection(config) as DeepSeekActionResult.Failure
+            assertFalse(result.message.contains("test-token"))
+        }
+    }
+
     @Test
     fun relayMode_allowsBlankAppKeyAndOmitsAuthorizationHeader() = runTest {
         ServerSocket(0).use { server ->
@@ -152,7 +229,9 @@ class DeepSeekClientTest {
         }
     }
 
-    private fun readHttpBody(input: InputStream): String {
+    private fun readHttpBody(input: InputStream): String = readHttpRequest(input).second
+
+    private fun readHttpRequest(input: InputStream): Pair<String, String> {
         val headerBytes = ByteArrayOutputStream()
         var previous = -1
         while (true) {
@@ -178,6 +257,6 @@ class DeepSeekClientTest {
             if (count == -1) error("HTTP 请求体提前结束")
             offset += count
         }
-        return body.toString(Charsets.UTF_8)
+        return headers to body.toString(Charsets.UTF_8)
     }
 }

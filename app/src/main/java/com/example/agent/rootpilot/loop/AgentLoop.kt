@@ -16,6 +16,7 @@ import com.example.agent.rootpilot.screen.ScreenshotCaptureResult
 import com.example.agent.rootpilot.screen.ScreenshotFrame
 import com.example.agent.rootpilot.screen.ScreenshotProvider
 import java.security.MessageDigest
+import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -30,9 +31,14 @@ data class AgentLoopRequest(
 class ActionApproval internal constructor(
     private val decision: CompletableDeferred<Boolean>,
 ) {
+    val token: String = UUID.randomUUID().toString()
+
     fun approve() {
         decision.complete(true)
     }
+
+    fun approve(expectedToken: String): Boolean =
+        expectedToken == token && decision.complete(true)
 
     fun reject() {
         decision.complete(false)

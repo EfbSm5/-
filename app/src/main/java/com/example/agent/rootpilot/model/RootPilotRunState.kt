@@ -17,6 +17,7 @@ enum class RootPilotStatus {
 
 data class RootPilotUiState(
     val config: RootPilotConfig = RootPilotConfig(),
+    val apiConfigured: Boolean = false,
     val status: RootPilotStatus = RootPilotStatus.IDLE,
     val frame: ScreenshotFrame? = null,
     val step: Int = 0,
