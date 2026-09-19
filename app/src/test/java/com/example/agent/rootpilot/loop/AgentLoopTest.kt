@@ -22,6 +22,51 @@ import org.junit.Test
 
 class AgentLoopTest {
     @Test
+    fun waitsForWindowRemovalBeforeCapturingAndExecuting() = runTest {
+        val captureEvent = CompletableDeferred<Unit>()
+        val allowCapture = CompletableDeferred<Unit>()
+        val executeEvent = CompletableDeferred<Unit>()
+        val allowExecute = CompletableDeferred<Unit>()
+        var captures = 0
+        val root = RecordingRootExecutor()
+        val job = async {
+            AgentLoop(
+                screenshotProvider = object : ScreenshotProvider {
+                    override suspend fun capture(): ScreenshotCaptureResult {
+                        captures++
+                        return RepeatedScreenshotProvider().capture()
+                    }
+                },
+                deepSeekClient = QueueDeepSeekClient(
+                    """{"action":"tap","x":500,"y":500,"reason":"点击"}""",
+                ),
+                rootExecutor = root,
+            ).run(request()) {
+                when (it) {
+                    is AgentLoopEvent.Capturing -> {
+                        captureEvent.complete(Unit)
+                        allowCapture.await()
+                    }
+                    is AgentLoopEvent.Executing -> {
+                        executeEvent.complete(Unit)
+                        allowExecute.await()
+                    }
+                    else -> Unit
+                }
+            }
+        }
+        captureEvent.await()
+        assertEquals(0, captures)
+        allowCapture.complete(Unit)
+        executeEvent.await()
+        assertEquals(1, captures)
+        assertTrue(root.actions.isEmpty())
+        allowExecute.complete(Unit)
+        job.await()
+        assertEquals(1, root.actions.size)
+    }
+
+    @Test
     fun finishAction_completesWithoutRootExecution() = runTest {
         val root = RecordingRootExecutor()
         val events = mutableListOf<AgentLoopEvent>()

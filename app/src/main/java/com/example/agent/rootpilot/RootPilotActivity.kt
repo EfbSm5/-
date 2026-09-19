@@ -2,6 +2,9 @@ package com.example.agent.rootpilot
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -10,10 +13,13 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.example.agent.ui.theme.AgentTheme
 import com.example.agent.rootpilot.ui.RootPilotScreen
 
 class RootPilotActivity : ComponentActivity() {
+    private var overlayAllowed by mutableStateOf(false)
     private val viewModel: RootPilotViewModel by viewModels {
         RootPilotViewModel.Factory(applicationContext)
     }
@@ -49,9 +55,20 @@ class RootPilotActivity : ComponentActivity() {
                     onDiscardInterruptedRun = viewModel::discardInterruptedRun,
                     onManualConfirmationChanged = viewModel::setManualConfirmation,
                     onScreenUploadChanged = viewModel::setAllowScreenUpload,
+                    overlayAllowed = overlayAllowed,
+                    onOverlayPermission = {
+                        startActivity(
+                            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")),
+                        )
+                    },
                 )
+            }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        overlayAllowed = Settings.canDrawOverlays(this)
     }
 
     private companion object {

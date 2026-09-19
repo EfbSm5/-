@@ -29,6 +29,7 @@ import com.example.agent.rootpilot.root.RootExecutor
 import com.example.agent.rootpilot.root.SuRootExecutor
 import com.example.agent.rootpilot.screen.RootScreenshotProvider
 import com.example.agent.rootpilot.screen.ScreenshotCaptureResult
+import com.example.agent.rootpilot.ui.RootPilotOverlay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -40,6 +41,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 class RootPilotService : Service() {
@@ -51,9 +53,13 @@ class RootPilotService : Service() {
     private var activeJob: Job? = null
     private var pendingApproval: ActionApproval? = null
     private var latestStartId: Int = 0
+    private lateinit var overlay: RootPilotOverlay
 
     override fun onCreate() {
         super.onCreate()
+        overlay = RootPilotOverlay(this, ::confirmAction) {
+            stopAgent(synchronized(stateLock) { latestStartId })
+        }
         rootExecutor = SuRootExecutor()
         logRepository = sharedLogRepository
         runStore = RootPilotRunStore(File(filesDir, RootPilotRunStore.FILE_NAME))
@@ -88,6 +94,7 @@ class RootPilotService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        overlay.hide()
         synchronized(stateLock) {
             pendingApproval?.reject()
             pendingApproval = null
@@ -442,6 +449,11 @@ class RootPilotService : Service() {
                     errorMessage = "用户已停止",
                 )
             }
+        }
+        // Complete window removal before the loop captures or injects input; an async
+        // state collector could leave the panel in the screenshot or intercept a tap.
+        withContext(Dispatchers.Main.immediate) {
+            overlay.render(uiState.value)
         }
     }
 

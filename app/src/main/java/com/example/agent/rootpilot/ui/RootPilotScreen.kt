@@ -54,6 +54,8 @@ fun RootPilotScreen(
     onDiscardInterruptedRun: () -> Unit,
     onManualConfirmationChanged: (Boolean) -> Unit,
     onScreenUploadChanged: (Boolean) -> Unit,
+    overlayAllowed: Boolean,
+    onOverlayPermission: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val busy = state.status in setOf(
@@ -79,6 +81,9 @@ fun RootPilotScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("RootPilot", style = MaterialTheme.typography.headlineMedium)
+            TextButton(onClick = onOverlayPermission, enabled = !busy) {
+                Text(if (overlayAllowed) "悬浮操作面板已授权 · 管理权限" else "开启悬浮操作面板")
+            }
             Text(
                 "个人 Root 手机智能操作 Demo。截图会通过 Relay 上传给 DeepSeek。",
                 style = MaterialTheme.typography.bodyMedium,
@@ -238,7 +243,7 @@ private fun RootPilotStatus.displayName(): String = when (this) {
     RootPilotStatus.RECOVERY_REQUIRED -> "需要恢复确认"
 }
 
-private fun RootPilotAction.describe(): String = when (this) {
+internal fun RootPilotAction.describe(): String = when (this) {
     is RootPilotAction.Tap -> "tap($x,$y)：$reason"
     is RootPilotAction.Swipe -> "swipe($x1,$y1,$x2,$y2,$durationMillis)：$reason"
     is RootPilotAction.OpenApp -> "open_app($packageName)：$reason"
