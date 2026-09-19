@@ -9,7 +9,10 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <queries>
-        <package android:name="com.android.settings" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 
     <application
@@ -40,6 +43,16 @@
             android:exported="true"
             android:label="RootPilot"
             android:theme="@style/Theme.Agent" />
+        <service
+            android:name=".rootpilot.input.RootPilotInputMethodService"
+            android:label="@string/rootpilot_input_method"
+            android:permission="android.permission.BIND_INPUT_METHOD"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data android:name="android.view.im" android:resource="@xml/rootpilot_input_method" />
+        </service>
         <service
             android:name=".rootpilot.RootPilotService"
             android:exported="false"

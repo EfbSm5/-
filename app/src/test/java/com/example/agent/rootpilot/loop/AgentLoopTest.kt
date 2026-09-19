@@ -21,6 +21,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentLoopTest {
+    private val settingsApp = RootPilotApp("com.android.settings", "设置", "com.android.settings.Settings")
     @Test
     fun waitsForWindowRemovalBeforeCapturingAndExecuting() = runTest {
         val captureEvent = CompletableDeferred<Unit>()
@@ -159,14 +160,14 @@ class AgentLoopTest {
     }
 
     @Test
-    fun maliciousTypePayload_isRejectedBeforeRootExecution() = runTest {
+    fun invalidUnicodeTypePayload_isRejectedBeforeRootExecution() = runTest {
         val root = RecordingRootExecutor()
         val events = mutableListOf<AgentLoopEvent>()
         AgentLoop(
             screenshotProvider = IncrementingScreenshotProvider(),
             deepSeekClient = QueueDeepSeekClient(
-                """{"action":"type","text":"hello;rm","reason":"输入"}""",
-                """{"action":"type","text":"hello;rm","reason":"输入"}""",
+                """{"action":"type","text":"hello\u0000","reason":"输入"}""",
+                """{"action":"type","text":"hello\u0000","reason":"输入"}""",
             ),
             rootExecutor = root,
         ).run(request()) { events += it }
@@ -287,7 +288,7 @@ class AgentLoopTest {
     }
 
     @Test
-    fun automaticMode_executesAllowlistedOpenAppWithoutConfirmation() = runTest {
+    fun automaticMode_executesCatalogAppOnlyAfterConfirmation() = runTest {
         val root = RecordingRootExecutor()
 
         AgentLoop(
@@ -297,10 +298,17 @@ class AgentLoopTest {
                 """{"action":"finish","success":true,"message":"完成"}""",
             ),
             rootExecutor = root,
-        ).run(request(maxSteps = 2, manualConfirmation = false)) {}
+                appCatalog = com.example.agent.rootpilot.apps.AppCatalog { listOf(settingsApp) },
+        ).run(request(maxSteps = 2, manualConfirmation = false)) {
+            if (it is AgentLoopEvent.AwaitingConfirmation) {
+                assertTrue(it.action is RootPilotAction.OpenApp)
+                assertTrue(root.actions.isEmpty())
+                it.approval.approve()
+            }
+        }
 
         assertEquals(
-            listOf(ExecutableRootAction.OpenApp(RootPilotApp.SETTINGS)),
+            listOf(ExecutableRootAction.OpenApp(settingsApp)),
             root.actions,
         )
     }
@@ -346,17 +354,24 @@ class AgentLoopTest {
             screenshotProvider = IncrementingScreenshotProvider(),
             deepSeekClient = client,
             rootExecutor = root,
+                appCatalog = com.example.agent.rootpilot.apps.AppCatalog { listOf(settingsApp) },
         ).run(
             request(
                 maxSteps = 3,
                 manualConfirmation = false,
                 task = "打开系统设置，进入显示设置",
             ),
-        ) {}
+        ) {
+            if (it is AgentLoopEvent.AwaitingConfirmation) {
+                assertTrue(it.action is RootPilotAction.OpenApp)
+                assertTrue(root.actions.isEmpty())
+                it.approval.approve()
+            }
+        }
 
         assertEquals(
             listOf(
-                ExecutableRootAction.OpenApp(RootPilotApp.SETTINGS),
+                ExecutableRootAction.OpenApp(settingsApp),
                 ExecutableRootAction.Tap(49, 49),
             ),
             root.actions,
@@ -405,6 +420,7 @@ class AgentLoopTest {
                     """{"action":"open_app","package_name":"com.android.settings","reason":"打开设置"}""",
                 ),
                 rootExecutor = root,
+                appCatalog = com.example.agent.rootpilot.apps.AppCatalog { listOf(settingsApp) },
             ).run(request(manualConfirmation = true)) {
                 if (it is AgentLoopEvent.AwaitingConfirmation) approvalReady.complete(it.approval)
             }

@@ -70,7 +70,7 @@ class ActionParserTest {
                 is ActionParseResult.Failure,
         )
         assertTrue(
-            parser.parse("""{"action":"type","text":"hello;rm","reason":"输入"}""")
+            parser.parse("""{"action":"type","text":"hello\u0000","reason":"输入"}""")
                 is ActionParseResult.Failure,
         )
         assertTrue(
@@ -82,6 +82,14 @@ class ActionParserTest {
             parser.parse(
                 """{"action":"type","text":"${"a".repeat(129)}","reason":"输入"}""",
             ) is ActionParseResult.Failure,
+        )
+    }
+
+    @Test
+    fun acceptsLiteralUnicodeAndShellPunctuation() {
+        assertEquals(
+            ActionParseResult.Success(RootPilotAction.Type("中文 ' ; $(id)\n😀", "输入")),
+            parser.parse("""{"action":"type","text":"中文 ' ; $(id)\n😀","reason":"输入"}"""),
         )
     }
 }

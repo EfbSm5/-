@@ -58,14 +58,14 @@ enum class RootPilotKey {
     ENTER,
 }
 
-enum class RootPilotApp(val packageName: String) {
-    SETTINGS("com.android.settings"),
-    ;
-
-    companion object {
-        fun fromPackageName(packageName: String): RootPilotApp? = entries.firstOrNull {
-            it.packageName == packageName
-        }
+data class RootPilotApp(
+    val packageName: String,
+    val label: String,
+    val activityName: String,
+) {
+    init {
+        require(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+").matches(packageName))
+        require(Regex("[A-Za-z_][A-Za-z0-9_.$]*").matches(activityName))
     }
 }
 

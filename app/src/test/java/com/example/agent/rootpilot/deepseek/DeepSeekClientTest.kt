@@ -192,6 +192,9 @@ class DeepSeekClientTest {
                         history = emptyList(),
                         remainingSteps = 2,
                         step = step,
+                        availableApps = listOf(com.example.agent.rootpilot.model.RootPilotApp(
+                            "com.example.notes", "记事本", "com.example.notes.Main",
+                        )),
                     ),
                 )
 
@@ -204,7 +207,8 @@ class DeepSeekClientTest {
             assertTrue(requestBodies[0].contains("可通过 open_app 打开的应用"))
             assertTrue(requestBodies[1].contains("当前步骤：2"))
             requestBodies.forEach { body ->
-                assertTrue(body.contains("com.android.settings"))
+                assertTrue(body.contains("com.example.notes"))
+                assertTrue(body.contains("记事本"))
                 assertTrue(!body.contains("入口约束"))
                 assertTrue(!body.contains("第一步必须返回"))
                 assertTrue(body.contains("image_url"))

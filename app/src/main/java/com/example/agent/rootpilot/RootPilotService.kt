@@ -15,6 +15,8 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.example.agent.rootpilot.deepseek.HttpDeepSeekClient
+import com.example.agent.rootpilot.apps.AndroidAppCatalog
+import com.example.agent.rootpilot.input.AndroidImeEnvironment
 import com.example.agent.rootpilot.log.AgentLogRepository
 import com.example.agent.rootpilot.log.InMemoryAgentLogRepository
 import com.example.agent.rootpilot.loop.ActionApproval
@@ -63,7 +65,9 @@ class RootPilotService : Service() {
         overlay = RootPilotOverlay(this, ::confirmAction) {
             stopAgent(synchronized(stateLock) { latestStartId })
         }
-        rootExecutor = SuRootExecutor()
+        val appCatalog = AndroidAppCatalog(this)
+        val textInput = AndroidImeEnvironment.createInput(this)
+        rootExecutor = SuRootExecutor(appCatalog = appCatalog, typeText = textInput::type)
         logRepository = sharedLogRepository
         runStore = RootPilotRunStore(File(filesDir, RootPilotRunStore.FILE_NAME))
         restoreInterruptedRun()
@@ -71,6 +75,7 @@ class RootPilotService : Service() {
             screenshotProvider = RootScreenshotProvider(rootExecutor),
             deepSeekClient = HttpDeepSeekClient(),
             rootExecutor = rootExecutor,
+            appCatalog = appCatalog,
         )
         createNotificationChannel()
     }

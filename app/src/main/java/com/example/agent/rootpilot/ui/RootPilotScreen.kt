@@ -68,6 +68,9 @@ fun RootPilotScreen(
     onManualConfirmationChanged: (Boolean) -> Unit,
     onScreenUploadChanged: (Boolean) -> Unit,
     overlayAllowed: Boolean,
+    inputMethodEnabled: Boolean,
+    inputMessage: String?,
+    onInputMethodSettings: () -> Unit,
     onOverlayPermission: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -100,8 +103,13 @@ fun RootPilotScreen(
             TextButton(onClick = onOverlayPermission, enabled = !busy) {
                 Text(if (overlayAllowed) "悬浮操作面板已授权 · 管理权限" else "开启悬浮操作面板")
             }
+            TextButton(onClick = onInputMethodSettings, enabled = !busy) {
+                Text(if (inputMethodEnabled) "Unicode 输入已启用 · 管理输入法" else "启用 RootPilot 输入法（中文 / Unicode）")
+            }
+            Text("文本通过输入法写入当前光标位置，完成后恢复原输入法；不支持密码框。请先在系统设置中手动启用，平时仍使用常用输入法。")
+            inputMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Text(
-                "截图会发送至所配置的 API 服务。默认手机直连 DeepSeek，也可自定义 Relay。",
+                "截图及可启动应用的名称、包名会发送至所配置的 API 服务。默认手机直连 DeepSeek，也可自定义 Relay。",
                 style = MaterialTheme.typography.bodyMedium,
             )
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -182,7 +190,7 @@ fun RootPilotScreen(
                 onCheckedChange = onManualConfirmationChanged,
             )
             Text(
-                "输入动作仅支持安全 ASCII（字母、数字和 ._@+-）；自动模式会执行点击和滑动，输入文本及系统按键仍需确认。",
+                "输入支持中文、空格、标点、换行和 emoji，最多 128 个 UTF-16 单元。自动模式可执行点击和滑动；打开应用、输入文本及系统按键始终需要确认。",
                 style = MaterialTheme.typography.bodySmall,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

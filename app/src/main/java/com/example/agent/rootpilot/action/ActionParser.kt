@@ -2,6 +2,7 @@ package com.example.agent.rootpilot.action
 
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotKey
+import com.example.agent.rootpilot.input.InputText
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
@@ -70,8 +71,8 @@ class ActionParser(
             "type" -> {
                 requireKeys(keys, "action", "text", "reason")
                 val normalizedText = text.requireText()
-                require(TYPE_TEXT_PATTERN.matches(normalizedText)) {
-                    "type.text 只能包含安全 ASCII 字符"
+                require(InputText.isValid(normalizedText)) {
+                    "type.text 包含不支持的控制字符或无效 Unicode"
                 }
                 RootPilotAction.Type(normalizedText, reason.requireReason())
             }
@@ -175,7 +176,6 @@ class ActionParser(
         const val MAX_MESSAGE_LENGTH = 500
         const val MAX_TEXT_LENGTH = 128
         const val MAX_PACKAGE_NAME_LENGTH = 200
-        val TYPE_TEXT_PATTERN = Regex("^[A-Za-z0-9._@+\\-]+$")
         val PACKAGE_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
     }
 }

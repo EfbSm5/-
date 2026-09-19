@@ -3,6 +3,8 @@ package com.example.agent.rootpilot.root
 import com.example.agent.rootpilot.model.ExecutableRootAction
 import com.example.agent.rootpilot.model.RootPilotApp
 import com.example.agent.rootpilot.model.RootPilotKey
+import com.example.agent.rootpilot.apps.AppCatalog
+import com.example.agent.rootpilot.input.InputText
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
@@ -26,10 +28,18 @@ sealed interface RootScreenshotResult {
 }
 
 internal object RootCommandBuilder {
-    fun openApp(app: RootPilotApp): String = when (app) {
-        RootPilotApp.SETTINGS ->
-            "am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.android.settings"
+    fun openApp(app: RootPilotApp): String =
+        "am start -W --user current -a android.intent.action.MAIN " +
+            "-c android.intent.category.LAUNCHER -n '${app.packageName}/${app.activityName}'"
+
+    fun selectInputMethod(id: String): String {
+        require(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+/[A-Za-z0-9_.$]+").matches(id))
+        return "ime set --user current '$id'"
     }
+
+    fun launchReportedSuccess(output: String): Boolean =
+        output.lineSequence().any { it.trim() == "Status: ok" } &&
+            output.lineSequence().none { it.trimStart().startsWith("Error:") }
 }
 
 interface RootExecutor {
@@ -39,11 +49,20 @@ interface RootExecutor {
 
     suspend fun execute(action: ExecutableRootAction): RootExecutionResult
 
+    suspend fun executeConfirmed(
+        action: ExecutableRootAction,
+        confirm: suspend (String?) -> Boolean,
+    ): RootExecutionResult = if (confirm(null)) execute(action) else RootExecutionResult.Failure("用户取消动作")
+
     fun cancel()
 }
 
 class SuRootExecutor(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val appCatalog: AppCatalog = AppCatalog { emptyList() },
+    private val typeText: suspend (String, suspend (String) -> Boolean) -> RootExecutionResult = { _, _ ->
+        RootExecutionResult.Failure("文本输入通道未配置")
+    },
 ) : RootExecutor {
     private val processLock = Any()
     private var activeProcess: Process? = null
@@ -87,14 +106,27 @@ class SuRootExecutor(
             RootExecutionResult.Failure("swipe 参数不合法")
         }
 
-        is ExecutableRootAction.OpenApp -> when (action.app) {
-            RootPilotApp.SETTINGS -> runTextCommand(RootCommandBuilder.openApp(action.app))
+        is ExecutableRootAction.OpenApp -> if (
+            appCatalog.listApps().any {
+                it.packageName == action.app.packageName && it.activityName == action.app.activityName
+            }
+        ) {
+            when (val result = runTextCommand(RootCommandBuilder.openApp(action.app))) {
+                is RootExecutionResult.Failure -> result
+                is RootExecutionResult.Success -> if (RootCommandBuilder.launchReportedSuccess(result.output)) {
+                    RootExecutionResult.Success("已提交应用启动，仍需截图确认目标页面")
+                } else {
+                    RootExecutionResult.Failure("系统未确认应用启动成功，应用可能已卸载或入口已失效")
+                }
+            }
+        } else {
+            RootExecutionResult.Failure("应用已不在可启动列表中，请重新观察")
         }
 
-        is ExecutableRootAction.Type -> if (TYPE_TEXT_PATTERN.matches(action.text)) {
-            runTextCommand("input text ${action.text}")
+        is ExecutableRootAction.Type -> if (InputText.isValid(action.text)) {
+            typeText(action.text) { true }
         } else {
-            RootExecutionResult.Failure("type 文本包含不安全字符")
+            RootExecutionResult.Failure("输入文本不合法")
         }
         is ExecutableRootAction.Key -> runTextCommand("input keyevent ${action.key.toKeyCode()}")
         is ExecutableRootAction.Wait -> if (action.durationMillis in 300..5_000) {
@@ -112,6 +144,14 @@ class SuRootExecutor(
             activeProcess = null
         }
     }
+
+    override suspend fun executeConfirmed(
+        action: ExecutableRootAction,
+        confirm: suspend (String?) -> Boolean,
+    ): RootExecutionResult = if (action is ExecutableRootAction.Type) {
+        if (InputText.isValid(action.text)) typeText(action.text) { confirm(it) }
+        else RootExecutionResult.Failure("输入文本不合法")
+    } else super.executeConfirmed(action, confirm)
 
     private suspend fun runTextCommand(command: String): RootExecutionResult = when (
         val result = runProcess(command, readBinary = false)
@@ -188,6 +228,5 @@ class SuRootExecutor(
 
     private companion object {
         val ROOT_ID_PATTERN = Regex("uid=0(?:\\(| )")
-        val TYPE_TEXT_PATTERN = Regex("^[A-Za-z0-9._@+\\-]+$")
     }
 }

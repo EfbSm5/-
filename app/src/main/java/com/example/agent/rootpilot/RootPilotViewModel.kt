@@ -7,6 +7,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.HttpDeepSeekClient
 import com.example.agent.rootpilot.deepseek.apiValidationError
+import com.example.agent.rootpilot.input.AndroidImeEnvironment
+import com.example.agent.rootpilot.root.RootExecutionResult
 import com.example.agent.rootpilot.model.RootPilotConfig
 import com.example.agent.rootpilot.model.RootPilotStatus
 import com.example.agent.rootpilot.model.RootPilotUiState
@@ -39,6 +41,21 @@ class RootPilotViewModel(
     val uiState: StateFlow<RootPilotUiState> = RootPilotService.uiState
     private val _apiState = MutableStateFlow(ApiConfigUiState())
     val apiState: StateFlow<ApiConfigUiState> = _apiState.asStateFlow()
+    private val _inputMessage = MutableStateFlow<String?>(null)
+    val inputMessage: StateFlow<String?> = _inputMessage.asStateFlow()
+
+    fun recoverInputMethod() {
+        viewModelScope.launch {
+            try {
+                val result = withContext(ioDispatcher) { AndroidImeEnvironment.createInput(appContext).recover() }
+                _inputMessage.value = (result as? RootExecutionResult.Failure)?.message
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                _inputMessage.value = "输入法恢复失败，请在系统输入法设置中选择常用输入法"
+            }
+        }
+    }
 
     init {
         viewModelScope.launch {

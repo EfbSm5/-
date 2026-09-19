@@ -18,9 +18,9 @@ class ActionPolicy {
     ): Boolean = when (action) {
         is RootPilotAction.Tap,
         is RootPilotAction.Swipe,
-        is RootPilotAction.OpenApp,
         -> manualConfirmation
 
+        is RootPilotAction.OpenApp,
         is RootPilotAction.Type,
         is RootPilotAction.Key,
         -> true
@@ -31,7 +31,11 @@ class ActionPolicy {
         -> false
     }
 
-    fun toExecutable(action: RootPilotAction, screenSize: ScreenSize): ActionPolicyResult {
+    fun toExecutable(
+        action: RootPilotAction,
+        screenSize: ScreenSize,
+        availableApps: List<RootPilotApp> = emptyList(),
+    ): ActionPolicyResult {
         if (screenSize.width <= 0 || screenSize.height <= 0) {
             return ActionPolicyResult.Rejected("屏幕尺寸不合法")
         }
@@ -53,10 +57,10 @@ class ActionPolicy {
                 ),
             )
 
-            is RootPilotAction.OpenApp -> RootPilotApp
-                .fromPackageName(action.packageName)
+            is RootPilotAction.OpenApp -> availableApps
+                .singleOrNull { it.packageName == action.packageName }
                 ?.let { app -> ActionPolicyResult.Allowed(ExecutableRootAction.OpenApp(app)) }
-                ?: ActionPolicyResult.Rejected("不允许打开该应用")
+                ?: ActionPolicyResult.Rejected("应用不在当前可启动列表中")
 
             is RootPilotAction.Type -> ActionPolicyResult.Allowed(
                 ExecutableRootAction.Type(action.text),

@@ -3,6 +3,9 @@ package com.example.agent.rootpilot
 import android.Manifest
 import android.content.pm.PackageManager
 import android.content.Intent
+import android.content.ComponentName
+import android.view.inputmethod.InputMethodManager
+import com.example.agent.rootpilot.input.RootPilotInputMethodService
 import android.net.Uri
 import android.provider.Settings
 import android.os.Build
@@ -22,6 +25,7 @@ import com.example.agent.rootpilot.ui.RootPilotScreen
 
 class RootPilotActivity : ComponentActivity() {
     private var overlayAllowed by mutableStateOf(false)
+    private var inputMethodEnabled by mutableStateOf(false)
     private val viewModel: RootPilotViewModel by viewModels {
         RootPilotViewModel.Factory(applicationContext)
     }
@@ -42,6 +46,7 @@ class RootPilotActivity : ComponentActivity() {
             AgentTheme {
                 val state by viewModel.uiState.collectAsState()
                 val apiState by viewModel.apiState.collectAsState()
+                val inputMessage by viewModel.inputMessage.collectAsState()
                 DisposableEffect(apiState.editing) {
                     if (apiState.editing) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                     else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -70,6 +75,9 @@ class RootPilotActivity : ComponentActivity() {
                     onManualConfirmationChanged = viewModel::setManualConfirmation,
                     onScreenUploadChanged = viewModel::setAllowScreenUpload,
                     overlayAllowed = overlayAllowed,
+                    inputMethodEnabled = inputMethodEnabled,
+                    inputMessage = inputMessage,
+                    onInputMethodSettings = { startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) },
                     onOverlayPermission = {
                         startActivity(
                             Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")),
@@ -83,6 +91,9 @@ class RootPilotActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         overlayAllowed = Settings.canDrawOverlays(this)
+        val ownId = ComponentName(this, RootPilotInputMethodService::class.java).flattenToShortString()
+        inputMethodEnabled = getSystemService(InputMethodManager::class.java).enabledInputMethodList.any { it.id == ownId }
+        viewModel.recoverInputMethod()
     }
 
     private companion object {

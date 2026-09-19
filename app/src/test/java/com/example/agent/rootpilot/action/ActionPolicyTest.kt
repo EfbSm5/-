@@ -106,19 +106,24 @@ class ActionPolicyTest {
             policy.requiresConfirmation(
                 action = RootPilotAction.OpenApp("com.android.settings", "打开设置"),
                 manualConfirmation = false,
-            ).not(),
+            ),
         )
     }
 
     @Test
-    fun openAppOnlyAllowsSettingsPackage() {
+    fun openAppOnlyAllowsCurrentCatalogEntries() {
+        val app = RootPilotApp("com.example.notes", "记事本", "com.example.notes.Main")
         assertEquals(
-            ActionPolicyResult.Allowed(ExecutableRootAction.OpenApp(RootPilotApp.SETTINGS)),
+            ActionPolicyResult.Allowed(ExecutableRootAction.OpenApp(app)),
             policy.toExecutable(
-                RootPilotAction.OpenApp("com.android.settings", "打开设置"),
+                RootPilotAction.OpenApp(app.packageName, "打开应用"),
                 ScreenSize(1_200, 2_640),
+                listOf(app),
             ),
         )
+        assertTrue(policy.toExecutable(
+            RootPilotAction.OpenApp(app.packageName, "打开应用"), ScreenSize(100, 100), listOf(app, app),
+        ) is ActionPolicyResult.Rejected)
         assertTrue(
             policy.toExecutable(
                 RootPilotAction.OpenApp("com.example.untrusted", "打开应用"),

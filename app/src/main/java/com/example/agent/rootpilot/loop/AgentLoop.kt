@@ -4,6 +4,7 @@ import com.example.agent.rootpilot.action.ActionParser
 import com.example.agent.rootpilot.action.ActionParseResult
 import com.example.agent.rootpilot.action.ActionPolicy
 import com.example.agent.rootpilot.action.ActionPolicyResult
+import com.example.agent.rootpilot.apps.AppCatalog
 import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.DeepSeekClient
 import com.example.agent.rootpilot.deepseek.DeepSeekVisionRequest
@@ -77,6 +78,7 @@ class AgentLoop(
     private val rootExecutor: RootExecutor,
     private val actionParser: ActionParser = ActionParser(),
     private val actionPolicy: ActionPolicy = ActionPolicy(),
+    private val appCatalog: AppCatalog = AppCatalog { emptyList() },
 ) {
     suspend fun captureScreen(): ScreenshotCaptureResult = screenshotProvider.capture()
 
@@ -125,6 +127,7 @@ class AgentLoop(
                 return
             }
 
+            val availableApps = appCatalog.listApps()
             var action: RootPilotAction? = null
             var parseRetryUsed = false
             var requestHistory: List<String> = history
@@ -137,6 +140,7 @@ class AgentLoop(
                         history = requestHistory,
                         remainingSteps = request.maxSteps - step,
                         step = step,
+                        availableApps = availableApps,
                     ),
                 )
                 val rawActionJson = when (modelResult) {
@@ -194,6 +198,7 @@ class AgentLoop(
             val executableAction = when (val policyResult = actionPolicy.toExecutable(
                     action = action,
                     screenSize = ScreenSize(frame.physicalWidth, frame.physicalHeight),
+                    availableApps = availableApps,
                 )) {
                 is ActionPolicyResult.Rejected -> {
                     onEvent(AgentLoopEvent.Failed(policyResult.message))
@@ -213,18 +218,27 @@ class AgentLoop(
             } else {
                 null
             }
-            if (approval != null) {
-                onEvent(AgentLoopEvent.AwaitingConfirmation(step, action, approval))
-                if (!approval.await()) {
-                    onEvent(AgentLoopEvent.Stopped)
-                    return
+            var rejected = false
+            val executionResult = rootExecutor.executeConfirmed(executableAction) { targetPackage ->
+                if (approval != null) {
+                    val preview = if (action is RootPilotAction.Type && targetPackage != null) {
+                        action.copy(reason = "输入到 $targetPackage：${action.reason}")
+                    } else action
+                    onEvent(AgentLoopEvent.AwaitingConfirmation(step, preview, approval))
+                    rejected = !approval.await()
                 }
+                if (!rejected) {
+                    currentCoroutineContext().ensureActive()
+                    onEvent(AgentLoopEvent.Executing(step, action))
+                    currentCoroutineContext().ensureActive()
+                }
+                !rejected
             }
-
-            currentCoroutineContext().ensureActive()
-            onEvent(AgentLoopEvent.Executing(step, action))
-            currentCoroutineContext().ensureActive()
-            when (val executionResult = rootExecutor.execute(executableAction)) {
+            if (rejected) {
+                onEvent(AgentLoopEvent.Stopped)
+                return
+            }
+            when (executionResult) {
                 is RootExecutionResult.Failure -> {
                     onEvent(AgentLoopEvent.Failed(executionResult.message))
                     return
