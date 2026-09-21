@@ -13,6 +13,14 @@ class ActionPolicyTest {
     private val policy = ActionPolicy()
 
     @Test
+    fun createTodo_alwaysRequiresConfirmationAndCannotBecomeRootAction() {
+        val action = RootPilotAction.CreateTodo("买牛奶", null, "记录")
+        assertTrue(policy.requiresConfirmation(action, manualConfirmation = false))
+        assertTrue(policy.requiresConfirmation(action, manualConfirmation = true))
+        assertTrue(policy.toExecutable(action, ScreenSize(100, 100)) is ActionPolicyResult.Rejected)
+    }
+
+    @Test
     fun normalizesCoordinatesAgainstCurrentScreenSize() {
         assertEquals(
             ActionPolicyResult.Allowed(ExecutableRootAction.Tap(599, 1319)),

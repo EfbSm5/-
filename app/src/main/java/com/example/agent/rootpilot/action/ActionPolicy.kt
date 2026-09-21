@@ -21,6 +21,7 @@ class ActionPolicy {
         -> manualConfirmation
 
         is RootPilotAction.OpenApp,
+        is RootPilotAction.CreateTodo,
         is RootPilotAction.Type,
         is RootPilotAction.Key,
         -> true
@@ -75,6 +76,7 @@ class ActionPolicy {
             )
 
             is RootPilotAction.AskUser -> ActionPolicyResult.Rejected("ask_user 需要先交给用户处理")
+            is RootPilotAction.CreateTodo -> ActionPolicyResult.Rejected("create_todo 由本地待办仓库执行")
             is RootPilotAction.Finish -> ActionPolicyResult.Rejected("finish 不需要 Root 执行")
         }
     }

@@ -28,6 +28,12 @@ sealed interface RootPilotAction {
         override val reason: String,
     ) : RootPilotAction
 
+    data class CreateTodo(
+        val title: String,
+        val dueAt: String?,
+        override val reason: String,
+    ) : RootPilotAction
+
     data class Key(
         val key: RootPilotKey,
         override val reason: String,

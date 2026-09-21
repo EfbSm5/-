@@ -16,6 +16,7 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.ScrollView
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotStatus
 import com.example.agent.rootpilot.model.RootPilotUiState
@@ -55,6 +56,9 @@ internal class RootPilotOverlay(
         textSize = 14f
         maxLines = 6
     }
+    private val detailScroll = ScrollView(windowContext).apply {
+        addView(detail)
+    }
     private val buttons = LinearLayout(windowContext)
     private val confirm = Button(windowContext).apply {
         text = "确认"
@@ -85,7 +89,7 @@ internal class RootPilotOverlay(
 
     init {
         panel.addView(header)
-        panel.addView(detail)
+        panel.addView(detailScroll)
         buttons.addView(confirm, LinearLayout.LayoutParams(0, -2, 1f))
         buttons.addView(stop, LinearLayout.LayoutParams(0, -2, 1f))
         panel.addView(buttons)
@@ -97,6 +101,7 @@ internal class RootPilotOverlay(
     }
 
     fun render(value: RootPilotUiState) {
+        val actionChanged = value.pendingAction !== state.pendingAction
         state = value
         if (!value.status.showsOverlay() || !Settings.canDrawOverlays(windowContext)) {
             hide()
@@ -105,7 +110,15 @@ internal class RootPilotOverlay(
         val awaiting = value.status == RootPilotStatus.WAITING_CONFIRMATION
         header.text = "RootPilot · 第 ${value.step + 1} 步 · ${if (awaiting) "待确认" else "思考中"} ${if (collapsed) "＋" else "－"}"
         detail.text = if (awaiting) value.pendingAction?.describe().orEmpty() else "正在分析截图…"
-        detail.visibility = if (collapsed) View.GONE else View.VISIBLE
+        val todo = value.pendingAction is RootPilotAction.CreateTodo
+        detail.maxLines = if (todo) Int.MAX_VALUE else 6
+        detailScroll.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            if (todo) dp(128) else LinearLayout.LayoutParams.WRAP_CONTENT,
+        )
+        detailScroll.contentDescription = if (todo) "待办详情，可上下滚动查看完整内容" else null
+        if (actionChanged) detailScroll.scrollTo(0, 0)
+        detailScroll.visibility = if (collapsed) View.GONE else View.VISIBLE
         buttons.visibility = if (collapsed) View.GONE else View.VISIBLE
         confirm.isEnabled = awaiting && value.pendingAction != null
         confirm.text = if (value.pendingAction is RootPilotAction.AskUser) "已处理，继续" else "确认"

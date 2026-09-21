@@ -46,6 +46,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import android.util.Log
+import com.example.agent.rootpilot.log.RunTrace
+import com.example.agent.rootpilot.log.TraceEvent
+import com.example.agent.rootpilot.log.TraceStage
+import com.example.agent.rootpilot.log.TraceStatus
+import com.example.agent.rootpilot.log.TraceReason
 
 class RootPilotService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -54,6 +60,7 @@ class RootPilotService : Service() {
     private lateinit var logRepository: AgentLogRepository
     private lateinit var runStore: RootPilotRunStore
     private var activeJob: Job? = null
+    private var activeTrace: Pair<Job, RunTrace>? = null
     private var pendingApproval: ActionApproval? = null
     private var latestStartId: Int = 0
     private lateinit var overlay: RootPilotOverlay
@@ -76,6 +83,7 @@ class RootPilotService : Service() {
             deepSeekClient = HttpDeepSeekClient(),
             rootExecutor = rootExecutor,
             appCatalog = appCatalog,
+            todoRepository = com.example.agent.agent.planning.FileTodoRepository(File(filesDir, "agent_todos.json")),
         )
         createNotificationChannel()
     }
@@ -122,16 +130,16 @@ class RootPilotService : Service() {
     }
 
     private fun testRoot(startId: Int) {
-        startOneShot(startId) {
-            appendLog("开始测试 Root 权限")
+        startOneShot(startId) { trace ->
+            appendLog(trace, TraceReason.ROOT_CHECK_STARTED, TraceStatus.STARTED)
             when (val result = rootExecutor.checkRoot()) {
                 is RootExecutionResult.Success -> {
-                    appendLog("Root 检测成功")
+                    appendLog(trace, TraceReason.ROOT_CHECK_OK, TraceStatus.SUCCESS)
                     updateState(status = RootPilotStatus.IDLE, errorMessage = null)
                 }
 
                 is RootExecutionResult.Failure -> {
-                    appendLog("Root 检测失败：${result.message}")
+                    appendLog(trace, TraceReason.ROOT_CHECK_FAILED, TraceStatus.FAILED)
                     updateState(
                         status = RootPilotStatus.FAILED,
                         errorMessage = result.message,
@@ -142,8 +150,8 @@ class RootPilotService : Service() {
     }
 
     private fun captureScreen(startId: Int) {
-        startOneShot(startId) {
-            appendLog("开始截取屏幕")
+        startOneShot(startId) { trace ->
+            appendLog(trace, TraceReason.CAPTURE_STARTED, TraceStatus.STARTED)
             when (val result = loop.captureScreen()) {
                 is ScreenshotCaptureResult.Success -> {
                     updateState(
@@ -151,11 +159,11 @@ class RootPilotService : Service() {
                         frame = result.frame,
                         errorMessage = null,
                     )
-                    appendLog("截图成功：${result.frame.width}x${result.frame.height}")
+                    appendLog(trace, TraceReason.CAPTURE_OK, TraceStatus.SUCCESS)
                 }
 
                 is ScreenshotCaptureResult.Failure -> {
-                    appendLog("截图失败：${result.message}")
+                    appendLog(trace, TraceReason.CAPTURE_FAILED, TraceStatus.FAILED)
                     updateState(
                         status = RootPilotStatus.FAILED,
                         errorMessage = result.message,
@@ -216,6 +224,7 @@ class RootPilotService : Service() {
         if (recovering) clearRunSnapshot()
         persistRunSnapshot(RootPilotStatus.CAPTURING, step = 0)
 
+        val trace = RunTrace(sink = ::appendTraceLine)
         lateinit var job: Job
         job = serviceScope.launch(start = CoroutineStart.LAZY) {
             try {
@@ -225,12 +234,12 @@ class RootPilotService : Service() {
                         maxSteps = MAX_STEPS,
                         singleStep = singleStep,
                     ),
+                    trace = trace,
                     onEvent = ::handleEvent,
                 )
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                appendLog("AgentLoop 执行异常")
                 clearRunSnapshot()
                 updateState(
                     status = RootPilotStatus.FAILED,
@@ -238,28 +247,35 @@ class RootPilotService : Service() {
                     clearPendingAction = true,
                 )
             } finally {
+                synchronized(stateLock) {
+                    if (activeTrace?.first === job) activeTrace = null
+                }
                 finishJob(job)
             }
         }
-        synchronized(stateLock) { activeJob = job }
+        synchronized(stateLock) {
+            activeJob = job
+            activeTrace = job to trace
+        }
         job.start()
     }
 
-    private fun startOneShot(startId: Int, work: suspend () -> Unit) {
+    private fun startOneShot(startId: Int, work: suspend (RunTrace) -> Unit) {
         synchronized(stateLock) {
             if (activeJob?.isActive == true) return
             updateStateLocked(
                 status = RootPilotStatus.CAPTURING,
                 errorMessage = null,
             )
+            val trace = RunTrace(sink = ::appendTraceLine)
             lateinit var job: Job
             job = serviceScope.launch {
                 try {
-                    work()
+                    work(trace)
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
-                    appendLog("RootPilot 操作异常")
+                    appendLog(trace, TraceReason.SERVICE_ERROR, TraceStatus.FAILED)
                     updateState(
                         status = RootPilotStatus.FAILED,
                         errorMessage = "RootPilot 操作异常",
@@ -303,6 +319,9 @@ class RootPilotService : Service() {
 
     private fun stopAgent(startId: Int) {
         synchronized(stateLock) {
+            activeTrace?.takeIf { it.first === activeJob }?.second?.record(
+                TraceEvent.STOP_REQUESTED, TraceStatus.REQUESTED, stage = TraceStage.SERVICE,
+            )
             pendingApproval?.reject()
             pendingApproval = null
             activeJob?.cancel()
@@ -314,7 +333,6 @@ class RootPilotService : Service() {
             )
         }
         rootExecutor.cancel()
-        appendLog("用户停止执行")
         clearRunSnapshot()
         stopSelfResult(startId)
     }
@@ -386,7 +404,6 @@ class RootPilotService : Service() {
             is AgentLoopEvent.Capturing -> {
                 updateState(status = RootPilotStatus.CAPTURING, step = event.step)
                 persistRunSnapshot(RootPilotStatus.CAPTURING, event.step)
-                appendLog("第 ${event.step + 1} 步：截取屏幕")
             }
 
             is AgentLoopEvent.ScreenshotCaptured -> {
@@ -401,7 +418,6 @@ class RootPilotService : Service() {
             is AgentLoopEvent.RequestingModel -> {
                 updateState(status = RootPilotStatus.REQUESTING_MODEL, step = event.step)
                 persistRunSnapshot(RootPilotStatus.REQUESTING_MODEL, event.step)
-                appendLog("第 ${event.step + 1} 步：请求 DeepSeek Vision")
             }
 
             is AgentLoopEvent.AwaitingConfirmation -> {
@@ -419,7 +435,6 @@ class RootPilotService : Service() {
                     event.step,
                     event.action.describeForSnapshot(),
                 )
-                appendLog("等待确认：${event.action.reason}")
             }
 
             is AgentLoopEvent.Executing -> {
@@ -437,13 +452,11 @@ class RootPilotService : Service() {
                     event.step,
                     event.action.describeForSnapshot(),
                 )
-                appendLog("执行动作：${event.action.reason}")
             }
 
             is AgentLoopEvent.WaitingScreen -> {
                 updateState(status = RootPilotStatus.WAITING_SCREEN, step = event.step)
                 persistRunSnapshot(RootPilotStatus.WAITING_SCREEN, event.step)
-                appendLog("等待页面稳定")
             }
 
             is AgentLoopEvent.Completed -> {
@@ -453,7 +466,6 @@ class RootPilotService : Service() {
                     errorMessage = event.message,
                 )
                 clearRunSnapshot()
-                appendLog("任务完成：${event.message}")
             }
 
             is AgentLoopEvent.Failed -> {
@@ -463,7 +475,6 @@ class RootPilotService : Service() {
                     errorMessage = event.message,
                 )
                 clearRunSnapshot()
-                appendLog("任务失败：${event.message}")
             }
 
             AgentLoopEvent.Stopped -> {
@@ -516,8 +527,15 @@ class RootPilotService : Service() {
         notifyState()
     }
 
-    private fun appendLog(message: String) {
-        logRepository.append(message)
+    private fun appendLog(trace: RunTrace, reason: TraceReason, status: TraceStatus) {
+        trace.record(
+            TraceEvent.CONTROL, status, reason, stage = TraceStage.SERVICE,
+        )
+    }
+
+    private fun appendTraceLine(line: String) {
+        logRepository.append(line)
+        Log.i(RunTrace.TAG, line)
         synchronized(stateLock) {
             _uiState.value = _uiState.value.copy(logs = logRepository.list())
             notifyState()
@@ -628,6 +646,7 @@ class RootPilotService : Service() {
     }
 
     private fun RootPilotAction.describeForSnapshot(): String = when (this) {
+        is RootPilotAction.CreateTodo -> "create_todo 标题：$title；截止时间：${dueAt ?: "无"}"
         is RootPilotAction.Tap -> "tap($x,$y)"
         is RootPilotAction.Swipe -> "swipe($x1,$y1,$x2,$y2,$durationMillis)"
         is RootPilotAction.OpenApp -> "open_app($packageName)"

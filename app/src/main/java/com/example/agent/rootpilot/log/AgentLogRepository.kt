@@ -6,12 +6,14 @@ interface AgentLogRepository {
     fun list(): List<String>
 }
 
-class InMemoryAgentLogRepository : AgentLogRepository {
-    private val entries = mutableListOf<String>()
+class InMemoryAgentLogRepository(private val capacity: Int = 500) : AgentLogRepository {
+    init { require(capacity > 0) }
+    private val entries = ArrayDeque<String>()
 
     override fun append(message: String) {
         synchronized(entries) {
             entries += message
+            while (entries.size > capacity) entries.removeFirst()
         }
     }
 

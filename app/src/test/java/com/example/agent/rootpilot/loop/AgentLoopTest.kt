@@ -19,8 +19,171 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.example.agent.agent.model.CreateTodo
+import com.example.agent.agent.planning.TodoRepository
+import com.example.agent.agent.planning.FileTodoRepository
+import java.nio.file.Files
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
 
 class AgentLoopTest {
+    private val todoJson = """{"action":"create_todo","title":" 买牛奶 ","due_at":null,"reason":"记录"}"""
+    private val finishJson = """{"action":"finish","success":true,"message":"完成"}"""
+
+    @Test
+    fun createTodo_savesConfirmedPreviewOnceAndReportsHistory() = runTest {
+        val directory = Files.createTempDirectory("rootpilot-todo-test").toFile()
+        try {
+            val repository = FileTodoRepository(java.io.File(directory, "agent_todos.json"))
+            val root = RecordingRootExecutor()
+            val client = QueueDeepSeekClient(todoJson, finishJson)
+            val events = mutableListOf<AgentLoopEvent>()
+            AgentLoop(RepeatedScreenshotProvider(), client, root, todoRepository = repository)
+                .run(request(maxSteps = 2)) {
+                    events += it
+                    if (it is AgentLoopEvent.AwaitingConfirmation) {
+                        assertEquals(RootPilotAction.CreateTodo("买牛奶", null, "记录"), it.action)
+                        assertTrue(repository.list().isEmpty())
+                        assertTrue(it.approval.approve(it.approval.token))
+                        assertTrue(!it.approval.approve(it.approval.token))
+                        it.approval.approve()
+                    }
+                }
+            assertEquals(listOf(CreateTodo("买牛奶", null)), repository.list())
+            assertTrue(root.actions.isEmpty())
+            assertTrue(client.requests.last().history.single().contains("\"title\":\"买牛奶\""))
+            assertTrue(client.requests.last().history.single().contains("\"due_at\":null"))
+            assertTrue(client.requests.last().history.single().contains("result=success"))
+            assertTrue(events.last() is AgentLoopEvent.Completed)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun createTodo_rejectionDoesNotWrite() = runTest {
+        val repository = RecordingTodoRepository()
+        val events = mutableListOf<AgentLoopEvent>()
+        todoLoop(repository, todoJson).run(request()) {
+            events += it
+            if (it is AgentLoopEvent.AwaitingConfirmation) {
+                it.approval.reject()
+                it.approval.approve()
+            }
+        }
+        assertEquals(0, repository.attempts)
+        assertTrue(events.last() is AgentLoopEvent.Stopped)
+    }
+
+    @Test
+    fun createTodo_saveFailureStopsWithoutRetryOrLeakingException() = runTest {
+        val repository = RecordingTodoRepository { throw java.io.IOException("private path and token") }
+        val events = mutableListOf<AgentLoopEvent>()
+        todoLoop(repository, todoJson).run(request()) {
+            events += it
+            if (it is AgentLoopEvent.AwaitingConfirmation) it.approval.approve()
+        }
+        assertEquals(1, repository.attempts)
+        assertEquals("本地待办保存失败，已停止；请人工核对保存结果后再决定是否重试", (events.last() as AgentLoopEvent.Failed).message)
+    }
+
+    @Test
+    fun createTodo_cancellationWhileAwaitingApprovalDoesNotWrite() = runTest {
+        val repository = RecordingTodoRepository()
+        val ready = CompletableDeferred<ActionApproval>()
+        val job = async {
+            todoLoop(repository, todoJson).run(request()) {
+                if (it is AgentLoopEvent.AwaitingConfirmation) ready.complete(it.approval)
+            }
+        }
+        val approval = ready.await()
+        job.cancelAndJoin()
+        approval.approve()
+        assertEquals(0, repository.attempts)
+    }
+
+    @Test
+    fun createTodo_repositoryCancellationPropagates() = runTest {
+        val entered = CompletableDeferred<Unit>()
+        val repository = RecordingTodoRepository {
+            entered.complete(Unit)
+            awaitCancellation()
+        }
+        val events = mutableListOf<AgentLoopEvent>()
+        val job = async {
+            todoLoop(repository, todoJson).run(request()) {
+                events += it
+                if (it is AgentLoopEvent.AwaitingConfirmation) it.approval.approve()
+            }
+        }
+        entered.await()
+        job.cancelAndJoin()
+        assertTrue(job.isCancelled)
+        assertTrue(events.none { it is AgentLoopEvent.Failed || it is AgentLoopEvent.Completed })
+        assertEquals(1, repository.attempts)
+    }
+
+    @Test
+    fun createTodo_sameTaskDeduplicatesAcrossInterveningActionsAndEquivalentOffsets() = runTest {
+        val repository = RecordingTodoRepository()
+        val first = todoJson.replace("null", "\"2026-09-22T09:00:00+08:00\"")
+        val duplicate = todoJson.replace(" 买牛奶 ", "买牛奶").replace("记录", "再次记录")
+            .replace("null", "\"2026-09-22T01:00:00Z\"")
+        val events = mutableListOf<AgentLoopEvent>()
+        todoLoop(repository, first, todoJson.replace("买牛奶", "买面包"), duplicate)
+            .run(request(maxSteps = 3)) {
+                events += it
+                if (it is AgentLoopEvent.AwaitingConfirmation) it.approval.approve()
+            }
+        assertEquals(2, repository.attempts)
+        assertEquals(2, events.filterIsInstance<AgentLoopEvent.AwaitingConfirmation>().size)
+        assertEquals("本次任务已保存相同待办，已阻止重复写入", (events.last() as AgentLoopEvent.Failed).message)
+    }
+
+    @Test
+    fun createTodo_multipleTodosCanFinishWithUnchangedScreenshot() = runTest {
+        val repository = RecordingTodoRepository()
+        val events = mutableListOf<AgentLoopEvent>()
+        todoLoop(repository, todoJson, todoJson.replace("买牛奶", "买面包"), todoJson.replace("买牛奶", "买鸡蛋"), finishJson)
+            .run(request(maxSteps = 4)) {
+                events += it
+                if (it is AgentLoopEvent.AwaitingConfirmation) it.approval.approve()
+            }
+        assertEquals(3, repository.attempts)
+        assertTrue(events.last() is AgentLoopEvent.Completed)
+    }
+
+    @Test
+    fun createTodo_deduplicationDoesNotCrossRunsAndSingleStepCompletes() = runTest {
+        val repository = RecordingTodoRepository()
+        val loop = todoLoop(repository, todoJson, todoJson)
+        repeat(2) {
+            val events = mutableListOf<AgentLoopEvent>()
+            loop.run(request().copy(singleStep = true)) {
+                events += it
+                if (it is AgentLoopEvent.AwaitingConfirmation) it.approval.approve()
+            }
+            assertTrue(events.last() is AgentLoopEvent.Completed)
+        }
+        assertEquals(2, repository.attempts)
+    }
+
+    private fun todoLoop(repository: TodoRepository, vararg actions: String) = AgentLoop(
+        RepeatedScreenshotProvider(), QueueDeepSeekClient(*actions), RecordingRootExecutor(),
+        todoRepository = repository,
+    )
+
+    private class RecordingTodoRepository(private val onWrite: suspend () -> Unit = {}) : TodoRepository {
+        var attempts = 0
+        private val todos = mutableListOf<CreateTodo>()
+        override suspend fun addAll(todos: List<CreateTodo>) {
+            attempts++
+            onWrite()
+            this.todos += todos
+        }
+        override suspend fun list(): List<CreateTodo> = todos.toList()
+    }
+
     private val settingsApp = RootPilotApp("com.android.settings", "设置", "com.android.settings.Settings")
     @Test
     fun waitsForWindowRemovalBeforeCapturingAndExecuting() = runTest {

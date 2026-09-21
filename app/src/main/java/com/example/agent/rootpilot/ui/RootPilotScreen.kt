@@ -73,6 +73,7 @@ fun RootPilotScreen(
     onInputMethodSettings: () -> Unit,
     onOverlayPermission: () -> Unit,
     modifier: Modifier = Modifier,
+    onOpenLegacyAgent: () -> Unit = {},
 ) {
     val busy = state.status in setOf(
         RootPilotStatus.CAPTURING,
@@ -100,6 +101,9 @@ fun RootPilotScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("RootPilot", style = MaterialTheme.typography.headlineMedium)
+            TextButton(onClick = onOpenLegacyAgent, enabled = !busy && !apiState.editing) {
+                Text("旧 Agent（实验入口）")
+            }
             TextButton(onClick = onOverlayPermission, enabled = !busy) {
                 Text(if (overlayAllowed) "悬浮操作面板已授权 · 管理权限" else "开启悬浮操作面板")
             }
@@ -300,6 +304,7 @@ private fun RootPilotStatus.displayName(): String = when (this) {
 }
 
 internal fun RootPilotAction.describe(): String = when (this) {
+    is RootPilotAction.CreateTodo -> "创建本地待办\n标题：$title\n截止时间：${dueAt ?: "无"}\n$reason"
     is RootPilotAction.Tap -> "tap($x,$y)：$reason"
     is RootPilotAction.Swipe -> "swipe($x1,$y1,$x2,$y2,$durationMillis)：$reason"
     is RootPilotAction.OpenApp -> "open_app($packageName)：$reason"

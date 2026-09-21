@@ -10,6 +10,36 @@ class ActionParserTest {
     private val parser = ActionParser()
 
     @Test
+    fun createTodo_normalizesTitleAndAcceptsOptionalDeadline() {
+        for (due in listOf("", ",\"due_at\":null")) {
+            assertEquals(
+                ActionParseResult.Success(RootPilotAction.CreateTodo("买牛奶", null, "记录")),
+                parser.parse("""{"action":"create_todo","title":" 买牛奶 ","reason":"记录"$due}"""),
+            )
+        }
+        assertEquals(
+            ActionParseResult.Success(RootPilotAction.CreateTodo("a".repeat(100), "2026-09-22T09:00:00+08:00", "记录")),
+            parser.parse("""{"action":"create_todo","title":"${"a".repeat(100)}","due_at":"2026-09-22T09:00:00+08:00","reason":"记录"}"""),
+        )
+    }
+
+    @Test
+    fun createTodo_rejectsInvalidTitleDeadlineAndUnrelatedFields() {
+        for (fields in listOf(
+            """"title":" """",
+            """"title":"${"a".repeat(101)}"""",
+            """"title":null""",
+            """"title":"事项","due_at":"tomorrow"""",
+            """"title":"事项","due_at":"2026-09-22T09:00:00"""",
+            """"title":"事项","due_at":"2026-02-30T09:00:00Z"""",
+            """"title":"事项","due_at":""""",
+            """"title":"事项","text":null""",
+        )) {
+            assertTrue(fields, parser.parse("""{"action":"create_todo",$fields,"reason":"记录"}""") is ActionParseResult.Failure)
+        }
+    }
+
+    @Test
     fun parsesAllActionKinds() {
         assertTrue(parser.parse("""{"action":"tap","x":1,"y":2,"reason":"点击"}""") is ActionParseResult.Success)
         assertTrue(

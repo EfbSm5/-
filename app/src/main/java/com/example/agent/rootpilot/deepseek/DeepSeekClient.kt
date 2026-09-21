@@ -172,6 +172,7 @@ class HttpDeepSeekClient(
         appendLine("根据当前 Android 截图执行用户任务。")
         appendLine("只返回一个动作 JSON，不要 Markdown、解释或 Shell 命令。")
         appendLine("用户任务：${request.config.task}")
+        appendLine("当前本地时间（含时区偏移）：${java.time.OffsetDateTime.now()}")
         appendLine("当前步骤：${request.step + 1}")
         appendLine("可通过 open_app 打开的应用：")
         appendLine(buildJsonObject {
@@ -243,6 +244,7 @@ class HttpDeepSeekClient(
             {"action":"swipe","x1":0,"y1":0,"x2":0,"y2":0,"duration_ms":300,"reason":"short reason"}
             {"action":"open_app","package_name":"package from the available apps list","reason":"short reason"}
             {"action":"type","text":"Unicode text","reason":"short reason"}
+            {"action":"create_todo","title":"todo title","due_at":null,"reason":"short reason"}
             {"action":"key","key":"BACK","reason":"short reason"}
             {"action":"wait","duration_ms":500,"reason":"short reason"}
             {"action":"ask_user","message":"why user must take over"}
@@ -259,7 +261,14 @@ class HttpDeepSeekClient(
             Use open_app to launch an app from the available apps list when needed.
             If the target page is already visible, operate on that page without reopening the app.
             Choose each action from the latest screenshot and action history, regardless of step number.
-            Only finish successfully when the screenshot shows the requested result.
+            create_todo saves a local todo after mandatory human confirmation; it does not use another app.
+            title must be nonblank and at most 100 characters. due_at is optional/null or an RFC3339
+            timestamp with timezone. null means no deadline. Use the supplied current local time for
+            relative dates; ask_user when the intended date or timezone is unclear. Do not invent
+            a deadline when the user did not specify one.
+            Successful create_todo history is authoritative even when the screenshot is unchanged.
+            Never repeat a todo already saved in this task. Finish after all requested todos are saved.
+            For UI operations, only finish successfully when the screenshot shows the requested result.
             Ask the user before passwords, verification codes, payment, deletion, authorization,
             biometric actions, sending messages, or other sensitive operations.
             Use ask_user only when human takeover is genuinely required; use key, tap, and swipe

@@ -223,6 +223,15 @@ class DeepSeekClientTest {
                 assertTrue(prompt.contains("normalized to the FULL screenshot"))
                 assertTrue(prompt.contains("including status and navigation bars"))
                 assertTrue(prompt.contains("y=round(pixel_y/image_height*1000)"))
+                assertTrue(prompt.contains("create_todo"))
+                assertTrue(prompt.contains("null means no deadline"))
+                assertTrue(prompt.contains("ask_user when the intended date or timezone is unclear"))
+                val userPrompt = messages[1].jsonObject.getValue("content").jsonArray
+                    .first { it.jsonObject["type"]?.jsonPrimitive?.content == "text" }
+                    .jsonObject.getValue("text").jsonPrimitive.content
+                val currentTime = userPrompt.lineSequence()
+                    .first { it.startsWith("当前本地时间（含时区偏移）：") }.substringAfter("：")
+                java.time.OffsetDateTime.parse(currentTime)
                 val imagePart = messages[1].jsonObject.getValue("content").jsonArray
                     .first { it.jsonObject["type"]?.jsonPrimitive?.content == "image_url" }
                 assertEquals(

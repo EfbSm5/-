@@ -53,6 +53,9 @@ class RootPilotActivity : ComponentActivity() {
                     onDispose { window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
                 }
                 RootPilotScreen(
+                    onOpenLegacyAgent = {
+                        startActivity(Intent(this@RootPilotActivity, com.example.agent.MainActivity::class.java))
+                    },
                     state = state,
                     apiState = apiState,
                     onApiKeyChanged = viewModel::updateApiKey,

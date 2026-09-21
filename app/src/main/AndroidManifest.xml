@@ -31,6 +31,11 @@
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
+            android:theme="@style/Theme.Agent" />
+        <activity
+            android:name=".rootpilot.RootPilotActivity"
+            android:exported="true"
+            android:label="RootPilot"
             android:theme="@style/Theme.Agent">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -38,11 +43,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity
-            android:name=".rootpilot.RootPilotActivity"
-            android:exported="true"
-            android:label="RootPilot"
-            android:theme="@style/Theme.Agent" />
         <service
             android:name=".rootpilot.input.RootPilotInputMethodService"
             android:label="@string/rootpilot_input_method"

@@ -3,11 +3,17 @@ package com.example.agent.rootpilot.action
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotKey
 import com.example.agent.rootpilot.input.InputText
+import com.example.agent.agent.model.CreateTodo
+import com.example.agent.agent.serialization.AgentPlanDecoder
+import com.example.agent.agent.serialization.PlanDecodeResult
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.put
 
 sealed interface ActionParseResult {
     data class Success(val action: RootPilotAction) : ActionParseResult
@@ -39,6 +45,25 @@ class ActionParser(
         val normalizedAction = action.trim()
         require(normalizedAction.isNotEmpty()) { "action 不能为空" }
         return when (normalizedAction) {
+            "create_todo" -> {
+                requireKeys(keys - "due_at", "action", "title", "reason")
+                val plan = buildJsonObject {
+                    put("goal", "create_todo")
+                    put("actions", buildJsonArray {
+                        add(buildJsonObject {
+                            put("type", "create_todo")
+                            put("title", title)
+                            put("due_at", dueAt)
+                        })
+                    })
+                }
+                val todo = when (val decoded = AgentPlanDecoder().decode(plan.toString())) {
+                    is PlanDecodeResult.Success -> decoded.plan.actions.single() as CreateTodo
+                    is PlanDecodeResult.Failure -> throw IllegalArgumentException(decoded.reason)
+                }
+                RootPilotAction.CreateTodo(todo.title, todo.dueAt, reason.requireReason())
+            }
+
             "tap" -> {
                 requireKeys(keys, "action", "x", "y", "reason")
                 RootPilotAction.Tap(
@@ -164,6 +189,8 @@ class ActionParser(
         val y2: Int? = null,
         @SerialName("duration_ms") val durationMillis: Int? = null,
         val text: String? = null,
+        val title: String? = null,
+        @SerialName("due_at") val dueAt: String? = null,
         @SerialName("package_name") val packageName: String? = null,
         val key: String? = null,
         val reason: String? = null,
