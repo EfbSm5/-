@@ -89,6 +89,8 @@ internal class RootPilotOverlay(
     private val detailScroll = ScrollView(windowContext).apply {
         addView(detail)
     }
+    private val markdown by lazy { createMarkdownRenderer(windowContext) }
+    private var renderedDetail: String? = null
     private val buttons = LinearLayout(windowContext)
     private val confirm = Button(windowContext).apply {
         compactStyle(Color.rgb(51, 91, 145))
@@ -108,7 +110,7 @@ internal class RootPilotOverlay(
     private val params = WindowManager.LayoutParams(
         dp(220), WindowManager.LayoutParams.WRAP_CONTENT,
         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_SECURE,
         PixelFormat.TRANSLUCENT,
     ).apply {
         gravity = Gravity.TOP or Gravity.LEFT
@@ -147,9 +149,21 @@ internal class RootPilotOverlay(
         val awaiting = value.status == RootPilotStatus.WAITING_CONFIRMATION
         header.text = "第 ${value.step + 1} 步 · ${if (awaiting) "待确认" else "思考中"} ${if (expanded) "－" else "＋"}"
         header.stateDescription = "第 ${value.step + 1} 步，${if (awaiting) "待确认" else "思考中"}，详情${if (expanded) "已展开" else "已收起"}"
-        summary.text = if (awaiting) value.pendingAction?.overlaySummary().orEmpty() else "正在分析截图…"
+        summary.text = if (awaiting) value.pendingAction?.overlaySummary().orEmpty()
+            else if (value.modelStream.content.isNotEmpty()) "正在生成动作 · 展开预览"
+            else if (value.modelStream.reasoning.isNotEmpty()) "正在思考 · 展开预览"
+            else "正在分析截图…"
         summary.visibility = if (expanded) View.GONE else View.VISIBLE
-        detail.text = if (awaiting) value.pendingAction?.overlayDetails().orEmpty() else "正在分析截图…"
+        // Raw task output can contain screen text. Show only after explicit expansion,
+        // never make it an executable action or substitute it for confirmation details.
+        val detailText = if (!expanded) "" else if (awaiting) value.pendingAction?.overlayDetails().orEmpty()
+            else modelPreviewText(value.modelStream)
+        if (actionChanged || renderedDetail != detailText) {
+            if (!awaiting && expanded) markdown.setMarkdown(detail, detailText) else detail.text = detailText
+            detail.linksClickable = false
+            detail.movementMethod = null
+            renderedDetail = detailText
+        }
         val todo = value.pendingAction is RootPilotAction.CreateTodo
         detailScroll.layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -236,3 +250,19 @@ internal class RootPilotOverlay(
 
     private fun dp(value: Int): Int = (value * windowContext.resources.displayMetrics.density).toInt()
 }
+
+internal fun modelPreviewText(stream: com.example.agent.rootpilot.deepseek.ModelStreamSnapshot): String = buildString {
+    append("模型输出预览（未执行）\n\n")
+    if (stream.reasoning.isNotBlank()) {
+        append("**思考**\n\n")
+        append(stream.reasoning.takeLast(OVERLAY_PREVIEW_CHARS))
+        append("\n\n")
+    }
+    if (stream.content.isNotBlank()) {
+        append("**动作草稿**\n\n")
+        // Indented code cannot terminate a Markdown fence supplied by the model.
+        append(stream.content.takeLast(OVERLAY_PREVIEW_CHARS).lineSequence().joinToString("\n") { "    $it" })
+    } else if (stream.reasoning.isBlank()) append("等待模型输出…")
+}
+
+private const val OVERLAY_PREVIEW_CHARS = 4_000

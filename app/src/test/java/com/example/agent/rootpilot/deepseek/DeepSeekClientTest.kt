@@ -20,12 +20,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DeepSeekClientTest {
-    @Test
+    @Test(timeout = 10_000)
     fun testConnection_usesSelectedModelAndBearerWithoutScreenshotOrTask() = runTest {
-        ServerSocket(0).use { server ->
+        ServerSocket(0).apply { soTimeout = 3000 }.use { server ->
             val captured = AtomicReference<Pair<String, String>>()
-            val worker = thread {
-                server.accept().use { socket ->
+            val worker = thread(isDaemon = true) {
+                server.accept().apply { soTimeout = 3000 }.use { socket ->
                     captured.set(readHttpRequest(socket.getInputStream()))
                     val body = """{"choices":[{"message":{"content":"OK"}}]}""".toByteArray()
                     socket.getOutputStream().write(
@@ -54,12 +54,12 @@ class DeepSeekClientTest {
         }
     }
 
-    @Test
+    @Test(timeout = 10_000)
     fun failures_doNotExposeServerBodyOrFollowRedirects() = runTest {
         for (status in listOf(401, 302)) {
-            ServerSocket(0).use { server ->
-                val worker = thread {
-                    server.accept().use { socket ->
+            ServerSocket(0).apply { soTimeout = 3000 }.use { server ->
+                val worker = thread(isDaemon = true) {
+                    server.accept().apply { soTimeout = 3000 }.use { socket ->
                         readHttpBody(socket.getInputStream())
                         val body = "private server diagnostic test-token".toByteArray()
                         socket.getOutputStream().write(
@@ -80,7 +80,7 @@ class DeepSeekClientTest {
         }
     }
 
-    @Test
+    @Test(timeout = 10_000)
     fun invalidConfig_failsLocallyWithoutExposingCredential() = runTest {
         val configs = listOf(
             RootPilotConfig(),
@@ -96,14 +96,14 @@ class DeepSeekClientTest {
         }
     }
 
-    @Test
+    @Test(timeout = 10_000)
     fun relayMode_allowsBlankAppKeyAndOmitsAuthorizationHeader() = runTest {
-        ServerSocket(0).use { server ->
+        ServerSocket(0).apply { soTimeout = 3000 }.use { server ->
             val authorization = AtomicReference<String?>()
             val responseBody =
                 """{"choices":[{"message":{"content":"{\"action\":\"finish\",\"success\":true,\"message\":\"完成\"}"}}]}"""
-            val serverThread = thread(start = true) {
-                server.accept().use { socket ->
+            val serverThread = thread(start = true, isDaemon = true) {
+                server.accept().apply { soTimeout = 3000 }.use { socket ->
                     val reader = socket.getInputStream().bufferedReader()
                     while (true) {
                         val line = reader.readLine() ?: break
@@ -152,15 +152,15 @@ class DeepSeekClientTest {
         }
     }
 
-    @Test
+    @Test(timeout = 10_000)
     fun promptIncludesCapabilitiesAndStepWithoutTaskSpecificConstraints() = runTest {
-        ServerSocket(0).use { server ->
+        ServerSocket(0).apply { soTimeout = 3000 }.use { server ->
             val requestBodies = mutableListOf<String>()
             val responseBody =
                 """{"choices":[{"message":{"content":"{\"action\":\"finish\",\"success\":true,\"message\":\"完成\"}"}}]}"""
-            val serverThread = thread(start = true) {
+            val serverThread = thread(start = true, isDaemon = true) {
                 repeat(2) {
-                    server.accept().use { socket ->
+                    server.accept().apply { soTimeout = 3000 }.use { socket ->
                         requestBodies += readHttpBody(socket.getInputStream())
                         val bytes = responseBody.toByteArray()
                         socket.getOutputStream().use { output ->

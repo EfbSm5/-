@@ -29,6 +29,7 @@ import com.example.agent.rootpilot.model.RootPilotConfig
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotStatus
 import com.example.agent.rootpilot.model.RootPilotUiState
+import com.example.agent.rootpilot.model.SavedTodoResult
 import com.example.agent.rootpilot.root.RootExecutionResult
 import com.example.agent.rootpilot.root.RootExecutor
 import com.example.agent.rootpilot.root.SuRootExecutor
@@ -102,7 +103,7 @@ class RootPilotService : Service() {
             ACTION_CONFIRM -> confirmAction()
             ACTION_CONFIRM_NOTIFICATION -> {
                 confirmNotificationAction(intent.getStringExtra(EXTRA_APPROVAL_TOKEN))
-                if (synchronized(stateLock) { activeJob?.isActive != true }) stopSelfResult(startId)
+                if (synchronized(stateLock) { activeJob == null }) stopSelfResult(startId)
             }
             ACTION_STOP -> stopAgent(startId)
             ACTION_RECOVER -> startRun(singleStep = false, startId = startId, recovering = true)
@@ -178,9 +179,10 @@ class RootPilotService : Service() {
     private fun startRun(singleStep: Boolean, startId: Int, recovering: Boolean = false) {
         val config = synchronized(stateLock) { uiState.value.config }
         val shouldStart = synchronized(stateLock) {
-            if (activeJob?.isActive == true) {
+            if (activeJob != null) {
                 null
             } else {
+                _uiState.value = _uiState.value.copy(savedTodos = emptyList(), modelReportedResult = false)
                 when {
                 config.task.isBlank() -> {
                     updateStateLocked(
@@ -248,30 +250,27 @@ class RootPilotService : Service() {
                     errorMessage = "AgentLoop 执行异常",
                     clearPendingAction = true,
                 )
-            } finally {
-                synchronized(stateLock) {
-                    if (activeTrace?.first === job) activeTrace = null
-                }
-                finishJob(job)
             }
         }
         synchronized(stateLock) {
             activeJob = job
             activeTrace = job to trace
         }
+        job.invokeOnCompletion { finishJob(job) }
         job.start()
     }
 
     private fun startOneShot(startId: Int, work: suspend (RunTrace) -> Unit) {
         synchronized(stateLock) {
-            if (activeJob?.isActive == true) return
+            if (activeJob != null) return
+            _uiState.value = _uiState.value.copy(savedTodos = emptyList(), modelReportedResult = false)
             updateStateLocked(
                 status = RootPilotStatus.CAPTURING,
                 errorMessage = null,
             )
             val trace = RunTrace(sink = ::appendTraceLine)
             lateinit var job: Job
-            job = serviceScope.launch {
+            job = serviceScope.launch(start = CoroutineStart.LAZY) {
                 try {
                     work(trace)
                 } catch (error: CancellationException) {
@@ -282,11 +281,11 @@ class RootPilotService : Service() {
                         status = RootPilotStatus.FAILED,
                         errorMessage = "RootPilot 操作异常",
                     )
-                } finally {
-                    finishJob(job)
                 }
             }
             activeJob = job
+            job.invokeOnCompletion { finishJob(job) }
+            job.start()
         }
     }
 
@@ -311,6 +310,15 @@ class RootPilotService : Service() {
         val startId = synchronized(stateLock) {
             if (activeJob === job) {
                 activeJob = null
+                if (activeTrace?.first === job) activeTrace = null
+                if (_uiState.value.status == RootPilotStatus.STOPPING) {
+                    clearRunSnapshot()
+                    updateStateLocked(
+                        status = RootPilotStatus.STOPPED,
+                        clearPendingAction = true,
+                        errorMessage = "用户已停止；已执行的操作不会撤销",
+                    )
+                }
                 latestStartId
             } else {
                 null
@@ -320,26 +328,32 @@ class RootPilotService : Service() {
     }
 
     private fun stopAgent(startId: Int) {
-        synchronized(stateLock) {
+        val running = synchronized(stateLock) {
+            if (_uiState.value.status == RootPilotStatus.STOPPING) return
             activeTrace?.takeIf { it.first === activeJob }?.second?.record(
                 TraceEvent.STOP_REQUESTED, TraceStatus.REQUESTED, stage = TraceStage.SERVICE,
             )
+            val job = activeJob
+            updateStateLocked(
+                status = if (job != null) RootPilotStatus.STOPPING else RootPilotStatus.STOPPED,
+                clearPendingAction = true,
+                errorMessage = if (job != null) "正在取消请求并等待执行退出" else "用户已停止",
+            )
+            rootExecutor.cancel()
+            job?.cancel()
             pendingApproval?.reject()
             pendingApproval = null
-            activeJob?.cancel()
-            activeJob = null
-            updateStateLocked(
-                status = RootPilotStatus.STOPPED,
-                pendingAction = null,
-                errorMessage = "用户已停止",
-            )
+            job != null
         }
-        rootExecutor.cancel()
-        clearRunSnapshot()
-        stopSelfResult(startId)
+        overlay.hide()
+        if (!running) {
+            clearRunSnapshot()
+            stopSelfResult(startId)
+        }
     }
 
     private fun restoreInterruptedRun(startId: Int? = null) {
+        if (synchronized(stateLock) { activeJob != null }) return
         val snapshot = runStore.read()
         if (snapshot == null) {
             startId?.let(::stopSelfResult)
@@ -355,6 +369,8 @@ class RootPilotService : Service() {
                     snapshot.actionSummary?.let { append("：$it") }
                 },
                 pendingAction = null,
+                savedTodos = emptyList(),
+                modelReportedResult = false,
             )
         }
         startId?.let {
@@ -364,6 +380,7 @@ class RootPilotService : Service() {
     }
 
     private fun discardInterruptedRun(startId: Int) {
+        if (synchronized(stateLock) { activeJob != null }) return
         clearRunSnapshot()
         updateState(
             status = RootPilotStatus.IDLE,
@@ -402,90 +419,107 @@ class RootPilotService : Service() {
     }
 
     private suspend fun handleEvent(event: AgentLoopEvent) {
-        when (event) {
-            is AgentLoopEvent.Capturing -> {
-                updateState(status = RootPilotStatus.CAPTURING, step = event.step)
-                persistRunSnapshot(RootPilotStatus.CAPTURING, event.step)
-            }
-
-            is AgentLoopEvent.ScreenshotCaptured -> {
-                updateState(
-                    status = RootPilotStatus.CAPTURING,
-                    frame = event.frame,
-                    step = event.step,
-                )
-                persistRunSnapshot(RootPilotStatus.CAPTURING, event.step)
-            }
-
-            is AgentLoopEvent.RequestingModel -> {
-                updateState(status = RootPilotStatus.REQUESTING_MODEL, step = event.step)
-                persistRunSnapshot(RootPilotStatus.REQUESTING_MODEL, event.step)
-            }
-
-            is AgentLoopEvent.AwaitingConfirmation -> {
-                synchronized(stateLock) {
-                    pendingApproval = event.approval
-                    updateStateLocked(
-                        status = RootPilotStatus.WAITING_CONFIRMATION,
-                        step = event.step,
-                        lastAction = event.action,
-                        pendingAction = event.action,
+        synchronized(stateLock) {
+            // Cancellation may race with a blocking operation returning. Keep STOPPING
+            // until job completion, but retain writes that have actually succeeded.
+            if (_uiState.value.status == RootPilotStatus.STOPPING && event !is AgentLoopEvent.TodoSaved) return
+            when (event) {
+                is AgentLoopEvent.ModelOutput -> {
+                    if (_uiState.value.status != RootPilotStatus.REQUESTING_MODEL ||
+                        _uiState.value.step != event.step) return
+                    // Preview stays in memory: no notification, trace or snapshot write per chunk.
+                    _uiState.value = _uiState.value.copy(modelStream = event.snapshot)
+                }
+                is AgentLoopEvent.TodoSaved -> {
+                    _uiState.value = _uiState.value.copy(
+                        savedTodos = _uiState.value.savedTodos + SavedTodoResult(event.title, event.dueAt),
                     )
                 }
-                persistRunSnapshot(
-                    RootPilotStatus.WAITING_CONFIRMATION,
-                    event.step,
-                    event.action.describeForSnapshot(),
-                )
-            }
+                is AgentLoopEvent.Capturing -> {
+                    updateState(status = RootPilotStatus.CAPTURING, step = event.step)
+                    persistRunSnapshot(RootPilotStatus.CAPTURING, event.step)
+                }
 
-            is AgentLoopEvent.Executing -> {
-                synchronized(stateLock) {
-                    pendingApproval = null
-                    updateStateLocked(
-                        status = RootPilotStatus.EXECUTING,
+                is AgentLoopEvent.ScreenshotCaptured -> {
+                    updateState(
+                        status = RootPilotStatus.CAPTURING,
+                        frame = event.frame,
                         step = event.step,
-                        lastAction = event.action,
-                        pendingAction = null,
+                    )
+                    persistRunSnapshot(RootPilotStatus.CAPTURING, event.step)
+                }
+
+                is AgentLoopEvent.RequestingModel -> {
+                    updateState(status = RootPilotStatus.REQUESTING_MODEL, step = event.step)
+                    persistRunSnapshot(RootPilotStatus.REQUESTING_MODEL, event.step)
+                }
+
+                is AgentLoopEvent.AwaitingConfirmation -> {
+                    synchronized(stateLock) {
+                        pendingApproval = event.approval
+                        updateStateLocked(
+                            status = RootPilotStatus.WAITING_CONFIRMATION,
+                            step = event.step,
+                            lastAction = event.action,
+                            pendingAction = event.action,
+                        )
+                    }
+                    persistRunSnapshot(
+                        RootPilotStatus.WAITING_CONFIRMATION,
+                        event.step,
+                        event.action.describeForSnapshot(),
                     )
                 }
-                persistRunSnapshot(
-                    RootPilotStatus.EXECUTING,
-                    event.step,
-                    event.action.describeForSnapshot(),
-                )
-            }
 
-            is AgentLoopEvent.WaitingScreen -> {
-                updateState(status = RootPilotStatus.WAITING_SCREEN, step = event.step)
-                persistRunSnapshot(RootPilotStatus.WAITING_SCREEN, event.step)
-            }
+                is AgentLoopEvent.Executing -> {
+                    synchronized(stateLock) {
+                        pendingApproval = null
+                        updateStateLocked(
+                            status = RootPilotStatus.EXECUTING,
+                            step = event.step,
+                            lastAction = event.action,
+                            pendingAction = null,
+                        )
+                    }
+                    persistRunSnapshot(
+                        RootPilotStatus.EXECUTING,
+                        event.step,
+                        event.action.describeForSnapshot(),
+                    )
+                }
 
-            is AgentLoopEvent.Completed -> {
-                updateState(
-                    status = RootPilotStatus.COMPLETED,
-                    clearPendingAction = true,
-                    errorMessage = event.message,
-                )
-                clearRunSnapshot()
-            }
+                is AgentLoopEvent.WaitingScreen -> {
+                    updateState(status = RootPilotStatus.WAITING_SCREEN, step = event.step)
+                    persistRunSnapshot(RootPilotStatus.WAITING_SCREEN, event.step)
+                }
 
-            is AgentLoopEvent.Failed -> {
-                updateState(
-                    status = RootPilotStatus.FAILED,
-                    clearPendingAction = true,
-                    errorMessage = event.message,
-                )
-                clearRunSnapshot()
-            }
+                is AgentLoopEvent.Completed -> {
+                    _uiState.value = _uiState.value.copy(modelReportedResult = event.modelReported)
+                    updateState(
+                        status = RootPilotStatus.COMPLETED,
+                        clearPendingAction = true,
+                        errorMessage = event.message,
+                    )
+                    clearRunSnapshot()
+                }
 
-            AgentLoopEvent.Stopped -> {
-                clearRunSnapshot()
-                updateState(
-                    status = RootPilotStatus.STOPPED,
-                    clearPendingAction = true,
-                    errorMessage = "用户已停止",
-                )
+                is AgentLoopEvent.Failed -> {
+                    _uiState.value = _uiState.value.copy(modelReportedResult = event.modelReported)
+                    updateState(
+                        status = RootPilotStatus.FAILED,
+                        clearPendingAction = true,
+                        errorMessage = event.message,
+                    )
+                    clearRunSnapshot()
+                }
+
+                AgentLoopEvent.Stopped -> {
+                    updateState(
+                        status = RootPilotStatus.STOPPING,
+                        clearPendingAction = true,
+                        errorMessage = "正在等待执行退出",
+                    )
+                }
             }
         }
         // Complete window removal before the loop captures or injects input; an async
@@ -518,6 +552,7 @@ class RootPilotService : Service() {
         errorMessage: String? = null,
         clearPendingAction: Boolean = false,
     ) {
+        if (_uiState.value.status == RootPilotStatus.STOPPING && status != RootPilotStatus.STOPPED) return
         _uiState.value = _uiState.value.copy(
             status = status,
             frame = frame ?: _uiState.value.frame,
@@ -525,6 +560,7 @@ class RootPilotService : Service() {
             lastAction = lastAction ?: _uiState.value.lastAction,
             pendingAction = if (clearPendingAction) null else pendingAction ?: _uiState.value.pendingAction,
             errorMessage = errorMessage,
+            modelStream = com.example.agent.rootpilot.deepseek.ModelStreamSnapshot(),
         )
         notifyState()
     }
@@ -609,7 +645,7 @@ class RootPilotService : Service() {
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setContentIntent(openPendingIntent)
             .setAutoCancel(false)
-            .setOngoing(activeJob?.isActive == true)
+            .setOngoing(activeJob != null)
             .apply {
                 notificationApprovalIntent?.let { confirmation ->
                     addAction(
@@ -634,6 +670,7 @@ class RootPilotService : Service() {
         RootPilotStatus.WAITING_SCREEN -> "等待页面稳定"
         RootPilotStatus.COMPLETED -> "任务已完成"
         RootPilotStatus.FAILED -> "任务失败"
+        RootPilotStatus.STOPPING -> "正在停止，等待执行退出"
         RootPilotStatus.STOPPED -> "任务已停止"
         RootPilotStatus.RECOVERY_REQUIRED -> "上次任务中断，等待处理"
     }

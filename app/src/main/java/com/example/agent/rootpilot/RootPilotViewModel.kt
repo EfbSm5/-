@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.HttpDeepSeekClient
+import com.example.agent.rootpilot.chat.ChatController
 import com.example.agent.rootpilot.deepseek.apiValidationError
 import com.example.agent.rootpilot.input.AndroidImeEnvironment
 import com.example.agent.rootpilot.apps.AndroidAppCatalog
@@ -52,6 +53,16 @@ class RootPilotViewModel(
     private val appLaunchStore: AppLaunchAllowlistStore = AppLaunchAllowlistStore.create(appContext),
 ) : ViewModel() {
     val uiState: StateFlow<RootPilotUiState> = RootPilotService.uiState
+    private val chat = ChatController(viewModelScope, HttpDeepSeekClient())
+    val chatState = chat.state
+    fun updateChatDraft(value: String) = chat.updateDraft(value)
+    fun setChatEffort(value: com.example.agent.rootpilot.deepseek.ThinkingEffort) = chat.setEffort(value)
+    fun sendChat() {
+        if (_apiState.value.busy || _apiState.value.editing || !canChangeApiConfig()) return
+        chat.send(uiState.value.config, uiState.value.apiConfigured)
+    }
+    fun stopChat() = chat.stop()
+    fun newChat() = chat.newConversation()
     private val _apiState = MutableStateFlow(ApiConfigUiState())
     val apiState: StateFlow<ApiConfigUiState> = _apiState.asStateFlow()
     private val _inputMessage = MutableStateFlow<String?>(null)
@@ -190,6 +201,7 @@ class RootPilotViewModel(
                         RootPilotService.updateApiConfig(draft)
                     }
                     refreshApiUi("配置已安全保存")
+                    chat.newConversation()
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -210,6 +222,7 @@ class RootPilotViewModel(
                         RootPilotService.updateApiConfig(null)
                     }
                     refreshApiUi("配置已清除")
+                    chat.newConversation()
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -258,9 +271,9 @@ class RootPilotViewModel(
         _apiState.value = _apiState.value.copy(draft = transform(_apiState.value.draft), message = null)
     }
 
-    private fun canChangeApiConfig(): Boolean = !_apiState.value.busy && uiState.value.status !in setOf(
+    private fun canChangeApiConfig(): Boolean = !_apiState.value.busy && !chatState.value.generating && uiState.value.status !in setOf(
         RootPilotStatus.CAPTURING, RootPilotStatus.REQUESTING_MODEL, RootPilotStatus.EXECUTING,
-        RootPilotStatus.WAITING_SCREEN, RootPilotStatus.WAITING_CONFIRMATION,
+        RootPilotStatus.WAITING_SCREEN, RootPilotStatus.WAITING_CONFIRMATION, RootPilotStatus.STOPPING,
     )
 
     fun updateTask(value: String) = updateConfig { copy(task = value) }
@@ -294,6 +307,8 @@ class RootPilotViewModel(
     }
 
     private fun send(action: String) {
+        if (chatState.value.generating && action != RootPilotService.ACTION_STOP &&
+            action != RootPilotService.ACTION_CONFIRM) return
         RootPilotService.send(appContext, action, uiState.value.config)
     }
 

@@ -8,6 +8,7 @@ import com.example.agent.rootpilot.apps.AppCatalog
 import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.DeepSeekClient
 import com.example.agent.rootpilot.deepseek.DeepSeekVisionRequest
+import com.example.agent.rootpilot.deepseek.ModelStreamSnapshot
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotConfig
 import com.example.agent.rootpilot.model.ScreenSize
@@ -67,6 +68,8 @@ sealed interface AgentLoopEvent {
 
     data class RequestingModel(val step: Int) : AgentLoopEvent
 
+    data class ModelOutput(val step: Int, val snapshot: ModelStreamSnapshot) : AgentLoopEvent
+
     data class AwaitingConfirmation(
         val step: Int,
         val action: RootPilotAction,
@@ -77,9 +80,11 @@ sealed interface AgentLoopEvent {
 
     data class WaitingScreen(val step: Int) : AgentLoopEvent
 
-    data class Completed(val message: String) : AgentLoopEvent
+    data class TodoSaved(val title: String, val dueAt: String?) : AgentLoopEvent
 
-    data class Failed(val message: String) : AgentLoopEvent
+    data class Completed(val message: String, val modelReported: Boolean = false) : AgentLoopEvent
+
+    data class Failed(val message: String, val modelReported: Boolean = false) : AgentLoopEvent
 
     data object Stopped : AgentLoopEvent
 }
@@ -203,6 +208,7 @@ class AgentLoop(
                         step = step,
                         availableApps = availableApps,
                     ),
+                    onUpdate = { onEvent(AgentLoopEvent.ModelOutput(step, it)) },
                 )
                 val rawActionJson = when (modelResult) {
                     is DeepSeekActionResult.Failure -> {
@@ -249,10 +255,10 @@ class AgentLoop(
             }
             if (action is RootPilotAction.Finish) {
                 if (action.success) {
-                    onEvent(AgentLoopEvent.Completed(action.message))
+                    onEvent(AgentLoopEvent.Completed(action.message, modelReported = true))
                 } else {
                     trace.fail(TraceReason.MODEL_REPORTED_FAILURE)
-                    onEvent(AgentLoopEvent.Failed(action.message))
+                    onEvent(AgentLoopEvent.Failed(action.message, modelReported = true))
                 }
                 return
             }
@@ -296,6 +302,7 @@ class AgentLoop(
                     return
                 }
                 trace.record(TraceEvent.TODO_SAVED, TraceStatus.SUCCESS)
+                onEvent(AgentLoopEvent.TodoSaved(action.title, action.dueAt))
                 trace.record(TraceEvent.RESULT, TraceStatus.SUCCESS)
                 savedTodos += key
                 history += "step=$step action=${action.describeForHistory()} result=success"

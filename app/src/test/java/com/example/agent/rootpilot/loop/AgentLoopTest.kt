@@ -31,6 +31,16 @@ class AgentLoopTest {
     private val finishJson = """{"action":"finish","success":true,"message":"完成"}"""
 
     @Test
+    fun modelFailureIsReportedAsModelOutcomeNotLocalEvidence() = runTest {
+        val events = mutableListOf<AgentLoopEvent>()
+        todoLoop(RecordingTodoRepository(), finishJson.replace("true", "false")).run(request()) {
+            events += it
+        }
+        assertTrue((events.last() as AgentLoopEvent.Failed).modelReported)
+        assertTrue(events.none { it is AgentLoopEvent.TodoSaved })
+    }
+
+    @Test
     fun createTodo_savesConfirmedPreviewOnceAndReportsHistory() = runTest {
         val directory = Files.createTempDirectory("rootpilot-todo-test").toFile()
         try {
@@ -41,6 +51,9 @@ class AgentLoopTest {
             AgentLoop(RepeatedScreenshotProvider(), client, root, todoRepository = repository)
                 .run(request(maxSteps = 2)) {
                     events += it
+                    if (it is AgentLoopEvent.TodoSaved) {
+                        assertEquals(listOf(CreateTodo(it.title, it.dueAt)), repository.list())
+                    }
                     if (it is AgentLoopEvent.AwaitingConfirmation) {
                         assertEquals(RootPilotAction.CreateTodo("买牛奶", null, "记录"), it.action)
                         assertTrue(repository.list().isEmpty())
@@ -55,6 +68,8 @@ class AgentLoopTest {
             assertTrue(client.requests.last().history.single().contains("\"due_at\":null"))
             assertTrue(client.requests.last().history.single().contains("result=success"))
             assertTrue(events.last() is AgentLoopEvent.Completed)
+            assertTrue((events.last() as AgentLoopEvent.Completed).modelReported)
+            assertEquals(listOf(AgentLoopEvent.TodoSaved("买牛奶", null)), events.filterIsInstance<AgentLoopEvent.TodoSaved>())
         } finally {
             directory.deleteRecursively()
         }
@@ -73,6 +88,7 @@ class AgentLoopTest {
         }
         assertEquals(0, repository.attempts)
         assertTrue(events.last() is AgentLoopEvent.Stopped)
+        assertTrue(events.none { it is AgentLoopEvent.TodoSaved })
     }
 
     @Test
@@ -85,6 +101,7 @@ class AgentLoopTest {
         }
         assertEquals(1, repository.attempts)
         assertEquals("本地待办保存失败，已停止；请人工核对保存结果后再决定是否重试", (events.last() as AgentLoopEvent.Failed).message)
+        assertTrue(events.none { it is AgentLoopEvent.TodoSaved })
     }
 
     @Test
@@ -164,6 +181,7 @@ class AgentLoopTest {
                 if (it is AgentLoopEvent.AwaitingConfirmation) it.approval.approve()
             }
             assertTrue(events.last() is AgentLoopEvent.Completed)
+            assertTrue(!(events.last() as AgentLoopEvent.Completed).modelReported)
         }
         assertEquals(2, repository.attempts)
     }
