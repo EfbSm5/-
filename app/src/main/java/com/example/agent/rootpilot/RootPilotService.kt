@@ -16,6 +16,8 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.example.agent.rootpilot.deepseek.HttpDeepSeekClient
 import com.example.agent.rootpilot.apps.AndroidAppCatalog
+import com.example.agent.rootpilot.apps.AllowlistedAppCatalog
+import com.example.agent.rootpilot.apps.AppLaunchAllowlistStore
 import com.example.agent.rootpilot.input.AndroidImeEnvironment
 import com.example.agent.rootpilot.log.AgentLogRepository
 import com.example.agent.rootpilot.log.InMemoryAgentLogRepository
@@ -72,7 +74,7 @@ class RootPilotService : Service() {
         overlay = RootPilotOverlay(this, ::confirmAction) {
             stopAgent(synchronized(stateLock) { latestStartId })
         }
-        val appCatalog = AndroidAppCatalog(this)
+        val appCatalog = AllowlistedAppCatalog(AndroidAppCatalog(this), AppLaunchAllowlistStore.create(this))
         val textInput = AndroidImeEnvironment.createInput(this)
         rootExecutor = SuRootExecutor(appCatalog = appCatalog, typeText = textInput::type)
         logRepository = sharedLogRepository

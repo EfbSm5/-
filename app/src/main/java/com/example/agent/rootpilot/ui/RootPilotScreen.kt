@@ -28,6 +28,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
@@ -39,6 +41,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
 import com.example.agent.rootpilot.ApiConfigUiState
+import com.example.agent.rootpilot.AppLaunchUiState
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotUiState
 import com.example.agent.rootpilot.model.RootPilotStatus
@@ -74,7 +77,21 @@ fun RootPilotScreen(
     onOverlayPermission: () -> Unit,
     modifier: Modifier = Modifier,
     onOpenLegacyAgent: () -> Unit = {},
+    appLaunchState: AppLaunchUiState = AppLaunchUiState(),
+    onRefreshLaunchApps: () -> Unit = {},
+    onAppLaunchAllowedChanged: (String, Boolean) -> Unit = { _, _ -> },
+    onClearLaunchApps: () -> Unit = {},
 ) {
+    var showLaunchApps by remember { mutableStateOf(false) }
+    if (showLaunchApps) {
+        AppLaunchPicker(
+            state = appLaunchState,
+            onAllowedChanged = onAppLaunchAllowedChanged,
+            onClear = onClearLaunchApps,
+            onRefresh = onRefreshLaunchApps,
+            onDismiss = { showLaunchApps = false },
+        )
+    }
     val busy = state.status in setOf(
         RootPilotStatus.CAPTURING,
         RootPilotStatus.REQUESTING_MODEL,
@@ -101,6 +118,12 @@ fun RootPilotScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("RootPilot", style = MaterialTheme.typography.headlineMedium)
+            TextButton(
+                modifier = Modifier.testTag("launch_apps"),
+                onClick = { showLaunchApps = true; onRefreshLaunchApps() },
+            ) {
+                Text("允许启动的应用（${appLaunchState.apps.count { it.packageName in appLaunchState.allowedPackages }}）")
+            }
             TextButton(onClick = onOpenLegacyAgent, enabled = !busy && !apiState.editing) {
                 Text("旧 Agent（实验入口）")
             }

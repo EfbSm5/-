@@ -8,6 +8,10 @@ import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.HttpDeepSeekClient
 import com.example.agent.rootpilot.deepseek.apiValidationError
 import com.example.agent.rootpilot.input.AndroidImeEnvironment
+import com.example.agent.rootpilot.apps.AndroidAppCatalog
+import com.example.agent.rootpilot.apps.AppCatalog
+import com.example.agent.rootpilot.apps.AppLaunchAllowlistStore
+import com.example.agent.rootpilot.model.RootPilotApp
 import com.example.agent.rootpilot.root.RootExecutionResult
 import com.example.agent.rootpilot.model.RootPilotConfig
 import com.example.agent.rootpilot.model.RootPilotStatus
@@ -33,16 +37,75 @@ data class ApiConfigUiState(
     val message: String? = null,
 )
 
+data class AppLaunchUiState(
+    val apps: List<RootPilotApp> = emptyList(),
+    val allowedPackages: Set<String> = emptySet(),
+    val busy: Boolean = false,
+    val message: String? = null,
+)
+
 class RootPilotViewModel(
     private val appContext: Context,
     private val configStore: RootPilotApiConfigStore = RootPilotApiConfigStore.create(appContext),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val appCatalog: AppCatalog = AndroidAppCatalog(appContext),
+    private val appLaunchStore: AppLaunchAllowlistStore = AppLaunchAllowlistStore.create(appContext),
 ) : ViewModel() {
     val uiState: StateFlow<RootPilotUiState> = RootPilotService.uiState
     private val _apiState = MutableStateFlow(ApiConfigUiState())
     val apiState: StateFlow<ApiConfigUiState> = _apiState.asStateFlow()
     private val _inputMessage = MutableStateFlow<String?>(null)
     val inputMessage: StateFlow<String?> = _inputMessage.asStateFlow()
+    private val _appLaunchState = MutableStateFlow(AppLaunchUiState())
+    val appLaunchState: StateFlow<AppLaunchUiState> = _appLaunchState.asStateFlow()
+
+    fun refreshLaunchApps() {
+        if (_appLaunchState.value.busy) return
+        _appLaunchState.value = _appLaunchState.value.copy(busy = true, message = null)
+        viewModelScope.launch {
+            try {
+                appLaunchMutex.withLock {
+                    val loaded = withContext(ioDispatcher) {
+                        AppLaunchUiState(appCatalog.listApps(), appLaunchStore.read())
+                    }
+                    _appLaunchState.value = loaded
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                _appLaunchState.value = _appLaunchState.value.copy(busy = false, message = "应用列表读取失败，请刷新重试")
+            }
+        }
+    }
+
+    fun setAppLaunchAllowed(packageName: String, allowed: Boolean) {
+        if (_appLaunchState.value.apps.none { it.packageName == packageName }) return
+        saveLaunchSelection { current -> if (allowed) current + packageName else current - packageName }
+    }
+
+    fun clearAppLaunchSelection() = saveLaunchSelection { emptySet() }
+
+    private fun saveLaunchSelection(update: (Set<String>) -> Set<String>) {
+        if (_appLaunchState.value.busy) return
+        _appLaunchState.value = _appLaunchState.value.copy(busy = true, message = null)
+        viewModelScope.launch {
+            try {
+                appLaunchMutex.withLock {
+                    // Read inside the shared editor lock so another activity's selection is not lost.
+                    val saved = withContext(ioDispatcher) {
+                        update(appLaunchStore.read()).also(appLaunchStore::save)
+                    }
+                    _appLaunchState.value = _appLaunchState.value.copy(
+                        allowedPackages = saved, busy = false, message = "已自动保存",
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                _appLaunchState.value = _appLaunchState.value.copy(busy = false, message = "保存失败，请刷新后重试")
+            }
+        }
+    }
 
     fun recoverInputMethod() {
         viewModelScope.launch {
@@ -58,6 +121,7 @@ class RootPilotViewModel(
     }
 
     init {
+        refreshLaunchApps()
         viewModelScope.launch {
             try {
                 apiConfigMutex.withLock {
@@ -245,6 +309,7 @@ class RootPilotViewModel(
     private companion object {
         // Keep disk replacement and active-state publication in the same order across editors.
         val apiConfigMutex = Mutex()
+        val appLaunchMutex = Mutex()
     }
 
     class Factory(

@@ -47,6 +47,7 @@ class RootPilotActivity : ComponentActivity() {
                 val state by viewModel.uiState.collectAsState()
                 val apiState by viewModel.apiState.collectAsState()
                 val inputMessage by viewModel.inputMessage.collectAsState()
+                val appLaunchState by viewModel.appLaunchState.collectAsState()
                 DisposableEffect(apiState.editing) {
                     if (apiState.editing) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                     else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -57,6 +58,10 @@ class RootPilotActivity : ComponentActivity() {
                         startActivity(Intent(this@RootPilotActivity, com.example.agent.MainActivity::class.java))
                     },
                     state = state,
+                    appLaunchState = appLaunchState,
+                    onRefreshLaunchApps = viewModel::refreshLaunchApps,
+                    onAppLaunchAllowedChanged = viewModel::setAppLaunchAllowed,
+                    onClearLaunchApps = viewModel::clearAppLaunchSelection,
                     apiState = apiState,
                     onApiKeyChanged = viewModel::updateApiKey,
                     onBaseUrlChanged = viewModel::updateBaseUrl,
@@ -97,6 +102,7 @@ class RootPilotActivity : ComponentActivity() {
         val ownId = ComponentName(this, RootPilotInputMethodService::class.java).flattenToShortString()
         inputMethodEnabled = getSystemService(InputMethodManager::class.java).enabledInputMethodList.any { it.id == ownId }
         viewModel.recoverInputMethod()
+        viewModel.refreshLaunchApps()
     }
 
     private companion object {
