@@ -271,7 +271,7 @@ class RootPilotViewModel(
         _apiState.value = _apiState.value.copy(draft = transform(_apiState.value.draft), message = null)
     }
 
-    private fun canChangeApiConfig(): Boolean = !_apiState.value.busy && !chatState.value.generating && uiState.value.status !in setOf(
+    private fun canChangeApiConfig(): Boolean = !_apiState.value.busy && !chatState.value.generating && !uiState.value.running && uiState.value.status !in setOf(
         RootPilotStatus.CAPTURING, RootPilotStatus.REQUESTING_MODEL, RootPilotStatus.EXECUTING,
         RootPilotStatus.WAITING_SCREEN, RootPilotStatus.WAITING_CONFIRMATION, RootPilotStatus.STOPPING,
     )

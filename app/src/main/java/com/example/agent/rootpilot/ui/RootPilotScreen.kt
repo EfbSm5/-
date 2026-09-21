@@ -106,7 +106,7 @@ fun RootPilotScreen(
             onDismiss = { showLaunchApps = false },
         )
     }
-    val taskBusy = state.status in setOf(
+    val taskBusy = state.running || state.status in setOf(
         RootPilotStatus.CAPTURING, RootPilotStatus.REQUESTING_MODEL,
         RootPilotStatus.EXECUTING, RootPilotStatus.WAITING_SCREEN,
         RootPilotStatus.WAITING_CONFIRMATION, RootPilotStatus.STOPPING,

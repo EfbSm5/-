@@ -21,94 +21,78 @@ import com.example.agent.rootpilot.apps.AppLaunchAllowlistStore
 import com.example.agent.rootpilot.input.AndroidImeEnvironment
 import com.example.agent.rootpilot.log.AgentLogRepository
 import com.example.agent.rootpilot.log.InMemoryAgentLogRepository
-import com.example.agent.rootpilot.loop.ActionApproval
 import com.example.agent.rootpilot.loop.AgentLoop
-import com.example.agent.rootpilot.loop.AgentLoopEvent
-import com.example.agent.rootpilot.loop.AgentLoopRequest
 import com.example.agent.rootpilot.model.RootPilotConfig
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotStatus
 import com.example.agent.rootpilot.model.RootPilotUiState
-import com.example.agent.rootpilot.model.SavedTodoResult
-import com.example.agent.rootpilot.root.RootExecutionResult
-import com.example.agent.rootpilot.root.RootExecutor
 import com.example.agent.rootpilot.root.SuRootExecutor
 import com.example.agent.rootpilot.screen.RootScreenshotProvider
-import com.example.agent.rootpilot.screen.ScreenshotCaptureResult
 import com.example.agent.rootpilot.ui.RootPilotOverlay
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import android.util.Log
 import com.example.agent.rootpilot.log.RunTrace
-import com.example.agent.rootpilot.log.TraceEvent
-import com.example.agent.rootpilot.log.TraceStage
-import com.example.agent.rootpilot.log.TraceStatus
-import com.example.agent.rootpilot.log.TraceReason
 
-class RootPilotService : Service() {
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private lateinit var rootExecutor: RootExecutor
-    private lateinit var loop: AgentLoop
-    private lateinit var logRepository: AgentLogRepository
-    private lateinit var runStore: RootPilotRunStore
-    private var activeJob: Job? = null
-    private var activeTrace: Pair<Job, RunTrace>? = null
-    private var pendingApproval: ActionApproval? = null
-    private var latestStartId: Int = 0
+class RootPilotService : Service(), RootPilotRunHost {
+    private lateinit var controller: RootPilotRunController
     private lateinit var overlay: RootPilotOverlay
+    @Volatile private var destroyed = false
+    private var latestStartId = 0
     private var notificationApprovalToken: String? = null
     private var notificationApprovalIntent: PendingIntent? = null
 
     override fun onCreate() {
         super.onCreate()
-        overlay = RootPilotOverlay(this, ::confirmAction) {
-            stopAgent(synchronized(stateLock) { latestStartId })
+        overlay = RootPilotOverlay(this, { controller.confirmAction() }) {
+            controller.stopAgent(latestStartId)
         }
         val appCatalog = AllowlistedAppCatalog(AndroidAppCatalog(this), AppLaunchAllowlistStore.create(this))
         val textInput = AndroidImeEnvironment.createInput(this)
-        rootExecutor = SuRootExecutor(appCatalog = appCatalog, typeText = textInput::type)
-        logRepository = sharedLogRepository
-        runStore = RootPilotRunStore(File(filesDir, RootPilotRunStore.FILE_NAME))
-        restoreInterruptedRun()
-        loop = AgentLoop(
-            screenshotProvider = RootScreenshotProvider(rootExecutor),
-            deepSeekClient = HttpDeepSeekClient(),
+        val rootExecutor = SuRootExecutor(appCatalog = appCatalog, typeText = textInput::type)
+        controller = RootPilotRunController(
+            taskState = taskState,
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
             rootExecutor = rootExecutor,
-            appCatalog = appCatalog,
-            todoRepository = com.example.agent.agent.planning.FileTodoRepository(File(filesDir, "agent_todos.json")),
+            loop = AgentLoop(
+                screenshotProvider = RootScreenshotProvider(rootExecutor),
+                deepSeekClient = HttpDeepSeekClient(),
+                rootExecutor = rootExecutor,
+                appCatalog = appCatalog,
+                todoRepository = com.example.agent.agent.planning.FileTodoRepository(File(filesDir, "agent_todos.json")),
+            ),
+            runStore = RootPilotRunStore(File(filesDir, RootPilotRunStore.FILE_NAME)),
+            logRepository = sharedLogRepository,
+            traceSink = { Log.i(RunTrace.TAG, it) },
+            host = this,
         )
         createNotificationChannel()
+        controller.restoreInterruptedRun()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        synchronized(stateLock) { latestStartId = startId }
+        latestStartId = startId
+        controller.commandStarted(startId)
         startForeground(NOTIFICATION_ID, buildNotification())
         intent?.readConfig()?.let(::updateConfig)
         when (intent?.action) {
-            ACTION_TEST_ROOT -> testRoot(startId)
-            ACTION_CAPTURE_SCREEN -> captureScreen(startId)
-            ACTION_SINGLE_STEP -> startRun(singleStep = true, startId = startId)
-            ACTION_AUTO_EXECUTE -> startRun(singleStep = false, startId = startId)
-            ACTION_CONFIRM -> confirmAction()
+            ACTION_TEST_ROOT -> controller.testRoot(startId)
+            ACTION_CAPTURE_SCREEN -> controller.captureScreen(startId)
+            ACTION_SINGLE_STEP -> controller.startRun(singleStep = true, startId = startId)
+            ACTION_AUTO_EXECUTE -> controller.startRun(singleStep = false, startId = startId)
+            ACTION_CONFIRM -> controller.confirmAction()
             ACTION_CONFIRM_NOTIFICATION -> {
-                confirmNotificationAction(intent.getStringExtra(EXTRA_APPROVAL_TOKEN))
-                if (synchronized(stateLock) { activeJob == null }) stopSelfResult(startId)
+                controller.confirmNotificationAction(intent.getStringExtra(EXTRA_APPROVAL_TOKEN))
+                if (!controller.busy) stopSelfResult(startId)
             }
-            ACTION_STOP -> stopAgent(startId)
-            ACTION_RECOVER -> startRun(singleStep = false, startId = startId, recovering = true)
-            ACTION_DISCARD_RECOVERY -> discardInterruptedRun(startId)
-            ACTION_RESTORE -> restoreInterruptedRun(startId)
+            ACTION_STOP -> controller.stopAgent(startId)
+            ACTION_RECOVER -> controller.startRun(singleStep = false, startId = startId, recovering = true)
+            ACTION_DISCARD_RECOVERY -> controller.discardInterruptedRun(startId)
+            ACTION_RESTORE -> controller.restoreInterruptedRun(startId)
             else -> if (intent == null) stopSelfResult(startId)
         }
         return START_NOT_STICKY
@@ -117,471 +101,33 @@ class RootPilotService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        destroyed = true
         overlay.hide()
         synchronized(stateLock) {
             notificationApprovalIntent?.cancel()
             notificationApprovalIntent = null
             notificationApprovalToken = null
-            pendingApproval?.reject()
-            pendingApproval = null
-            activeJob?.cancel()
-            activeJob = null
         }
-        rootExecutor.cancel()
-        serviceScope.cancel()
+        controller.destroy()
         super.onDestroy()
     }
 
-    private fun testRoot(startId: Int) {
-        startOneShot(startId) { trace ->
-            appendLog(trace, TraceReason.ROOT_CHECK_STARTED, TraceStatus.STARTED)
-            when (val result = rootExecutor.checkRoot()) {
-                is RootExecutionResult.Success -> {
-                    appendLog(trace, TraceReason.ROOT_CHECK_OK, TraceStatus.SUCCESS)
-                    updateState(status = RootPilotStatus.IDLE, errorMessage = null)
-                }
+    override fun stateChanged() = notifyState()
 
-                is RootExecutionResult.Failure -> {
-                    appendLog(trace, TraceReason.ROOT_CHECK_FAILED, TraceStatus.FAILED)
-                    updateState(
-                        status = RootPilotStatus.FAILED,
-                        errorMessage = result.message,
-                    )
-                }
-            }
-        }
-    }
-
-    private fun captureScreen(startId: Int) {
-        startOneShot(startId) { trace ->
-            appendLog(trace, TraceReason.CAPTURE_STARTED, TraceStatus.STARTED)
-            when (val result = loop.captureScreen()) {
-                is ScreenshotCaptureResult.Success -> {
-                    updateState(
-                        status = RootPilotStatus.IDLE,
-                        frame = result.frame,
-                        errorMessage = null,
-                    )
-                    appendLog(trace, TraceReason.CAPTURE_OK, TraceStatus.SUCCESS)
-                }
-
-                is ScreenshotCaptureResult.Failure -> {
-                    appendLog(trace, TraceReason.CAPTURE_FAILED, TraceStatus.FAILED)
-                    updateState(
-                        status = RootPilotStatus.FAILED,
-                        errorMessage = result.message,
-                    )
-                }
-            }
-        }
-    }
-
-    private fun startRun(singleStep: Boolean, startId: Int, recovering: Boolean = false) {
-        val config = synchronized(stateLock) { uiState.value.config }
-        val shouldStart = synchronized(stateLock) {
-            if (activeJob != null) {
-                null
-            } else {
-                _uiState.value = _uiState.value.copy(savedTodos = emptyList(), modelReportedResult = false)
-                when {
-                config.task.isBlank() -> {
-                    updateStateLocked(
-                        status = RootPilotStatus.FAILED,
-                        errorMessage = "请先输入自然语言任务",
-                    )
-                    false
-                }
-
-                !recovering && uiState.value.status == RootPilotStatus.RECOVERY_REQUIRED -> {
-                    updateStateLocked(
-                        status = RootPilotStatus.RECOVERY_REQUIRED,
-                        errorMessage = "请先处理上次中断的任务",
-                    )
-                    false
-                }
-
-                !config.allowScreenUpload -> {
-                    updateStateLocked(
-                        status = RootPilotStatus.FAILED,
-                        errorMessage = "发送截图前请先打开上传确认",
-                    )
-                    false
-                }
-
-                    else -> {
-                        updateStateLocked(
-                            status = RootPilotStatus.CAPTURING,
-                            step = 0,
-                            pendingAction = null,
-                            errorMessage = null,
-                        )
-                        true
-                    }
-                }
-            }
-        }
-        if (shouldStart != true) {
-            if (shouldStart == false) stopSelfResult(startId)
-            return
-        }
-
-        if (recovering) clearRunSnapshot()
-        persistRunSnapshot(RootPilotStatus.CAPTURING, step = 0)
-
-        val trace = RunTrace(sink = ::appendTraceLine)
-        lateinit var job: Job
-        job = serviceScope.launch(start = CoroutineStart.LAZY) {
-            try {
-                loop.run(
-                    request = AgentLoopRequest(
-                        config = config,
-                        maxSteps = MAX_STEPS,
-                        singleStep = singleStep,
-                    ),
-                    trace = trace,
-                    onEvent = ::handleEvent,
-                )
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                clearRunSnapshot()
-                updateState(
-                    status = RootPilotStatus.FAILED,
-                    errorMessage = "AgentLoop 执行异常",
-                    clearPendingAction = true,
-                )
-            }
-        }
-        synchronized(stateLock) {
-            activeJob = job
-            activeTrace = job to trace
-        }
-        job.invokeOnCompletion { finishJob(job) }
-        job.start()
-    }
-
-    private fun startOneShot(startId: Int, work: suspend (RunTrace) -> Unit) {
-        synchronized(stateLock) {
-            if (activeJob != null) return
-            _uiState.value = _uiState.value.copy(savedTodos = emptyList(), modelReportedResult = false)
-            updateStateLocked(
-                status = RootPilotStatus.CAPTURING,
-                errorMessage = null,
-            )
-            val trace = RunTrace(sink = ::appendTraceLine)
-            lateinit var job: Job
-            job = serviceScope.launch(start = CoroutineStart.LAZY) {
-                try {
-                    work(trace)
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Exception) {
-                    appendLog(trace, TraceReason.SERVICE_ERROR, TraceStatus.FAILED)
-                    updateState(
-                        status = RootPilotStatus.FAILED,
-                        errorMessage = "RootPilot 操作异常",
-                    )
-                }
-            }
-            activeJob = job
-            job.invokeOnCompletion { finishJob(job) }
-            job.start()
-        }
-    }
-
-    private fun confirmAction() {
-        synchronized(stateLock) {
-            pendingApproval?.approve()
-            pendingApproval = null
-            notifyState()
-        }
-    }
-
-    private fun confirmNotificationAction(token: String?) {
-        synchronized(stateLock) {
-            if (token != null && pendingApproval?.approve(token) == true) {
-                pendingApproval = null
-                notifyState()
-            }
-        }
-    }
-
-    private fun finishJob(job: Job) {
-        val startId = synchronized(stateLock) {
-            if (activeJob === job) {
-                activeJob = null
-                if (activeTrace?.first === job) activeTrace = null
-                if (_uiState.value.status == RootPilotStatus.STOPPING) {
-                    clearRunSnapshot()
-                    updateStateLocked(
-                        status = RootPilotStatus.STOPPED,
-                        clearPendingAction = true,
-                        errorMessage = "用户已停止；已执行的操作不会撤销",
-                    )
-                }
-                latestStartId
-            } else {
-                null
-            }
-        }
-        startId?.let(::stopSelfResult)
-    }
-
-    private fun stopAgent(startId: Int) {
-        val running = synchronized(stateLock) {
-            if (_uiState.value.status == RootPilotStatus.STOPPING) return
-            activeTrace?.takeIf { it.first === activeJob }?.second?.record(
-                TraceEvent.STOP_REQUESTED, TraceStatus.REQUESTED, stage = TraceStage.SERVICE,
-            )
-            val job = activeJob
-            updateStateLocked(
-                status = if (job != null) RootPilotStatus.STOPPING else RootPilotStatus.STOPPED,
-                clearPendingAction = true,
-                errorMessage = if (job != null) "正在取消请求并等待执行退出" else "用户已停止",
-            )
-            rootExecutor.cancel()
-            job?.cancel()
-            pendingApproval?.reject()
-            pendingApproval = null
-            job != null
-        }
-        overlay.hide()
-        if (!running) {
-            clearRunSnapshot()
-            stopSelfResult(startId)
-        }
-    }
-
-    private fun restoreInterruptedRun(startId: Int? = null) {
-        if (synchronized(stateLock) { activeJob != null }) return
-        val snapshot = runStore.read()
-        if (snapshot == null) {
-            startId?.let(::stopSelfResult)
-            return
-        }
-        synchronized(stateLock) {
-            _uiState.value = _uiState.value.copy(
-                config = snapshot.restoreTask(_uiState.value.config),
-                status = RootPilotStatus.RECOVERY_REQUIRED,
-                step = snapshot.step,
-                errorMessage = buildString {
-                    append("上次任务在 ${snapshot.status} 阶段中断，不会自动重放")
-                    snapshot.actionSummary?.let { append("：$it") }
-                },
-                pendingAction = null,
-                savedTodos = emptyList(),
-                modelReportedResult = false,
-            )
-        }
-        startId?.let {
-            notifyState()
-            stopSelfResult(it)
-        }
-    }
-
-    private fun discardInterruptedRun(startId: Int) {
-        if (synchronized(stateLock) { activeJob != null }) return
-        clearRunSnapshot()
-        updateState(
-            status = RootPilotStatus.IDLE,
-            clearPendingAction = true,
-            errorMessage = null,
-        )
-        stopSelfResult(startId)
-    }
-
-    private fun persistRunSnapshot(
-        status: RootPilotStatus,
-        step: Int,
-        actionSummary: String? = null,
-    ) {
-        val config = synchronized(stateLock) { uiState.value.config }
-        runCatching {
-            runStore.write(
-                RootPilotRunSnapshot(
-                    baseUrl = config.baseUrl,
-                    model = config.model,
-                    task = config.task,
-                    manualConfirmation = config.manualConfirmation,
-                    allowScreenUpload = config.allowScreenUpload,
-                    status = status.name,
-                    step = step,
-                    actionSummary = actionSummary,
-                ),
-            )
-        }
-    }
-
-    private fun clearRunSnapshot() {
-        if (::runStore.isInitialized) {
-            runCatching { runStore.clear() }
-        }
-    }
-
-    private suspend fun handleEvent(event: AgentLoopEvent) {
-        synchronized(stateLock) {
-            // Cancellation may race with a blocking operation returning. Keep STOPPING
-            // until job completion, but retain writes that have actually succeeded.
-            if (_uiState.value.status == RootPilotStatus.STOPPING && event !is AgentLoopEvent.TodoSaved) return
-            when (event) {
-                is AgentLoopEvent.ModelOutput -> {
-                    if (_uiState.value.status != RootPilotStatus.REQUESTING_MODEL ||
-                        _uiState.value.step != event.step) return
-                    // Preview stays in memory: no notification, trace or snapshot write per chunk.
-                    _uiState.value = _uiState.value.copy(modelStream = event.snapshot)
-                }
-                is AgentLoopEvent.TodoSaved -> {
-                    _uiState.value = _uiState.value.copy(
-                        savedTodos = _uiState.value.savedTodos + SavedTodoResult(event.title, event.dueAt),
-                    )
-                }
-                is AgentLoopEvent.Capturing -> {
-                    updateState(status = RootPilotStatus.CAPTURING, step = event.step)
-                    persistRunSnapshot(RootPilotStatus.CAPTURING, event.step)
-                }
-
-                is AgentLoopEvent.ScreenshotCaptured -> {
-                    updateState(
-                        status = RootPilotStatus.CAPTURING,
-                        frame = event.frame,
-                        step = event.step,
-                    )
-                    persistRunSnapshot(RootPilotStatus.CAPTURING, event.step)
-                }
-
-                is AgentLoopEvent.RequestingModel -> {
-                    updateState(status = RootPilotStatus.REQUESTING_MODEL, step = event.step)
-                    persistRunSnapshot(RootPilotStatus.REQUESTING_MODEL, event.step)
-                }
-
-                is AgentLoopEvent.AwaitingConfirmation -> {
-                    synchronized(stateLock) {
-                        pendingApproval = event.approval
-                        updateStateLocked(
-                            status = RootPilotStatus.WAITING_CONFIRMATION,
-                            step = event.step,
-                            lastAction = event.action,
-                            pendingAction = event.action,
-                        )
-                    }
-                    persistRunSnapshot(
-                        RootPilotStatus.WAITING_CONFIRMATION,
-                        event.step,
-                        event.action.describeForSnapshot(),
-                    )
-                }
-
-                is AgentLoopEvent.Executing -> {
-                    synchronized(stateLock) {
-                        pendingApproval = null
-                        updateStateLocked(
-                            status = RootPilotStatus.EXECUTING,
-                            step = event.step,
-                            lastAction = event.action,
-                            pendingAction = null,
-                        )
-                    }
-                    persistRunSnapshot(
-                        RootPilotStatus.EXECUTING,
-                        event.step,
-                        event.action.describeForSnapshot(),
-                    )
-                }
-
-                is AgentLoopEvent.WaitingScreen -> {
-                    updateState(status = RootPilotStatus.WAITING_SCREEN, step = event.step)
-                    persistRunSnapshot(RootPilotStatus.WAITING_SCREEN, event.step)
-                }
-
-                is AgentLoopEvent.Completed -> {
-                    _uiState.value = _uiState.value.copy(modelReportedResult = event.modelReported)
-                    updateState(
-                        status = RootPilotStatus.COMPLETED,
-                        clearPendingAction = true,
-                        errorMessage = event.message,
-                    )
-                    clearRunSnapshot()
-                }
-
-                is AgentLoopEvent.Failed -> {
-                    _uiState.value = _uiState.value.copy(modelReportedResult = event.modelReported)
-                    updateState(
-                        status = RootPilotStatus.FAILED,
-                        clearPendingAction = true,
-                        errorMessage = event.message,
-                    )
-                    clearRunSnapshot()
-                }
-
-                AgentLoopEvent.Stopped -> {
-                    updateState(
-                        status = RootPilotStatus.STOPPING,
-                        clearPendingAction = true,
-                        errorMessage = "正在等待执行退出",
-                    )
-                }
-            }
-        }
-        // Complete window removal before the loop captures or injects input; an async
-        // state collector could leave the panel in the screenshot or intercept a tap.
+    override suspend fun renderOverlay(state: RootPilotUiState) {
+        // Removal must finish before the loop captures or injects input.
         withContext(Dispatchers.Main.immediate) {
-            overlay.render(uiState.value)
+            // A stop command may have arrived while this render was queued.
+            if (!destroyed) overlay.render(uiState.value)
         }
     }
 
-    private fun updateState(
-        status: RootPilotStatus,
-        frame: com.example.agent.rootpilot.screen.ScreenshotFrame? = null,
-        step: Int? = null,
-        lastAction: com.example.agent.rootpilot.model.RootPilotAction? = null,
-        pendingAction: com.example.agent.rootpilot.model.RootPilotAction? = null,
-        errorMessage: String? = null,
-        clearPendingAction: Boolean = false,
-    ) {
-        synchronized(stateLock) {
-            updateStateLocked(status, frame, step, lastAction, pendingAction, errorMessage, clearPendingAction)
-        }
-    }
+    override fun hideOverlay() { if (!destroyed) overlay.hide() }
 
-    private fun updateStateLocked(
-        status: RootPilotStatus,
-        frame: com.example.agent.rootpilot.screen.ScreenshotFrame? = null,
-        step: Int? = null,
-        lastAction: com.example.agent.rootpilot.model.RootPilotAction? = null,
-        pendingAction: com.example.agent.rootpilot.model.RootPilotAction? = null,
-        errorMessage: String? = null,
-        clearPendingAction: Boolean = false,
-    ) {
-        if (_uiState.value.status == RootPilotStatus.STOPPING && status != RootPilotStatus.STOPPED) return
-        _uiState.value = _uiState.value.copy(
-            status = status,
-            frame = frame ?: _uiState.value.frame,
-            step = step ?: _uiState.value.step,
-            lastAction = lastAction ?: _uiState.value.lastAction,
-            pendingAction = if (clearPendingAction) null else pendingAction ?: _uiState.value.pendingAction,
-            errorMessage = errorMessage,
-            modelStream = com.example.agent.rootpilot.deepseek.ModelStreamSnapshot(),
-        )
-        notifyState()
-    }
-
-    private fun appendLog(trace: RunTrace, reason: TraceReason, status: TraceStatus) {
-        trace.record(
-            TraceEvent.CONTROL, status, reason, stage = TraceStage.SERVICE,
-        )
-    }
-
-    private fun appendTraceLine(line: String) {
-        logRepository.append(line)
-        Log.i(RunTrace.TAG, line)
-        synchronized(stateLock) {
-            _uiState.value = _uiState.value.copy(logs = logRepository.list())
-            notifyState()
-        }
-    }
+    override fun idle(startId: Int) { if (!destroyed) stopSelfResult(startId) }
 
     private fun notifyState() {
-        if (::rootExecutor.isInitialized &&
+        if (!destroyed &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
         ) {
@@ -604,7 +150,7 @@ class RootPilotService : Service() {
 
     private fun buildNotification(): Notification = synchronized(stateLock) {
         val state = uiState.value
-        val approval = pendingApproval?.takeIf { state.status == RootPilotStatus.WAITING_CONFIRMATION }
+        val approval = controller.approval?.takeIf { state.status == RootPilotStatus.WAITING_CONFIRMATION }
         if (notificationApprovalToken != approval?.token) {
             notificationApprovalIntent?.cancel()
             notificationApprovalToken = approval?.token
@@ -645,7 +191,7 @@ class RootPilotService : Service() {
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setContentIntent(openPendingIntent)
             .setAutoCancel(false)
-            .setOngoing(activeJob != null)
+            .setOngoing(controller.busy)
             .apply {
                 notificationApprovalIntent?.let { confirmation ->
                     addAction(
@@ -684,29 +230,17 @@ class RootPilotService : Service() {
         )
     }
 
-    private fun RootPilotAction.describeForSnapshot(): String = when (this) {
-        is RootPilotAction.CreateTodo -> "create_todo 标题：$title；截止时间：${dueAt ?: "无"}"
-        is RootPilotAction.Tap -> "tap($x,$y)"
-        is RootPilotAction.Swipe -> "swipe($x1,$y1,$x2,$y2,$durationMillis)"
-        is RootPilotAction.OpenApp -> "open_app($packageName)"
-        is RootPilotAction.Type -> "type(length=${text.length})"
-        is RootPilotAction.Key -> "key($key)"
-        is RootPilotAction.Wait -> "wait($durationMillis)"
-        is RootPilotAction.AskUser -> "ask_user"
-        is RootPilotAction.Finish -> "finish($success)"
-    }
-
     companion object {
         private const val CHANNEL_ID = "rootpilot_agent"
         private const val NOTIFICATION_ID = 2001
         private const val OPEN_REQUEST_CODE = 2003
         private const val STOP_REQUEST_CODE = 2002
         private const val CONFIRM_REQUEST_CODE = 2004
-        private const val MAX_STEPS = 20
 
-        private val _uiState = MutableStateFlow(RootPilotUiState())
-        val uiState: StateFlow<RootPilotUiState> = _uiState.asStateFlow()
-        private val stateLock = Any()
+        private val taskState = RootPilotTaskState()
+        private val _uiState get() = taskState.mutableState
+        val uiState: StateFlow<RootPilotUiState> = taskState.uiState
+        private val stateLock get() = taskState.lock
         private val sharedLogRepository: AgentLogRepository = InMemoryAgentLogRepository()
 
         const val ACTION_TEST_ROOT = "com.example.agent.rootpilot.TEST_ROOT"
@@ -726,6 +260,7 @@ class RootPilotService : Service() {
 
         fun updateConfig(config: RootPilotConfig) {
             synchronized(stateLock) {
+                if (taskState.owner != null) return
                 // Task edits may carry a stale snapshot; only updateApiConfig owns API fields.
                 _uiState.value = _uiState.value.copy(
                     config = _uiState.value.config.copy(
@@ -747,7 +282,7 @@ class RootPilotService : Service() {
         }
 
         fun restoreIfNeeded(context: Context) {
-            if (File(context.filesDir, RootPilotRunStore.FILE_NAME).isFile) {
+            if (File(context.filesDir, RootPilotRunStore.FILE_NAME).exists()) {
                 send(context, ACTION_RESTORE)
             }
         }

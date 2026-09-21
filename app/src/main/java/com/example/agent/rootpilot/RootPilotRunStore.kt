@@ -2,8 +2,10 @@ package com.example.agent.rootpilot
 
 import com.example.agent.rootpilot.model.RootPilotConfig
 import java.io.File
+import java.io.IOException
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.NoSuchFileException
 import java.nio.file.StandardCopyOption
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -28,6 +30,10 @@ data class RootPilotRunSnapshot(
     )
 }
 
+// Do not attach the original cause: filesystem and serialization errors can contain private data.
+class RootPilotRunStoreException(val operation: String) :
+    IOException("Run snapshot $operation failed")
+
 class RootPilotRunStore(
     private val storageFile: File,
 ) {
@@ -37,15 +43,19 @@ class RootPilotRunStore(
     }
 
     @Synchronized
-    fun read(): RootPilotRunSnapshot? = runCatching {
-        if (!storageFile.isFile) return null
-        json.decodeFromString<RootPilotRunSnapshot>(storageFile.readText())
-    }.getOrNull()
+    fun read(): RootPilotRunSnapshot? = storageOperation("read") {
+        val content = try {
+            Files.readAllBytes(storageFile.toPath()).toString(Charsets.UTF_8)
+        } catch (_: NoSuchFileException) {
+            return@storageOperation null
+        }
+        json.decodeFromString<RootPilotRunSnapshot>(content)
+    }
 
     @Synchronized
-    fun write(snapshot: RootPilotRunSnapshot) {
+    fun write(snapshot: RootPilotRunSnapshot): Unit = storageOperation("write") {
         val parent = storageFile.parentFile ?: error("RootPilotRunStore 必须有父目录")
-        parent.mkdirs()
+        Files.createDirectories(parent.toPath())
         val temporaryFile = File.createTempFile("${storageFile.name}.", ".tmp", parent)
         try {
             temporaryFile.writeText(json.encodeToString(snapshot))
@@ -64,13 +74,21 @@ class RootPilotRunStore(
                 )
             }
         } finally {
-            temporaryFile.delete()
+            Files.deleteIfExists(temporaryFile.toPath())
         }
+        Unit
     }
 
     @Synchronized
-    fun clear() {
-        storageFile.delete()
+    fun clear(): Unit = storageOperation("clear") {
+        Files.deleteIfExists(storageFile.toPath())
+        Unit
+    }
+
+    private inline fun <T> storageOperation(operation: String, block: () -> T): T = try {
+        block()
+    } catch (_: Exception) {
+        throw RootPilotRunStoreException(operation)
     }
 
     companion object {

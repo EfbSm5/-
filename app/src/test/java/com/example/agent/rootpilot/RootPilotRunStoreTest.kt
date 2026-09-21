@@ -5,10 +5,122 @@ import java.nio.file.Files
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 class RootPilotRunStoreTest {
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
+
+    @Test
+    fun read_missingSnapshotReturnsNull() {
+        assertNull(RootPilotRunStore(temporaryFolder.root.resolve("missing/run.json")).read())
+    }
+
+    @Test
+    fun read_corruptSnapshotThrowsSanitizedException() {
+        val file = temporaryFolder.newFile("run.json")
+        file.writeText("{\"task\":\"private-task-content\"")
+
+        assertSanitizedFailure("read") { RootPilotRunStore(file).read() }
+    }
+
+    @Test
+    fun read_directoryThrowsSanitizedException() {
+        assertSanitizedFailure("read") {
+            RootPilotRunStore(temporaryFolder.newFolder("private-path")).read()
+        }
+    }
+
+    @Test
+    fun read_invalidParentThrowsSanitizedException() {
+        val parent = temporaryFolder.newFile("private-parent")
+
+        assertSanitizedFailure("read") { RootPilotRunStore(parent.resolve("run.json")).read() }
+    }
+
+    @Test
+    fun write_invalidParentThrowsSanitizedException() {
+        val parent = temporaryFolder.newFile("private-parent")
+
+        assertSanitizedFailure("write") {
+            RootPilotRunStore(parent.resolve("run.json")).write(snapshot())
+        }
+        assertTrue(parent.isFile)
+    }
+
+    @Test
+    fun write_replacementFailurePreservesTargetAndRemovesTemporaryFile() {
+        val directory = temporaryFolder.newFolder("storage")
+        val target = directory.resolve("run.json").apply { mkdir() }
+        val existing = target.resolve("existing").apply { writeText("fixture") }
+
+        assertSanitizedFailure("write") { RootPilotRunStore(target).write(snapshot()) }
+
+        assertTrue(existing.isFile)
+        assertEquals(listOf("run.json"), directory.list()!!.toList())
+    }
+
+    @Test
+    fun write_replacesExistingSnapshotAndRemovesTemporaryFile() {
+        val directory = temporaryFolder.newFolder("storage")
+        val store = RootPilotRunStore(directory.resolve("run.json"))
+        store.write(snapshot())
+
+        store.write(snapshot().copy(step = 3))
+
+        assertEquals(3, store.read()?.step)
+        assertEquals(listOf("run.json"), directory.list()!!.toList())
+    }
+
+    @Test
+    fun clear_missingSnapshotSucceeds() {
+        val store = RootPilotRunStore(temporaryFolder.root.resolve("missing/run.json"))
+
+        store.clear()
+        store.clear()
+
+        assertNull(store.read())
+    }
+
+    @Test
+    fun clear_nonEmptyDirectoryThrowsSanitizedException() {
+        val directory = temporaryFolder.newFolder("private-path")
+        val existing = directory.resolve("existing").apply { writeText("fixture") }
+
+        assertSanitizedFailure("clear") { RootPilotRunStore(directory).clear() }
+
+        assertTrue(existing.isFile)
+    }
+
+    @Test
+    fun clear_invalidParentThrowsSanitizedException() {
+        val parent = temporaryFolder.newFile("private-parent")
+
+        assertSanitizedFailure("clear") { RootPilotRunStore(parent.resolve("run.json")).clear() }
+    }
+
+    private fun assertSanitizedFailure(operation: String, block: () -> Unit) {
+        val failure = assertThrows(RootPilotRunStoreException::class.java) { block() }
+        assertEquals(operation, failure.operation)
+        assertEquals("Run snapshot $operation failed", failure.message)
+        assertNull(failure.cause)
+        assertTrue(failure.suppressed.isEmpty())
+    }
+
+    private fun snapshot() = RootPilotRunSnapshot(
+        baseUrl = "http://localhost:18765",
+        model = "test-model",
+        task = "private-task-content",
+        manualConfirmation = true,
+        allowScreenUpload = true,
+        status = "RUNNING",
+        step = 0,
+    )
+
     @Test
     fun recovery_preservesCurrentCredentialsEndpointAndModel() {
         val current = RootPilotConfig(apiKey = "test-saved-token", model = "current-model")

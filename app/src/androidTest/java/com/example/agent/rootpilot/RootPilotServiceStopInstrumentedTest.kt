@@ -1,318 +1,250 @@
 package com.example.agent.rootpilot
 
-import android.content.Context
-import android.content.ContextWrapper
-import android.content.pm.PackageManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
+import com.example.agent.rootpilot.deepseek.DeepSeekClient
+import com.example.agent.rootpilot.deepseek.DeepSeekVisionRequest
 import com.example.agent.rootpilot.log.InMemoryAgentLogRepository
-import com.example.agent.rootpilot.log.RunTrace
-import com.example.agent.rootpilot.loop.ActionApproval
-import com.example.agent.rootpilot.loop.AgentLoopEvent
+import com.example.agent.rootpilot.loop.AgentLoop
 import com.example.agent.rootpilot.model.ExecutableRootAction
-import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotConfig
 import com.example.agent.rootpilot.model.RootPilotStatus
 import com.example.agent.rootpilot.model.RootPilotUiState
-import com.example.agent.rootpilot.model.SavedTodoResult
 import com.example.agent.rootpilot.root.RootExecutionResult
 import com.example.agent.rootpilot.root.RootExecutor
 import com.example.agent.rootpilot.root.RootScreenshotResult
-import com.example.agent.rootpilot.ui.RootPilotOverlay
-import java.lang.reflect.InvocationTargetException
+import com.example.agent.rootpilot.screen.ScreenshotCaptureResult
+import com.example.agent.rootpilot.screen.ScreenshotFrame
+import com.example.agent.rootpilot.screen.ScreenshotProvider
 import java.nio.file.Files
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
-import kotlin.coroutines.Continuation
-import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Exercises service state transitions without onCreate, a model client, or real root commands. */
+/** Tests production controller coroutines on Android, not the Service lifecycle end to end. */
 @RunWith(AndroidJUnit4::class)
 class RootPilotServiceStopInstrumentedTest {
     @Test
     fun stopRetainsJobAndSnapshotUntilNonCancellableCleanupCompletes() = withFixture { fixture ->
-        val decision = CompletableDeferred<Boolean>()
-        fixture.onMain {
-            fixture.set("pendingApproval", ActionApproval(decision))
-            fixture.state.value = fixture.state.value.copy(
-                status = RootPilotStatus.WAITING_CONFIRMATION,
-                pendingAction = RootPilotAction.Tap(500, 250, "test"),
-            )
-        }
-        fixture.startBlockedJob()
+        val session = fixture.newSession()
+        fixture.start(session, 1)
         val snapshot = fixture.snapshotFile.readText()
 
-        fixture.stop()
-        withTimeout(TIMEOUT_MS) { fixture.cleanupEntered.await() }
-        assertFalse(withTimeout(TIMEOUT_MS) { decision.await() })
-        fixture.assertStopping(snapshot)
-        assertEquals(1, fixture.executor.cancelCount.get())
+        fixture.stop(session, 2)
+        withTimeout(TIMEOUT_MS) { session.executor.cleanupEntered.await() }
+        fixture.assertStopping(session, snapshot)
+        assertEquals(1, session.executor.cancelCount)
+        assertTrue(session.host.idleStartIds.isEmpty())
 
-        val oneShotExecuted = AtomicBoolean(false)
-        fixture.onMain {
-            fixture.call("startRun", false, 2, false)
-            val work: suspend (RunTrace) -> Unit = { oneShotExecuted.set(true) }
-            fixture.call("startOneShot", 3, work)
-            fixture.call("stopAgent", 4)
-        }
-        fixture.assertStopping(snapshot)
-        assertEquals(1, fixture.executor.cancelCount.get())
+        session.controller.commandStarted(3)
+        session.controller.startRun(singleStep = true, startId = 3)
+        fixture.stop(session, 4)
+        fixture.assertStopping(session, snapshot)
+        assertEquals(1, session.executor.executeCount)
+        assertEquals(1, session.executor.cancelCount)
+        assertTrue(session.host.idleStartIds.isEmpty())
 
-        // A result already in flight must not publish a terminal state or clear recovery data.
-        listOf(
-            AgentLoopEvent.Capturing(99),
-            AgentLoopEvent.RequestingModel(99),
-            AgentLoopEvent.AwaitingConfirmation(
-                99, RootPilotAction.Tap(1, 1, "test"), ActionApproval(CompletableDeferred()),
-            ),
-            AgentLoopEvent.Executing(99, RootPilotAction.Tap(1, 1, "test")),
-            AgentLoopEvent.WaitingScreen(99),
-            AgentLoopEvent.Completed("test", modelReported = true),
-            AgentLoopEvent.Failed("test", modelReported = true),
-            AgentLoopEvent.Stopped,
-        ).forEach { event ->
-            fixture.event(event)
-            fixture.assertStopping(snapshot)
-            assertFalse(fixture.state.value.modelReportedResult)
-            assertEquals(0, fixture.state.value.step)
-        }
-
-        // A completion from a different job cannot release the active run's stop barrier.
-        val unrelated = Job().apply { complete() }
-        fixture.onMain { fixture.call("finishJob", unrelated) }
-        fixture.assertStopping(snapshot)
-
-        fixture.releaseAndFinish()
-        fixture.assertStopped()
-        assertFalse(oneShotExecuted.get())
+        fixture.releaseAndFinish(session)
+        assertEquals(RootPilotStatus.STOPPED, fixture.state.uiState.value.status)
+        assertFalse(session.controller.busy)
+        assertFalse(fixture.state.uiState.value.running)
+        assertNull(fixture.state.owner)
+        assertNull(fixture.store.read())
+        assertFalse(fixture.snapshotFile.exists())
+        assertEquals(listOf(4), session.host.idleStartIds)
     }
 
     @Test
-    fun successfulTodoEventsSurviveCancellationWithoutBecomingModelReportedResults() = withFixture { fixture ->
-        val first = SavedTodoResult("test saved before stop", null)
-        val late = SavedTodoResult("test saved during cleanup", "2026-09-22T09:00:00+08:00")
-        fixture.event(AgentLoopEvent.TodoSaved(first.title, first.dueAt))
-        assertEquals(listOf(first), fixture.state.value.savedTodos)
-        assertFalse(fixture.state.value.modelReportedResult)
-
-        fixture.startBlockedJob()
+    fun destructionDuringCleanupRetainsOwnerUntilRecoveryIsRequired() = withFixture { fixture ->
+        val original = fixture.newSession()
+        fixture.start(original, 1)
         val snapshot = fixture.snapshotFile.readText()
-        fixture.stop()
-        withTimeout(TIMEOUT_MS) { fixture.cleanupEntered.await() }
-        fixture.event(AgentLoopEvent.TodoSaved(late.title, late.dueAt))
-        fixture.event(AgentLoopEvent.Completed("model claim", modelReported = true))
-        fixture.assertStopping(snapshot)
-        assertEquals(listOf(first, late), fixture.state.value.savedTodos)
-        assertFalse(fixture.state.value.modelReportedResult)
+        fixture.stop(original, 2)
+        withTimeout(TIMEOUT_MS) { original.executor.cleanupEntered.await() }
 
-        fixture.releaseAndFinish()
-        fixture.assertStopped()
-        assertEquals(listOf(first, late), fixture.state.value.savedTodos)
-        assertFalse(fixture.state.value.modelReportedResult)
+        original.controller.destroy()
+        val replacement = fixture.newSession()
+        fixture.assertStopping(original, snapshot)
+        assertTrue(replacement.controller.busy)
+
+        replacement.controller.commandStarted(3)
+        replacement.controller.startRun(singleStep = true, startId = 3)
+        fixture.assertStopping(original, snapshot)
+        assertTrue(replacement.controller.busy)
+        assertEquals(0, replacement.executor.executeCount)
+        assertEquals(listOf(3), replacement.host.idleStartIds)
+
+        fixture.releaseAndFinish(original)
+        assertEquals(RootPilotStatus.RECOVERY_REQUIRED, fixture.state.uiState.value.status)
+        assertFalse(original.controller.busy)
+        assertFalse(replacement.controller.busy)
+        assertFalse(fixture.state.uiState.value.running)
+        assertNull(fixture.state.owner)
+        assertNotNull(fixture.store.read())
+        assertEquals(snapshot, fixture.snapshotFile.readText())
+        assertTrue(original.host.idleStartIds.isEmpty())
+
+        // Releasing ownership must not automatically replay the interrupted action.
+        replacement.controller.commandStarted(4)
+        replacement.controller.startRun(singleStep = true, startId = 4)
+        assertEquals(RootPilotStatus.RECOVERY_REQUIRED, fixture.state.uiState.value.status)
+        assertFalse(replacement.controller.busy)
+        assertEquals(0, replacement.executor.executeCount)
+        assertEquals(snapshot, fixture.snapshotFile.readText())
+        assertEquals(listOf(3, 4), replacement.host.idleStartIds)
     }
 
     private fun withFixture(block: suspend (Fixture) -> Unit) = runBlocking {
-        val fixture = Fixture()
-        try {
-            fixture.initialize()
-            block(fixture)
-        } finally {
-            fixture.close()
+        withContext(Dispatchers.Main.immediate) {
+            val fixture = Fixture()
+            try {
+                block(fixture)
+            } finally {
+                fixture.close()
+            }
         }
     }
 
     private class Fixture {
-        private val instrumentation = InstrumentationRegistry.getInstrumentation()
-        private val context = instrumentation.targetContext
-        private val directory = Files.createTempDirectory(context.cacheDir.toPath(), "service-stop-test-").toFile()
+        private val context = InstrumentationRegistry.getInstrumentation().targetContext
+        private val directory = Files.createTempDirectory(context.cacheDir.toPath(), "controller-stop-test-").toFile()
         val snapshotFile = directory.resolve("run.json")
-        private val store = RootPilotRunStore(snapshotFile)
-        private val service = RootPilotService()
-        private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        private val stateLock = requireNotNull(field("stateLock").get(null))
-        @Suppress("UNCHECKED_CAST")
-        val state = field("_uiState").get(null) as MutableStateFlow<RootPilotUiState>
-        private var previousState: RootPilotUiState? = null
-        private var overlay: RootPilotOverlay? = null
-        val executor = ForbiddenExecutor()
-        val cleanupEntered = CompletableDeferred<Unit>()
-        private val release = CompletableDeferred<Unit>()
-        private val completion = CompletableDeferred<Unit>()
-        private lateinit var job: Job
+        val store = RootPilotRunStore(snapshotFile)
+        val state = RootPilotTaskState().apply {
+            mutableState.value = RootPilotUiState(
+                config = RootPilotConfig(
+                    baseUrl = "https://example.invalid",
+                    model = "fixture",
+                    task = "fixture",
+                    manualConfirmation = false,
+                    allowScreenUpload = true,
+                ),
+            )
+        }
+        private val sessions = mutableListOf<Session>()
 
-        fun initialize() {
-            onMain {
-                synchronized(stateLock) {
-                    check(state.value.status in setOf(RootPilotStatus.IDLE, RootPilotStatus.STOPPED,
-                        RootPilotStatus.COMPLETED, RootPilotStatus.FAILED)) {
-                        "Run service stop tests without an active application task"
-                    }
-                    previousState = state.value
-                    state.value = RootPilotUiState(
-                        config = RootPilotConfig(task = "fixture", allowScreenUpload = true),
-                        status = RootPilotStatus.EXECUTING,
-                    )
-                }
-                val isolatedContext = object : ContextWrapper(context) {
-                    override fun checkPermission(permission: String, pid: Int, uid: Int): Int =
-                        PackageManager.PERMISSION_DENIED
-                }
-                ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
-                    .apply { isAccessible = true }.invoke(service, isolatedContext)
-                set("rootExecutor", executor)
-                set("runStore", store)
-                set("logRepository", InMemoryAgentLogRepository())
-                overlay = RootPilotOverlay(isolatedContext, {}, {})
-                set("overlay", requireNotNull(overlay))
-                store.write(RootPilotRunSnapshot(
-                    baseUrl = "https://example.invalid", model = "fixture", task = "fixture",
-                    manualConfirmation = true, allowScreenUpload = true,
-                    status = RootPilotStatus.EXECUTING.name, step = 0,
-                ))
-            }
+        fun newSession(): Session {
+            val job = SupervisorJob()
+            val executor = CleanupExecutor()
+            val host = FakeHost()
+            val controller = RootPilotRunController(
+                taskState = state,
+                scope = CoroutineScope(job + Dispatchers.Main.immediate),
+                rootExecutor = executor,
+                loop = AgentLoop(FakeScreenshotProvider(), FakeModelClient(), executor),
+                runStore = store,
+                logRepository = InMemoryAgentLogRepository(),
+                host = host,
+            )
+            return Session(controller, executor, host, job).also(sessions::add)
         }
 
-        suspend fun startBlockedJob() {
-            val started = CompletableDeferred<Unit>()
-            job = scope.launch(start = CoroutineStart.LAZY) {
-                try {
-                    started.complete(Unit)
-                    awaitCancellation()
-                } finally {
-                    withContext(NonCancellable) {
-                        cleanupEntered.complete(Unit)
-                        release.await()
-                    }
-                }
-            }
-            onMain { set("activeJob", job) }
-            job.invokeOnCompletion {
-                try {
-                    call("finishJob", job)
-                    completion.complete(Unit)
-                } catch (failure: Throwable) {
-                    completion.completeExceptionally(failure)
-                }
-            }
-            job.start()
-            withTimeout(TIMEOUT_MS) { started.await() }
+        suspend fun start(session: Session, startId: Int) {
+            session.controller.commandStarted(startId)
+            session.controller.startRun(singleStep = true, startId = startId)
+            withTimeout(TIMEOUT_MS) { session.executor.entered.await() }
+            assertEquals(RootPilotStatus.EXECUTING, state.uiState.value.status)
+            assertEquals(RootPilotStatus.EXECUTING.name, store.read()?.status)
+            assertSame(session.controller, state.owner)
         }
 
-        fun stop() = onMain { call("stopAgent", 1) }
+        fun stop(session: Session, startId: Int) {
+            session.controller.commandStarted(startId)
+            session.controller.stopAgent(startId)
+        }
 
-        fun assertStopping(snapshot: String) = onMain {
-            assertEquals(RootPilotStatus.STOPPING, state.value.status)
-            assertSame(job, field("activeJob").get(service))
-            assertTrue(job.isCancelled)
-            assertFalse(job.isCompleted)
-            assertNull(state.value.pendingAction)
-            assertNull(field("pendingApproval").get(service))
+        fun assertStopping(session: Session, snapshot: String) {
+            assertEquals(RootPilotStatus.STOPPING, state.uiState.value.status)
+            assertTrue(session.controller.busy)
+            assertTrue(state.uiState.value.running)
+            assertSame(session.controller, state.owner)
+            assertNull(state.uiState.value.pendingAction)
             assertEquals(snapshot, snapshotFile.readText())
         }
 
-        suspend fun releaseAndFinish() {
-            release.complete(Unit)
-            withTimeout(TIMEOUT_MS) {
-                job.join()
-                completion.await()
-            }
-        }
-
-        fun assertStopped() = onMain {
-            assertTrue(job.isCompleted)
-            assertNull(field("activeJob").get(service))
-            assertNull(state.value.pendingAction)
-            assertEquals(RootPilotStatus.STOPPED, state.value.status)
-            assertFalse(snapshotFile.exists())
-        }
-
-        suspend fun event(event: AgentLoopEvent) = withContext(Dispatchers.Main.immediate) {
-            suspendCoroutineUninterceptedOrReturn<Unit> { continuation ->
-                val method = RootPilotService::class.java.getDeclaredMethod(
-                    "handleEvent", AgentLoopEvent::class.java, Continuation::class.java,
-                ).apply { isAccessible = true }
-                try {
-                    method.invoke(service, event, continuation)
-                } catch (failure: InvocationTargetException) {
-                    throw requireNotNull(failure.cause)
-                }
-            }
+        suspend fun releaseAndFinish(session: Session) {
+            val runs = session.job.children.toList()
+            session.executor.release.complete(Unit)
+            withTimeout(TIMEOUT_MS) { runs.forEach { it.join() } }
         }
 
         suspend fun close() = withContext(NonCancellable) {
             try {
-                if (::job.isInitialized) {
-                    job.cancel()
-                    releaseAndFinish()
-                }
+                sessions.forEach { it.executor.release.complete(Unit) }
+                sessions.forEach { it.controller.destroy() }
+                withTimeout(TIMEOUT_MS) { sessions.forEach { it.job.join() } }
             } finally {
-                scope.cancel()
-                (field("serviceScope").get(service) as CoroutineScope).cancel()
-                try {
-                    onMain {
-                        try {
-                            overlay?.hide()
-                        } finally {
-                            synchronized(stateLock) { previousState?.let { state.value = it } }
-                        }
-                    }
-                } finally {
-                    check(directory.deleteRecursively()) { "Cannot remove service stop fixture" }
-                }
+                check(directory.deleteRecursively()) { "Cannot remove controller stop fixture" }
             }
         }
-
-        fun onMain(block: () -> Unit) {
-            // Propagate assertions on the test thread so failures still enter fixture cleanup.
-            var result: Result<Unit>? = null
-            instrumentation.runOnMainSync { result = runCatching(block) }
-            requireNotNull(result).getOrThrow()
-        }
-
-        fun set(name: String, value: Any) = field(name).set(service, value)
-
-        fun call(name: String, vararg arguments: Any): Any? {
-            val method = RootPilotService::class.java.declaredMethods.single { it.name == name }
-                .apply { isAccessible = true }
-            return try {
-                method.invoke(service, *arguments)
-            } catch (failure: InvocationTargetException) {
-                throw requireNotNull(failure.cause)
-            }
-        }
-
-        private fun field(name: String) = RootPilotService::class.java.getDeclaredField(name)
-            .apply { isAccessible = true }
     }
 
-    private class ForbiddenExecutor : RootExecutor {
-        val cancelCount = AtomicInteger()
+    private data class Session(
+        val controller: RootPilotRunController,
+        val executor: CleanupExecutor,
+        val host: FakeHost,
+        val job: Job,
+    )
+
+    private class FakeHost : RootPilotRunHost {
+        val idleStartIds = mutableListOf<Int>()
+        override fun stateChanged() = Unit
+        override suspend fun renderOverlay(state: RootPilotUiState) = Unit
+        override fun hideOverlay() = Unit
+        override fun idle(startId: Int) { idleStartIds += startId }
+    }
+
+    private class FakeScreenshotProvider : ScreenshotProvider {
+        override suspend fun capture() = ScreenshotCaptureResult.Success(
+            ScreenshotFrame(byteArrayOf(1), 100, 100, "data:image/jpeg;base64,AQ=="),
+        )
+    }
+
+    private class FakeModelClient : DeepSeekClient {
+        override suspend fun requestAction(request: DeepSeekVisionRequest) = DeepSeekActionResult.Success(
+            """{"action":"tap","x":500,"y":500,"reason":"fixture"}""",
+        )
+    }
+
+    private class CleanupExecutor : RootExecutor {
+        val entered = CompletableDeferred<Unit>()
+        val cleanupEntered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var executeCount = 0
+        var cancelCount = 0
+
         override suspend fun checkRoot(): RootExecutionResult = error("Unexpected root check")
-        override suspend fun captureScreen(): RootScreenshotResult = error("Unexpected screenshot")
-        override suspend fun execute(action: ExecutableRootAction): RootExecutionResult =
-            error("Unexpected device action")
-        override fun cancel() { cancelCount.incrementAndGet() }
+        override suspend fun captureScreen(): RootScreenshotResult = error("Unexpected root screenshot")
+        override suspend fun execute(action: ExecutableRootAction): RootExecutionResult {
+            executeCount++
+            try {
+                entered.complete(Unit)
+                awaitCancellation()
+            } finally {
+                withContext(NonCancellable) {
+                    cleanupEntered.complete(Unit)
+                    release.await()
+                }
+            }
+        }
+
+        override fun cancel() { cancelCount++ }
     }
 
     private companion object {

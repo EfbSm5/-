@@ -63,7 +63,8 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 | 路径（`app/src/main/java/com/example/agent/` 下） | 职责 |
 | --- | --- |
 | `rootpilot/RootPilotActivity.kt`、`rootpilot/ui/` | 配置、任务界面和悬浮面板 |
-| `rootpilot/RootPilotService.kt`、`rootpilot/loop/` | 任务生命周期、规划与确认循环 |
+| `rootpilot/RootPilotService.kt` | Android 服务入口、通知与悬浮窗宿主 |
+| `rootpilot/RootPilotRunController.kt`、`rootpilot/loop/` | 任务占用、停止/销毁收尾、恢复与规划确认循环 |
 | `rootpilot/deepseek/`、`rootpilot/screen/` | 模型请求和截图 |
 | `rootpilot/chat/` | 独立文字会话、上下文与取消控制 |
 | `rootpilot/action/`、`rootpilot/root/` | 动作解析、策略校验和 Root 执行 |
