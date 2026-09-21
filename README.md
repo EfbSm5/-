@@ -76,6 +76,6 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 最新能力状态、验证范围和后续候选项见 [SPEC.md](SPEC.md)；开发协作规则见 [AGENTS.md](AGENTS.md)。
 
-设置页正在试用 Miuix 0.9.4 的卡片、按钮、开关和应用选择弹窗样式，主页与聊天页保留现有布局。Miuix 是实验性 Compose 组件库，不调用小米系统私有组件；它的传递依赖引入 Material3 1.5.0-alpha22，因此仍需整体验证其他 Compose 页面的兼容性。
+RootPilot 的任务、聊天和设置页使用 Miuix 0.9.4 的主题、卡片、按钮与开关；任务/聊天输入框也使用 Miuix，密码输入框保留原安全输入组件。悬浮窗、输入法面板和旧 Agent 实验入口未迁移。Miuix 是实验性 Compose 组件库，不调用小米系统私有组件；它的传递依赖引入 Material3 1.5.0-alpha22，已验证范围及剩余兼容风险见 Spec。
 
 目前系统设置搜索闭环仍为 **PARTIAL**：可以打开设置，但搜索栏点击后未进入搜索页，不能据此声称中文搜索完成。历史误点调查已暂缓。旧端侧 LiteRT-LM / Demo 后端未迁入 RootPilot，仍保留在实验入口。

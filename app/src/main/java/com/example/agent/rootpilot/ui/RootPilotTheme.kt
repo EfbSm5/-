@@ -9,16 +9,12 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.darkColorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
 
-/** The pilot theme is scoped to settings; task/chat keep the application's existing theme. */
+/** Shared by RootPilot pages; the legacy Agent and native service windows keep their own theme. */
 @Composable
-internal fun RootPilotSettingsTheme(enabled: Boolean = true, content: @Composable () -> Unit) {
-    if (!enabled) {
-        content()
-        return
-    }
+internal fun RootPilotTheme(content: @Composable () -> Unit) {
     MiuixTheme(colors = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
         val colors = MiuixTheme.colorScheme
-        // Keep the existing password-capable text fields, using matching settings colors.
+        // Retained Material password fields and the Markdown renderer share the page palette.
         MaterialTheme(colorScheme = MaterialTheme.colorScheme.copy(
             primary = colors.primary,
             onPrimary = colors.onPrimary,

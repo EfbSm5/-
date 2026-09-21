@@ -49,7 +49,7 @@ internal fun AppLaunchPicker(
         onDismissRequest = onDismiss,
         properties = DialogProperties(securePolicy = SecureFlagPolicy.Inherit),
     ) {
-        RootPilotSettingsTheme {
+        RootPilotTheme {
             Card(Modifier.fillMaxWidth()) {
                 Column(
                     Modifier.heightIn(max = 600.dp).verticalScroll(rememberScrollState()).padding(20.dp),

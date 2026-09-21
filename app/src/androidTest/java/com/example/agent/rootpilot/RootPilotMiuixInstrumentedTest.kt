@@ -33,6 +33,7 @@ import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
@@ -40,12 +41,18 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import com.example.agent.rootpilot.model.RootPilotApp
+import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotStatus
 import com.example.agent.rootpilot.model.RootPilotUiState
 import com.example.agent.rootpilot.ui.AppLaunchPicker
 import com.example.agent.rootpilot.ui.RootPilotScreen
-import com.example.agent.rootpilot.ui.RootPilotSettingsTheme
+import com.example.agent.rootpilot.ui.RootPilotTheme
+import com.example.agent.rootpilot.ui.ChatScreen
+import com.example.agent.rootpilot.chat.ChatMessage
+import com.example.agent.rootpilot.chat.ChatUiState
 import com.example.agent.ui.theme.AgentTheme
 import java.io.File
 import org.junit.After
@@ -162,6 +169,59 @@ class RootPilotMiuixInstrumentedTest {
     }
 
     @Test
+    fun keyboardKeepsNavigationInputSendAndStopVisibleAtLargeFont() {
+        val fixture = Fixture()
+        showFixture(fontScale = 1.5f) { fixture.Content() }
+        compose.onNodeWithTag("open_chat").performClick()
+        compose.onNodeWithTag("chat_draft").performClick()
+        compose.waitUntil(5_000) {
+            var visible = false
+            instrumentation.runOnMainSync {
+                visible = ViewCompat.getRootWindowInsets(activity.window.decorView)
+                    ?.isVisible(WindowInsetsCompat.Type.ime()) == true
+            }
+            visible
+        }
+        compose.onNodeWithTag("chat_draft").performTextReplacement("一\n二\n三\n四\n五🙂")
+        compose.onNodeWithTag("back_to_task").assertIsDisplayed()
+        compose.onNodeWithTag("open_settings").assertIsDisplayed()
+        compose.onNodeWithTag("chat_draft").assertIsDisplayed()
+        compose.onNodeWithTag("chat_send").assertIsDisplayed().assertIsEnabled()
+        saveScreenshot(compose.onNodeWithTag(FIXTURE_TAG), "miuix-chat-keyboard.png")
+        compose.runOnIdle { fixture.chat.value = fixture.chat.value.copy(generating = true) }
+        compose.onNodeWithTag("chat_send").assertIsNotEnabled()
+        compose.onNodeWithTag("open_settings").assertIsNotEnabled()
+        compose.onNodeWithTag("chat_stop").assertIsDisplayed().assertIsEnabled().performClick()
+        compose.runOnIdle {
+            assertEquals(1, fixture.chatStops)
+            assertEquals("一\n二\n三\n四\n五🙂", fixture.chat.value.draft)
+        }
+    }
+
+    @Test
+    fun taskInputUploadAndConfirmationKeepSingleCallbacksAndPrivateTextHidden() {
+        val fixture = Fixture()
+        showFixture { fixture.Content() }
+        compose.onNodeWithTag("task_input").performTextReplacement("中文测试\n只读示例")
+        compose.onNodeWithTag("screen_upload").performScrollTo().performClick()
+        compose.onNodeWithTag("start_task").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals("中文测试\n只读示例", fixture.state.value.config.task)
+            assertEquals(1, fixture.uploadChanges)
+            assertEquals(1, fixture.starts)
+            fixture.state.value = fixture.state.value.copy(
+                status = RootPilotStatus.WAITING_CONFIRMATION,
+                pendingAction = RootPilotAction.Type("PRIVATE_TEXT_SENTINEL", "PRIVATE_REASON_SENTINEL"),
+            )
+        }
+        compose.onNodeWithText("PRIVATE_TEXT_SENTINEL", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("PRIVATE_REASON_SENTINEL", substring = true).assertDoesNotExist()
+        compose.onNodeWithTag("start_task").assertIsNotEnabled()
+        compose.onNodeWithTag("confirm_action").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(1, fixture.confirmations) }
+    }
+
+    @Test
     fun lightSettingsAt320DpAndLargeFontCaptureFixtureOnly() {
         captureSettings(dark = false, name = "light")
     }
@@ -176,7 +236,7 @@ class RootPilotMiuixInstrumentedTest {
         var themeColors: ThemeColors? = null
         showFixture(dark = dark, fontScale = 1.5f) {
             // A sibling probe must not supply a missing content color to the actual screen.
-            RootPilotSettingsTheme {
+            RootPilotTheme {
                 val colors = ThemeColors(
                     content = LocalContentColor.current,
                     onSurface = MiuixTheme.colorScheme.onSurface,
@@ -188,11 +248,20 @@ class RootPilotMiuixInstrumentedTest {
             }
             fixture.Content()
         }
+        compose.onNodeWithTag("task_input").assertIsDisplayed()
+        saveScreenshot(compose.onNodeWithTag(FIXTURE_TAG), "miuix-home-$name.png")
         compose.onNodeWithTag("open_settings").performClick()
         compose.onNodeWithTag("api_status").assertIsDisplayed()
         saveScreenshot(compose.onNodeWithTag(FIXTURE_TAG), "miuix-settings-$name.png")
         compose.onNodeWithTag("manual_confirmation").performScrollTo().assertIsDisplayed()
         saveScreenshot(compose.onNodeWithTag(FIXTURE_TAG), "miuix-settings-$name-manual.png")
+        compose.onNodeWithTag("back_to_task").performClick()
+        compose.onNodeWithTag("open_chat").performClick()
+        compose.onNodeWithTag("chat_draft").assertIsDisplayed()
+        compose.onNodeWithTag("chat_send").assertIsEnabled()
+        saveScreenshot(compose.onNodeWithTag(FIXTURE_TAG), "miuix-chat-$name.png")
+        compose.onNodeWithTag("back_to_task").performClick()
+        compose.onNodeWithTag("task_input").assertIsDisplayed()
         compose.runOnIdle {
             val colors = checkNotNull(themeColors)
             assertEquals("$name root content must use Miuix onSurface", colors.onSurface, colors.content)
@@ -259,24 +328,45 @@ class RootPilotMiuixInstrumentedTest {
         ))
         var manualChanges = 0
         var edits = 0
+        var uploadChanges = 0
+        var starts = 0
+        var confirmations = 0
+        var chatStops = 0
+        val chat = mutableStateOf(ChatUiState(draft = "测试草稿", messages = listOf(
+            ChatMessage(1, "assistant", "## 测试回答\n\n- 仅用于界面验收\n- 不请求网络", complete = true),
+        )))
 
         @Composable
         fun Content() {
             RootPilotScreen(
                 state = state.value, apiState = api.value, modifier = Modifier.fillMaxSize(),
+                chatGenerating = chat.value.generating,
+                chatContent = {
+                    ChatScreen(
+                        state = chat.value,
+                        configured = true, onDraftChange = { chat.value = chat.value.copy(draft = it) },
+                        onEffortChange = {}, onSend = {},
+                        onStop = { chatStops++; chat.value = chat.value.copy(generating = false) },
+                        onNewConversation = {},
+                    )
+                },
                 onApiKeyChanged = {}, onBaseUrlChanged = {}, onModelChanged = {},
                 onSaveApiConfig = {},
                 onEditApiConfig = { edits++; api.value = api.value.copy(editing = true) },
                 onCancelApiConfigEdit = { api.value = api.value.copy(editing = false) },
-                onClearApiConfig = {}, onTestConnection = {}, onTaskChanged = {},
-                onTestRoot = {}, onCaptureScreen = {}, onSingleStep = {}, onAutoExecute = {},
-                onStop = {}, onConfirmAction = {}, onRecoverInterruptedRun = {},
+                onClearApiConfig = {}, onTestConnection = {},
+                onTaskChanged = { state.value = state.value.copy(config = state.value.config.copy(task = it)) },
+                onTestRoot = {}, onCaptureScreen = {}, onSingleStep = {}, onAutoExecute = { starts++ },
+                onStop = {}, onConfirmAction = { confirmations++ }, onRecoverInterruptedRun = {},
                 onDiscardInterruptedRun = {},
                 onManualConfirmationChanged = {
                     manualChanges++
                     state.value = state.value.copy(config = state.value.config.copy(manualConfirmation = it))
                 },
-                onScreenUploadChanged = {}, overlayAllowed = false, inputMethodEnabled = false,
+                onScreenUploadChanged = {
+                    uploadChanges++
+                    state.value = state.value.copy(config = state.value.config.copy(allowScreenUpload = it))
+                }, overlayAllowed = false, inputMethodEnabled = false,
                 inputMessage = null, onInputMethodSettings = {}, onOverlayPermission = {},
             )
         }

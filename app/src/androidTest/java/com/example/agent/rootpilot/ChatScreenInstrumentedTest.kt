@@ -6,9 +6,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeDown
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -17,7 +20,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.example.agent.rootpilot.chat.ChatMessage
 import com.example.agent.rootpilot.chat.ChatUiState
 import com.example.agent.rootpilot.ui.ChatScreen
-import com.example.agent.ui.theme.AgentTheme
+import com.example.agent.rootpilot.ui.RootPilotTheme
+import com.example.agent.rootpilot.deepseek.ThinkingEffort
 import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.After
@@ -54,7 +58,7 @@ class ChatScreenInstrumentedTest {
         val state = mutableStateOf(ChatUiState(draft = "后续问题", generating = true,
             messages = listOf(ChatMessage(1, "assistant", "# 测试标题\n正文", "测试思考"))))
         setContent {
-            AgentTheme {
+            RootPilotTheme {
                 ChatScreen(state.value, true, {}, {}, {}, { stopped++ }, {})
             }
         }
@@ -78,7 +82,7 @@ class ChatScreenInstrumentedTest {
 
     @Test
     fun unconfiguredChatCannotSend() {
-        setContent { AgentTheme { ChatScreen(ChatUiState(draft = "测试"), false, {}, {}, {}, {}, {}) } }
+        setContent { RootPilotTheme { ChatScreen(ChatUiState(draft = "测试"), false, {}, {}, {}, {}, {}) } }
         compose.onNodeWithTag("chat_send").assertIsNotEnabled()
     }
 
@@ -87,7 +91,7 @@ class ChatScreenInstrumentedTest {
         val state = mutableStateOf(ChatUiState(messages = (1L..12L).map {
             ChatMessage(it, "assistant", "## 消息 $it\n" + "测试正文\n\n".repeat(10), complete = true)
         }, generating = true))
-        setContent { AgentTheme { ChatScreen(state.value, true, {}, {}, {}, {}, {}) } }
+        setContent { RootPilotTheme { ChatScreen(state.value, true, {}, {}, {}, {}, {}) } }
         compose.waitForIdle()
         compose.onNodeWithTag("chat_messages").performTouchInput { swipeDown() }
         compose.waitForIdle()
@@ -106,7 +110,7 @@ class ChatScreenInstrumentedTest {
 
     @Test
     fun previousIncompleteAssistantMessageIsNotMarkedAsGeneratingAgain() {
-        setContent { AgentTheme { ChatScreen(
+        setContent { RootPilotTheme { ChatScreen(
             ChatUiState(messages = listOf(ChatMessage(1, "assistant", "前次内容"),
                 ChatMessage(2, "user", "新问题", complete = true), ChatMessage(3, "assistant")), generating = true),
             true, {}, {}, {}, {}, {},
@@ -114,5 +118,31 @@ class ChatScreenInstrumentedTest {
         compose.onNodeWithTag("chat_generating_1").assertDoesNotExist()
         compose.onNodeWithTag("chat_incomplete_1").assertExists()
         compose.onNodeWithTag("chat_generating_3").assertExists()
+    }
+
+    @Test
+    fun effortAndUnicodeDraftDelegateOnceWithoutSendingNetworkRequests() {
+        val state = mutableStateOf(ChatUiState())
+        var effortChanges = 0
+        var sends = 0
+        setContent {
+            RootPilotTheme {
+                ChatScreen(state.value, true,
+                    onDraftChange = { state.value = state.value.copy(draft = it) },
+                    onEffortChange = { effortChanges++; state.value = state.value.copy(effort = it) },
+                    onSend = { sends++ }, onStop = {}, onNewConversation = {},
+                )
+            }
+        }
+        compose.onNodeWithTag("chat_effort_MAX").performClick().assertIsSelected()
+        compose.onNodeWithTag("chat_effort_LOW").assertIsNotSelected()
+        compose.onNodeWithTag("chat_draft").performTextReplacement("你好🙂\n第二行")
+        compose.onNodeWithTag("chat_send").assertIsEnabled().performClick()
+        compose.runOnIdle {
+            assertEquals(ThinkingEffort.MAX, state.value.effort)
+            assertEquals(1, effortChanges)
+            assertEquals("你好🙂\n第二行", state.value.draft)
+            assertEquals(1, sends)
+        }
     }
 }

@@ -1,6 +1,6 @@
 # RootPilot 产品与实施 Spec
 
-更新日期：2026-09-21。已推送代码基线：`b06610a`（含任务运行边界收口）；后续未提交变更及验证范围见“设置页 Miuix 试点”。历史小节保留当时的验证状态，不代表当前仍未交付。
+更新日期：2026-09-21。设置页 Miuix 试点基线为 `f4da1fa`；后续页面迁移及键盘适配已完成验收，随本次提交交付，验证范围见“RootPilot 页面 Miuix 迁移”。具体提交号以 Git 历史为准。历史小节保留当时的验证状态，不代表当前仍未交付。
 
 本文件是项目状态与后续工作的入口。状态以代码、测试和真机证据为准；“计划”不代表已实现或已授权执行。
 
@@ -247,7 +247,7 @@ adb -s <已确认的小米serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail
 - 最终全量250项 JVM 测试通过（0失败/错误/跳过），App与测试APK构建通过，lint 0 errors / 32 warnings，`git diff --check` 通过。独立审查首轮指出错误锁存时机与清除测试分支问题，修复后第二轮 PASS。证据：`/tmp/rootpilot-architecture-reviewed-check.log`；本轮未安装或运行真机 instrumentation，系统 Service 销毁、通知/悬浮窗与真实输入法恢复需另行验收。
 - 首次全量检查有1项未修改的 SSE 测试返回网络失败，单次定向复跑及随后两轮全量均通过；尚未确定首次失败原因，没有修改网络代码或增加重试。首次记录保留于 `/tmp/rootpilot-architecture-check.log` 和 `/tmp/rootpilot-architecture-stream-first-failure.xml`。本轮架构变更尚未提交或推送。
 
-## 当前工作：设置页 Miuix 试点
+## 已交付：设置页 Miuix 试点
 
 - 用户授权试用 Miuix 并进行必要依赖升级；只改设置页的分组卡片、按钮、开关、局部主题和应用选择弹窗外观。主页、聊天页不迁移组件；不改 API 保存、模型请求、Root 执行、权限与动作确认逻辑，不扩大架构重构。
 - 固定使用 `top.yukonga.miuix.kmp:miuix-ui:0.9.4`。其发布 AAR 要求 compileSdk 37；升级 Kotlin 2.4.20、Compose BOM 2026.09.00、AGP 9.1.1、Gradle 9.3.1，并按官方方式迁移 AGP 内置 Kotlin。minSdk35、targetSdk36保持，不添加忽略依赖元数据检查的开关。
@@ -259,6 +259,17 @@ adb -s <已确认的小米serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail
 - 旧测试宿主首次未正常进入前台，后续直接启动真实 Activity 并由 ADB 显式带到前台完成测试；早先中断和连接断开的运行不计通过。截图/XML/日志位于执行机器 `/tmp/rootpilot-miuix-device.smqaNa/`，远端临时 XML 为 `/sdcard/miuix-20260921-smqaNa-home.xml`、`/sdcard/miuix-20260921-smqaNa-settings.xml`。未触碰另一台已连接设备。
 - 独立审查 PASS（限静态审查与本地检查），已覆盖主题修正和新增测试。最终本地检查仍为250 JVM通过、App/测试APK构建成功、lint0错误/28警告；日志为上述目录的 `settings-final-build.log`、`final-settings-tests.log`。fixture 不证明生产防截图生命周期；实际 FLAG_SECURE、防截图弹窗、横屏/多窗口与旧 Agent 兼容仍未覆盖。
 - 依赖依据：[Miuix](https://github.com/compose-miuix-ui/miuix)、[AGP9.1兼容表](https://developer.android.com/build/releases/agp-9-1-0-release-notes)、[内置Kotlin迁移](https://developer.android.com/build/migrate-to-built-in-kotlin)、[Kotlin兼容表](https://kotlinlang.org/docs/gradle-configure-project.html)。
+
+## 已交付：RootPilot 页面 Miuix 迁移
+
+- 用户授权在设置页验收推送后迁移其他页面；范围为任务主页、聊天页、任务结果/确认/恢复卡片和顶栏。`RootPilotTheme` 统一上述页面的明暗主题，旧 Agent 实验入口不变。独立原生悬浮窗及输入法面板保留，避免将页面视觉迁移扩大为窗口生命周期重写。
+- 任务和聊天使用 Miuix 输入框、按钮与卡片，上传授权开关保留原回调；当前导航/思考强度有选中语义和主色，导航与标题分行以适应窄屏。密码输入框保留 Material 安全输入组件，Markdown 继续使用现有禁止外部链接/图片加载的渲染器，并共享配色。
+- 不改模型请求、配置存储、任务状态、动作确认或聊天滚动跟随逻辑。新增内存 fixture 覆盖中文/emoji/换行输入、上传与确认回调计数、隐私文本隐藏、思考档位选中，并扩展320dp/1.5倍字体的主页和聊天截图。
+- 页面迁移初版全量本地检查通过：250 JVM tests、App/测试APK构建、lint0错误/28警告；小米12项页面测试通过，覆盖上述fixture、聊天滚动/生成状态和真实导航。明暗截图复核完成；一次深色聊天截图局部缺绘在单独复跑中未复现，尚未归因，不添加延迟或生产兜底。
+- 实际空聊天弹键盘发现顶栏被平移出屏、发送与键盘之间留白；窗口取证为 `sim={adjust=pan forwardNavigation}`。旧 Manifest 同样未指定模式，尚未完成旧版对照，不能认定为 Miuix 回归。用户明确同意本轮一起修正，为 RootPilotActivity 显式指定 `adjustResize`，保留现有 `imePadding()`。新增真实键盘测试发现320dp/1.5倍字体时发送按钮被说明区挤出屏幕（13项中1项失败）；据此在键盘显示时收起聊天说明/新对话区域，输入视图最多显示3行，键盘收起后恢复5行，草稿不截断。保留强度按钮、错误提示和发送/停止门槛。
+- 最终键盘适配通过全量本地构建、250 JVM测试和lint（0错误/28警告）；小米13项页面回归全部通过，包含真实键盘、320dp/1.5倍字体、五行emoji草稿完整性、导航/发送/停止可见性及单次停止回调。真实空聊天页面额外取证确认 `adjust=resize`，顶栏保持可见，发送与键盘之间的大空白消失；未发送消息。独立审查PASS，已复核最终diff、新主题文件、构建/测试报告与生产截图/XML，结论限本轮及已测场景；真实模型、FLAG_SECURE、其他设备/键盘、横屏多窗口未重验。
+- 本轮最终证据位于 `/tmp/rootpilot-miuix-device.smqaNa/`：`pages-compact-ime-build.log`、`pages-final-tests.log`、`pages-keyboard-fixture-final.png`、`final-keyboard.png`。远端 XML 另有 `/sdcard/miuix-20260921-smqaNa-pages-{home,chat,keyboard}.xml`、`/sdcard/miuix-20260921-smqaNa-final-{home,chat,keyboard}.xml`（花括号为三个实际文件名的缩写）及 `/sdcard/miuix-20260921-smqaNa-handoff.xml`。截图显示已有其他应用通话悬浮层，未关闭或修改；不承诺其遮挡下所有控件均可点击。最终已将手机切回新版任务主页。
+- 本轮不调用真实模型、不修改凭据或执行手机任务；fixture/布局检查不是完整任务验收。页面迁移与键盘修复随本次提交交付，不包含历史坐标诊断文件或本地日志。
 
 ## 后续候选计划（未完成）
 

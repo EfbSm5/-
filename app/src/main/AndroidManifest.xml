@@ -36,6 +36,7 @@
             android:name=".rootpilot.RootPilotActivity"
             android:exported="true"
             android:label="RootPilot"
+            android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.Agent">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

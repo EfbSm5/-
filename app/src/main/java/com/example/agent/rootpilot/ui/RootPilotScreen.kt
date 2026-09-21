@@ -9,18 +9,18 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
+import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.Card
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import top.yukonga.miuix.kmp.basic.TextField
+import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.Switch
+import top.yukonga.miuix.kmp.basic.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -31,6 +31,7 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
 import com.example.agent.rootpilot.ApiConfigUiState
@@ -110,30 +111,31 @@ fun RootPilotScreen(
     val apiControlsEnabled = !busy && !apiState.busy
     val apiReady = apiState.configured && !apiState.editing && !apiState.busy
 
-    RootPilotSettingsTheme(enabled = showSettings) {
+    RootPilotTheme {
         Scaffold(
             modifier = modifier.semantics { testTagsAsResourceId = true },
-            containerColor = if (showSettings) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.background,
+            containerColor = MaterialTheme.colorScheme.surface,
             topBar = {
-                Column(Modifier.statusBarsPadding().padding(horizontal = 16.dp)) {
+                Column(Modifier.statusBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("RootPilot", style = MaterialTheme.typography.titleLarge)
                     Row(
                         Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Text("RootPilot", style = MaterialTheme.typography.titleLarge)
-                        Row {
-                            TextButton(onClick = { mode = ScreenMode.TASK }, enabled = !chatGenerating,
-                                modifier = Modifier.testTag(if (mode != ScreenMode.TASK) "back_to_task" else "task_tab")) {
-                                Text(if (mode == ScreenMode.TASK) "任务" else "返回任务")
-                            }
-                            if (chatContent != null) {
-                                TextButton(onClick = { mode = ScreenMode.CHAT }, enabled = !taskBusy,
-                                    modifier = Modifier.testTag("open_chat")) { Text("聊天") }
-                            }
-                            TextButton(onClick = { mode = ScreenMode.SETTINGS }, enabled = !chatGenerating,
-                                modifier = Modifier.testTag("open_settings")) { Text("设置") }
+                        NavigationButton(
+                            label = "任务",
+                            selected = mode == ScreenMode.TASK, enabled = !chatGenerating,
+                            onClick = { mode = ScreenMode.TASK },
+                            modifier = Modifier.weight(1f).testTag(if (mode != ScreenMode.TASK) "back_to_task" else "task_tab"),
+                        )
+                        if (chatContent != null) {
+                            NavigationButton("聊天", mode == ScreenMode.CHAT, !taskBusy,
+                                { mode = ScreenMode.CHAT }, Modifier.weight(1f).testTag("open_chat"))
                         }
+                        NavigationButton("设置", showSettings, !chatGenerating,
+                            { mode = ScreenMode.SETTINGS }, Modifier.weight(1f).testTag("open_settings"))
                     }
                     if (showSettings && taskBusy) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
@@ -143,7 +145,7 @@ fun RootPilotScreen(
                                 state.status == RootPilotStatus.WAITING_CONFIRMATION -> "请返回任务核对并确认动作"
                                 else -> "任务正在运行"
                             }, modifier = Modifier.weight(1f))
-                            TextButton(onClick = onStop, enabled = !stopping, modifier = Modifier.testTag("settings_stop")) { Text("停止") }
+                            Button(onClick = onStop, enabled = !stopping, modifier = Modifier.testTag("settings_stop")) { Text("停止") }
                         }
                     }
                 }
@@ -159,10 +161,10 @@ fun RootPilotScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     if (!showSettings) {
-                        OutlinedTextField(
+                        TextField(
                             value = state.config.task, onValueChange = onTaskChanged,
                             modifier = Modifier.fillMaxWidth().testTag("task_input"),
-                            label = { Text("自然语言任务") }, minLines = 3, maxLines = 5, enabled = !busy,
+                            label = "自然语言任务", minLines = 3, maxLines = 5, enabled = !busy,
                         )
                         ToggleRow(
                             label = "允许上传当前屏幕截图",
@@ -177,7 +179,7 @@ fun RootPilotScreen(
                                         !apiState.configured -> "请先在设置中完成 API 配置。"
                                         else -> "API 配置正在处理，请稍候。"
                                     })
-                                    TextButton(onClick = { mode = ScreenMode.SETTINGS }, enabled = !chatGenerating,
+                                    Button(onClick = { mode = ScreenMode.SETTINGS }, enabled = !chatGenerating,
                                         modifier = Modifier.testTag("api_setup_hint")) {
                                         Text("前往设置")
                                     }
@@ -188,6 +190,7 @@ fun RootPilotScreen(
                             style = MaterialTheme.typography.bodySmall)
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(onClick = onAutoExecute, enabled = !busy && !recoveryRequired && apiReady,
+                                colors = ButtonDefaults.buttonColorsPrimary(),
                                 modifier = Modifier.weight(1f).testTag("start_task")) { Text("开始") }
                             if (taskBusy) Button(onClick = onStop, enabled = !stopping, modifier = Modifier.testTag("stop_task")) { Text("停止") }
                         }
@@ -202,6 +205,7 @@ fun RootPilotScreen(
                                         if (it is RootPilotAction.Type) it.overlayDetails() else it.describe()
                                     } ?: "等待动作信息", modifier = Modifier.testTag("pending_action"))
                                     Button(onClick = onConfirmAction, enabled = state.pendingAction != null,
+                                        colors = ButtonDefaults.buttonColorsPrimary(),
                                         modifier = Modifier.fillMaxWidth().testTag("confirm_action")) {
                                         Text(if (state.pendingAction is RootPilotAction.AskUser) "我已按提示处理，继续" else "确认执行当前动作")
                                     }
@@ -222,7 +226,7 @@ fun RootPilotScreen(
                                     Button(onClick = onRecoverInterruptedRun, enabled = apiReady) {
                                         Text("从当前屏幕重新规划")
                                     }
-                                    TextButton(onClick = onDiscardInterruptedRun) {
+                                    Button(onClick = onDiscardInterruptedRun) {
                                         Text("放弃上次任务")
                                     }
                                 }
@@ -258,6 +262,25 @@ fun RootPilotScreen(
 private enum class ScreenMode { TASK, CHAT, SETTINGS }
 
 @Composable
+private fun NavigationButton(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier,
+) {
+    Button(
+        onClick = onClick, enabled = enabled,
+        modifier = modifier.semantics { this.selected = selected },
+        minWidth = 0.dp, minHeight = 48.dp,
+        insideMargin = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+        colors = if (selected) ButtonDefaults.buttonColorsPrimary() else ButtonDefaults.buttonColors(),
+    ) {
+        Text(label, style = MaterialTheme.typography.labelLarge)
+    }
+}
+
+@Composable
 private fun ToggleRow(
     label: String,
     checked: Boolean,
@@ -270,7 +293,8 @@ private fun ToggleRow(
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(label, modifier = Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled,
+            modifier = Modifier.testTag("screen_upload"))
     }
 }
 
