@@ -38,7 +38,7 @@
 
 ## 构建与测试
 
-使用 Android Studio 配置与项目 AGP 兼容的 Gradle JDK 和 Android SDK 36。首次构建需要下载依赖。
+使用支持 AGP 9.1.1 的 Android Studio、兼容的 Gradle JDK 和 Android SDK 37。项目使用 Gradle 9.3.1、Kotlin 2.4.20；首次构建需要下载依赖。compileSdk 为37，targetSdk 仍为36，最低系统仍为 Android 15 / API 35。
 
 ```sh
 ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug --no-daemon
@@ -75,5 +75,7 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 ## 当前限制与计划
 
 最新能力状态、验证范围和后续候选项见 [SPEC.md](SPEC.md)；开发协作规则见 [AGENTS.md](AGENTS.md)。
+
+设置页正在试用 Miuix 0.9.4 的卡片、按钮、开关和应用选择弹窗样式，主页与聊天页保留现有布局。Miuix 是实验性 Compose 组件库，不调用小米系统私有组件；它的传递依赖引入 Material3 1.5.0-alpha22，因此仍需整体验证其他 Compose 页面的兼容性。
 
 目前系统设置搜索闭环仍为 **PARTIAL**：可以打开设置，但搜索栏点击后未进入搜索页，不能据此声称中文搜索完成。历史误点调查已暂缓。旧端侧 LiteRT-LM / Demo 后端未迁入 RootPilot，仍保留在实验入口。

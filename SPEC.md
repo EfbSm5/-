@@ -1,6 +1,6 @@
 # RootPilot 产品与实施 Spec
 
-更新日期：2026-09-21。已推送代码基线：`8794ebf`（含聊天与流式预览）；后续未提交变更及验证范围见“任务运行边界收口”。历史小节保留当时的验证状态，不代表当前仍未交付。
+更新日期：2026-09-21。已推送代码基线：`b06610a`（含任务运行边界收口）；后续未提交变更及验证范围见“设置页 Miuix 试点”。历史小节保留当时的验证状态，不代表当前仍未交付。
 
 本文件是项目状态与后续工作的入口。状态以代码、测试和真机证据为准；“计划”不代表已实现或已授权执行。
 
@@ -246,6 +246,19 @@ adb -s <已确认的小米serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail
 - 新增13项 JVM 控制器用例及10项存储错误用例，并将原停止 instrumentation 从反射修改 Service 私有字段改为直接运行控制器。覆盖取消清理、销毁/重建、恢复阻断、写入前失败、完成清除失败、确认 token、迟到待办回执，以及快照失败被输入法清理异常覆盖时仍保持阻断。Android 控制器夹具不等于系统 Service 销毁端到端验收。
 - 最终全量250项 JVM 测试通过（0失败/错误/跳过），App与测试APK构建通过，lint 0 errors / 32 warnings，`git diff --check` 通过。独立审查首轮指出错误锁存时机与清除测试分支问题，修复后第二轮 PASS。证据：`/tmp/rootpilot-architecture-reviewed-check.log`；本轮未安装或运行真机 instrumentation，系统 Service 销毁、通知/悬浮窗与真实输入法恢复需另行验收。
 - 首次全量检查有1项未修改的 SSE 测试返回网络失败，单次定向复跑及随后两轮全量均通过；尚未确定首次失败原因，没有修改网络代码或增加重试。首次记录保留于 `/tmp/rootpilot-architecture-check.log` 和 `/tmp/rootpilot-architecture-stream-first-failure.xml`。本轮架构变更尚未提交或推送。
+
+## 当前工作：设置页 Miuix 试点
+
+- 用户授权试用 Miuix 并进行必要依赖升级；只改设置页的分组卡片、按钮、开关、局部主题和应用选择弹窗外观。主页、聊天页不迁移组件；不改 API 保存、模型请求、Root 执行、权限与动作确认逻辑，不扩大架构重构。
+- 固定使用 `top.yukonga.miuix.kmp:miuix-ui:0.9.4`。其发布 AAR 要求 compileSdk 37；升级 Kotlin 2.4.20、Compose BOM 2026.09.00、AGP 9.1.1、Gradle 9.3.1，并按官方方式迁移 AGP 内置 Kotlin。minSdk35、targetSdk36保持，不添加忽略依赖元数据检查的开关。
+- 实际依赖解析：AndroidX Compose1.12.1、CMP1.12.0、Kotlin stdlib2.4.20、serialization1.7.3。Miuix 的传递依赖引入 Material3 **1.5.0-alpha22**；因此未改 UI 代码的主页、聊天和旧 Agent 也受底层依赖变化影响。这是实验性试点，不宣称全部页面已完成兼容验收。
+- 设置主题只在设置页及应用选择弹窗生效，跟随系统明暗模式。Token 保留原密码输入框/遮罩和 Activity 防截图逻辑；弹窗使用原生 Compose Dialog（显式 SecureFlagPolicy.Inherit）承载 Miuix Card，不将凭据移入库的弹窗或本地持久化状态。所有配置、权限、应用选择、调试入口复用原回调与启用条件。
+- 本地验证：依赖解析、AAR 元数据检查通过；250 项 JVM 测试全部通过（0 failures/errors/skipped），App 与测试 APK 构建通过，lint 0 errors / 28 warnings，`git diff --check` 通过。日志 `/tmp/rootpilot-miuix-build.JlEN20/`、`/tmp/rootpilot-miuix.gT32bR/full-check.log`。新增设置开关回调/密码语义、运行收尾期间禁用设置变更的 instrumentation 测试已编译，尚未运行，不能计为通过。
+- 真机验收发现并修复两处主题接入问题：Miuix 卡片外缺少默认内容色导致深色标题黑字；Material Scaffold 默认背景与 Miuix 卡片同色。显式提供内容色及设置页容器颜色，主页颜色不变。
+- 小米15（24129PN74C，设备号12cd0365）最终版本6项测试通过：真实任务/聊天/设置导航，以及5项 fixture 测试，覆盖开关单次回调、空 Token 密码语义、执行中与收尾期间禁用配置编辑、假应用搜索/选择/清空，以及320dp宽、1.5倍字体下明暗主题颜色与滚动可达性。测试使用内存假配置，无模型请求、Root动作或凭据修改。最终截图已目视确认明暗标题可读、卡片与背景区分，应用选择弹窗无明显裁切。大字体下顶栏“设置”会换行，后续整体导航迁移时改善布局。
+- 旧测试宿主首次未正常进入前台，后续直接启动真实 Activity 并由 ADB 显式带到前台完成测试；早先中断和连接断开的运行不计通过。截图/XML/日志位于执行机器 `/tmp/rootpilot-miuix-device.smqaNa/`，远端临时 XML 为 `/sdcard/miuix-20260921-smqaNa-home.xml`、`/sdcard/miuix-20260921-smqaNa-settings.xml`。未触碰另一台已连接设备。
+- 独立审查 PASS（限静态审查与本地检查），已覆盖主题修正和新增测试。最终本地检查仍为250 JVM通过、App/测试APK构建成功、lint0错误/28警告；日志为上述目录的 `settings-final-build.log`、`final-settings-tests.log`。fixture 不证明生产防截图生命周期；实际 FLAG_SECURE、防截图弹窗、横屏/多窗口与旧 Agent 兼容仍未覆盖。
+- 依赖依据：[Miuix](https://github.com/compose-miuix-ui/miuix)、[AGP9.1兼容表](https://developer.android.com/build/releases/agp-9-1-0-release-notes)、[内置Kotlin迁移](https://developer.android.com/build/migrate-to-built-in-kotlin)、[Kotlin兼容表](https://kotlinlang.org/docs/gradle-configure-project.html)。
 
 ## 后续候选计划（未完成）
 

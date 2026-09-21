@@ -5,6 +5,9 @@ import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -128,6 +131,38 @@ class RootPilotScreenNavigationInstrumentedTest {
         compose.onNodeWithTag("stop_task").assertIsNotEnabled()
     }
 
+    @Test
+    fun settingsSwitchDelegatesOnceAndCredentialEditorRetainsPasswordSemantics() {
+        val fixture = Fixture()
+        compose.setContent { fixture.Content() }
+        compose.onNodeWithTag("manual_confirmation").assertDoesNotExist()
+        compose.onNodeWithTag("open_settings").performClick()
+        compose.onNodeWithTag("manual_confirmation").performScrollTo().performClick()
+        compose.runOnIdle {
+            assertEquals(1, fixture.manualChanges)
+            assertEquals(false, fixture.state.value.config.manualConfirmation)
+        }
+        compose.onNodeWithTag("api_edit").performScrollTo().performClick()
+        compose.onNodeWithTag("api_token").performScrollTo()
+            .assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.Password))
+        compose.onNodeWithTag("back_to_task").performClick()
+        compose.onNodeWithTag("manual_confirmation").assertDoesNotExist()
+        compose.onNodeWithText("执行方式：自动点击/滑动").assertExists()
+    }
+
+    @Test
+    fun completedButStillCleaningUpKeepsSettingsMutationsDisabled() {
+        val fixture = Fixture()
+        fixture.state.value = fixture.state.value.copy(status = RootPilotStatus.COMPLETED, running = true)
+        compose.setContent { fixture.Content() }
+        compose.onNodeWithTag("start_task").assertIsNotEnabled()
+        compose.onNodeWithTag("open_settings").performClick()
+        compose.onNodeWithTag("api_edit").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithTag("manual_confirmation").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithTag("launch_apps").performScrollTo().assertIsEnabled()
+        compose.runOnIdle { assertEquals(0, fixture.manualChanges) }
+    }
+
     private class Fixture {
         val state = mutableStateOf(RootPilotUiState())
         val api = mutableStateOf(ApiConfigUiState(configured = true, editing = false, busy = false))
@@ -135,6 +170,7 @@ class RootPilotScreenNavigationInstrumentedTest {
         var stopped = 0
         var cleared = 0
         var cancelled = 0
+        var manualChanges = 0
 
         @Composable
         fun Content() {
@@ -148,7 +184,10 @@ class RootPilotScreenNavigationInstrumentedTest {
                     onClearApiConfig = {}, onTestConnection = {}, onTaskChanged = {},
                     onTestRoot = {}, onCaptureScreen = {}, onSingleStep = {}, onAutoExecute = {},
                     onStop = { stopped++ }, onConfirmAction = {}, onRecoverInterruptedRun = {},
-                    onDiscardInterruptedRun = {}, onManualConfirmationChanged = {}, onScreenUploadChanged = {},
+                    onDiscardInterruptedRun = {}, onManualConfirmationChanged = {
+                        manualChanges++
+                        state.value = state.value.copy(config = state.value.config.copy(manualConfirmation = it))
+                    }, onScreenUploadChanged = {},
                     overlayAllowed = false, inputMethodEnabled = false, inputMessage = null,
                     onInputMethodSettings = {}, onOverlayPermission = {},
                     onClearLaunchApps = { cleared++ },
