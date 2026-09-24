@@ -183,7 +183,7 @@ class RootPilotMiuixInstrumentedTest {
             visible
         }
         compose.onNodeWithTag("chat_draft").performTextReplacement("一\n二\n三\n四\n五🙂")
-        compose.onNodeWithTag("back_to_task").assertIsDisplayed()
+        compose.onNodeWithTag("bottom_navigation").assertDoesNotExist()
         compose.onNodeWithTag("open_settings").assertIsDisplayed()
         compose.onNodeWithTag("chat_draft").assertIsDisplayed()
         compose.onNodeWithTag("chat_send").assertIsDisplayed().assertIsEnabled()
