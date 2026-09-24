@@ -30,6 +30,55 @@ import org.junit.Test
 
 class DeepSeekNetworkTest {
     @Test(timeout = 10_000)
+    fun toolCancelDuringHeadersAndBody_preservesCancellationAndClosesSocket() {
+        assertCancellation(false, toolChat = true)
+        assertCancellation(true, toolChat = true)
+    }
+
+    @Test(timeout = 10_000)
+    fun toolStatuses_doNotRetryRedirectOrExposeErrorBodies() {
+        for (status in listOf(307, 401, 408, 503)) {
+            ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { target ->
+                LocalServer { socket ->
+                    socket.getOutputStream().write(("HTTP/1.1 $status Failure\r\n" +
+                        "Location: http://127.0.0.1:${target.localPort}/other\r\n" +
+                        "Retry-After: 0\r\nContent-Length: 10000\r\n\r\nprivate synthetic-token").toByteArray())
+                }.use { server ->
+                    val result = requestTool(server) as ToolChatResult.Failure
+                    assertTrue(result.message.contains(status.toString()))
+                    assertFalse(result.message.contains("synthetic-token"))
+                    assertFalse(result.message.contains("private"))
+                    assertTrue(server.closed.await(1, TimeUnit.SECONDS))
+                    server.assertNoAdditionalConnections()
+                    target.soTimeout = 100
+                    assertThrows(SocketTimeoutException::class.java) { target.accept().use { error("redirect followed") } }
+                    server.checkFailure()
+                }
+            }
+        }
+    }
+
+    @Test(timeout = 10_000)
+    fun toolBlockedHeadersAndBody_timeOutAndReleaseSocket() {
+        for (headers in listOf(false, true)) {
+            LocalServer { if (headers) writeHeaders(it) }.use { server ->
+                assertEquals(ToolChatResult.Failure("DeepSeek 请求超时"), requestTool(server, 500))
+                assertTrue(server.closed.await(1, TimeUnit.SECONDS))
+                server.checkFailure()
+            }
+        }
+    }
+
+    private fun requestTool(server: LocalServer, timeout: Long = 1000): ToolChatResult = runBlocking {
+        HttpDeepSeekClient(requestTimeoutMillis = timeout).streamToolChat(
+            server.config, listOf(ToolChatTurn("user", "hello")),
+            listOf(kotlinx.serialization.json.Json.parseToJsonElement(
+                """{"type":"function","function":{"name":"lookup"}}""",
+            ) as kotlinx.serialization.json.JsonObject), ThinkingEffort.HIGH,
+        ) {}
+    }
+
+    @Test(timeout = 10_000)
     fun cancelWhileWaitingForHeaders_joinsAndClosesSocket() = assertCancellation(false)
 
     @Test(timeout = 10_000)
@@ -187,7 +236,7 @@ class DeepSeekNetworkTest {
         }
     }
 
-    private fun assertCancellation(sendHeaders: Boolean) {
+    private fun assertCancellation(sendHeaders: Boolean, toolChat: Boolean = false) {
         LocalServer { socket ->
             if (sendHeaders) {
                 socket.getOutputStream().write(
@@ -201,7 +250,12 @@ class DeepSeekNetworkTest {
             val outcome = AtomicReference<Any>()
             val job = scope.launch {
                 try {
-                    outcome.set(HttpDeepSeekClient().testConnection(server.config))
+                    outcome.set(if (toolChat) HttpDeepSeekClient().streamToolChat(
+                        server.config, listOf(ToolChatTurn("user", "hello")),
+                        listOf(kotlinx.serialization.json.Json.parseToJsonElement(
+                            """{"type":"function","function":{"name":"lookup"}}""",
+                        ) as kotlinx.serialization.json.JsonObject), ThinkingEffort.HIGH,
+                    ) {} else HttpDeepSeekClient().testConnection(server.config))
                 } catch (cancelled: CancellationException) {
                     outcome.set(cancelled)
                     throw cancelled

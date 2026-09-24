@@ -15,6 +15,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -24,6 +25,9 @@ import com.example.agent.ui.theme.AgentTheme
 import com.example.agent.rootpilot.ui.RootPilotScreen
 import com.example.agent.rootpilot.ui.ChatScreen
 import com.example.agent.rootpilot.ui.RunHistoryScreen
+import com.example.agent.rootpilot.ui.FileAgentPanel
+import com.example.agent.rootpilot.ui.WorkspaceBrowserDialog
+import com.example.agent.rootpilot.ui.FileWriteConfirmation
 
 class RootPilotActivity : ComponentActivity() {
     private var overlayAllowed by mutableStateOf(false)
@@ -31,9 +35,21 @@ class RootPilotActivity : ComponentActivity() {
     private val viewModel: RootPilotViewModel by viewModels {
         RootPilotViewModel.Factory(applicationContext)
     }
+    private var exportingBackupId: String? = null
+    private val chooseWorkspace = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK) result.data?.let { data ->
+            data.data?.let { viewModel.selectFileWorkspace(it, data.flags) }
+        }
+    }
+    private val exportBackup = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        val id = exportingBackupId
+        exportingBackupId = null
+        if (uri != null && id != null) viewModel.exportFileBackup(id, uri)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        exportingBackupId = savedInstanceState?.getString("file_backup_export_id")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
@@ -51,6 +67,9 @@ class RootPilotActivity : ComponentActivity() {
                 val inputMessage by viewModel.inputMessage.collectAsState()
                 val appLaunchState by viewModel.appLaunchState.collectAsState()
                 val chatState by viewModel.chatState.collectAsState()
+                val fileState by viewModel.fileAgentState.collectAsState()
+                val browserState by viewModel.workspaceBrowserState.collectAsState()
+                val fileWorkspaceBusy by viewModel.fileWorkspaceBusy.collectAsState()
                 val historyState by viewModel.historyState.collectAsState()
                 DisposableEffect(apiState.editing) {
                     if (apiState.editing) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -65,13 +84,33 @@ class RootPilotActivity : ComponentActivity() {
                     chatContent = {
                         ChatScreen(
                             state = chatState,
-                            configured = state.apiConfigured && !apiState.busy && !apiState.editing,
+                            configured = state.apiConfigured && !apiState.busy && !apiState.editing && !fileWorkspaceBusy,
                             onDraftChange = viewModel::updateChatDraft,
                             onEffortChange = viewModel::setChatEffort,
                             onSend = viewModel::sendChat,
                             onStop = viewModel::stopChat,
                             onNewConversation = viewModel::newChat,
+                            fileControls = {
+                                FileAgentPanel(fileState.copy(busy = fileState.busy || fileWorkspaceBusy), chatState.generating,
+                                    onChooseDirectory = {
+                                        chooseWorkspace.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
+                                            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                                                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
+                                        ))
+                                    },
+                                    onClearDirectory = viewModel::clearFileWorkspace,
+                                    onBrowse = viewModel::openWorkspaceBrowser,
+                                    onEnabledChange = viewModel::setFileAgentEnabled,
+                                    onExportBackup = { id ->
+                                        exportingBackupId = id
+                                        exportBackup.launch("rootpilot-original.txt")
+                                    },
+                                )
+                            },
                         )
+                        FileWriteConfirmation(fileState, viewModel::decideFileWrite)
+                        WorkspaceBrowserDialog(browserState, viewModel::selectWorkspaceEntry,
+                            viewModel::workspaceBrowserBack, viewModel::refreshWorkspaceBrowser, viewModel::closeWorkspaceBrowser)
                     },
                     onOpenLegacyAgent = {
                         startActivity(Intent(this@RootPilotActivity, com.example.agent.MainActivity::class.java))
@@ -113,6 +152,11 @@ class RootPilotActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        exportingBackupId?.let { outState.putString("file_backup_export_id", it) }
+        super.onSaveInstanceState(outState)
     }
 
     override fun onResume() {

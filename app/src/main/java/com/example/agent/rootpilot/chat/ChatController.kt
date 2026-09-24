@@ -4,6 +4,8 @@ import com.example.agent.rootpilot.deepseek.ChatTurn
 import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.DeepSeekChatClient
 import com.example.agent.rootpilot.deepseek.ThinkingEffort
+import com.example.agent.rootpilot.deepseek.ModelStreamSnapshot
+import com.example.agent.rootpilot.deepseek.ToolChatTurn
 import com.example.agent.rootpilot.model.RootPilotConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -39,6 +41,7 @@ data class ChatUiState(
 class ChatController(
     private val scope: CoroutineScope,
     private val client: DeepSeekChatClient,
+    private val fileAgent: FileAgentController? = null,
 ) {
     private val lock = Any()
     private val mutableState = MutableStateFlow(ChatUiState())
@@ -79,9 +82,10 @@ class ChatController(
         boundConfig = config.copy(task = "")
         val prompt = current.draft.trim()
         // Incomplete/cancelled exchanges remain visible but never become model history.
-        val history = current.messages.chunked(2)
+        val completedMessages = current.messages.chunked(2)
             .filter { it.size == 2 && it.all(ChatMessage::complete) }
-            .flatten().map { ChatTurn(it.role, it.content) } + ChatTurn("user", prompt)
+            .flatten()
+        val history = completedMessages.map { ChatTurn(it.role, it.content) } + ChatTurn("user", prompt)
         if (history.sumOf { it.content.length } > MAX_HISTORY_CHARS || current.messages.size >= MAX_MESSAGES) {
             mutableState.value = current.copy(error = "当前会话已达长度上限，请新建对话")
             return@synchronized
@@ -94,12 +98,18 @@ class ChatController(
         stopping = false
         val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                val result = client.streamChat(config, history, current.effort) { snapshot ->
+                val update: suspend (ModelStreamSnapshot) -> Unit = { snapshot ->
                     currentCoroutineContext().ensureActive()
                     synchronized(lock) {
                         if (!stopping) updateAssistant(assistant.id, snapshot.content, snapshot.reasoning)
                     }
                 }
+                val result = if (fileAgent?.state?.value?.enabled == true) {
+                    val toolHistory = completedMessages.map {
+                        ToolChatTurn(it.role, it.content, reasoningContent = if (it.role == "assistant") it.reasoning else null)
+                    } + ToolChatTurn("user", prompt)
+                    fileAgent.run(config, toolHistory, current.effort, update)
+                } else client.streamChat(config, history, current.effort, update)
                 currentCoroutineContext().ensureActive()
                 synchronized(lock) {
                     if (!stopping) when (result) {
@@ -140,7 +150,9 @@ class ChatController(
     fun stop() = synchronized(lock) {
         if (activeJob == null || stopping) return@synchronized
         stopping = true
-        mutableState.value = mutableState.value.copy(error = "已停止生成；未完成的回复不会用于后续上下文")
+        mutableState.value = mutableState.value.copy(error = if (fileAgent?.state?.value?.enabled == true)
+            "已请求停止；已开始的文件写入可能仍会完成，请检查工作区和备份，不会自动重放"
+            else "已停止生成；未完成的回复不会用于后续上下文")
         // Keep generating true until the socket reader has finished cancellation cleanup.
         activeJob?.cancel()
         Unit

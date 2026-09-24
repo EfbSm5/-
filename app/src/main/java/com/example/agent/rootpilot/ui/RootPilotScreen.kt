@@ -100,11 +100,12 @@ fun RootPilotScreen(
 ) {
     var mode by rememberSaveable { mutableStateOf(ScreenMode.TASK) }
     var settingsOrigin by rememberSaveable { mutableStateOf(ScreenMode.TASK) }
-    val showSettings = mode == ScreenMode.SETTINGS || mode == ScreenMode.HISTORY
-    var showDebug by rememberSaveable { mutableStateOf(false) }
+    val showSettings = mode !in setOf(ScreenMode.TASK, ScreenMode.CHAT)
     var showLaunchApps by rememberSaveable { mutableStateOf(false) }
     val homeScroll = rememberScrollState()
     val settingsScroll = rememberScrollState()
+    val detailScroll = rememberScrollState()
+    LaunchedEffect(mode) { detailScroll.scrollTo(0) }
     if (showLaunchApps) {
         AppLaunchPicker(
             state = appLaunchState,
@@ -134,7 +135,7 @@ fun RootPilotScreen(
     }
     BackHandler(enabled = (mode != ScreenMode.TASK || chatGenerating) && !showLaunchApps) {
         if (!chatGenerating) when (mode) {
-            ScreenMode.HISTORY -> mode = ScreenMode.SETTINGS
+            ScreenMode.HISTORY, ScreenMode.PERMISSIONS, ScreenMode.DEBUG -> mode = ScreenMode.SETTINGS
             ScreenMode.SETTINGS -> returnFromSettings()
             else -> mode = ScreenMode.TASK
         }
@@ -156,11 +157,17 @@ fun RootPilotScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        if (mode == ScreenMode.SETTINGS) {
-                            ToolbarButton("返回", PilotIcon.BACK, true, returnFromSettings,
+                        if (showSettings && mode != ScreenMode.HISTORY) {
+                            ToolbarButton("返回", PilotIcon.BACK, true,
+                                { if (mode == ScreenMode.SETTINGS) returnFromSettings() else mode = ScreenMode.SETTINGS },
                                 Modifier.testTag("back_to_task"))
                         }
-                        Text(if (mode == ScreenMode.SETTINGS) "设置" else "RootPilot",
+                        Text(when (mode) {
+                            ScreenMode.SETTINGS -> "设置"
+                            ScreenMode.PERMISSIONS -> "权限与输入"
+                            ScreenMode.DEBUG -> "调试工具"
+                            else -> "RootPilot"
+                        },
                             style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
                         if (!showSettings) {
                             ToolbarButton("设置", PilotIcon.SETTINGS, !chatGenerating,
@@ -204,7 +211,11 @@ fun RootPilotScreen(
                 Column(
                     modifier = Modifier.padding(paddingValues)
                         .consumeWindowInsets(paddingValues).imePadding()
-                        .verticalScroll(if (showSettings) settingsScroll else homeScroll)
+                        .verticalScroll(when (mode) {
+                            ScreenMode.PERMISSIONS, ScreenMode.DEBUG -> detailScroll
+                            ScreenMode.SETTINGS -> settingsScroll
+                            else -> homeScroll
+                        })
                         .padding(horizontal = 20.dp, vertical = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(20.dp),
                 ) {
@@ -290,18 +301,15 @@ fun RootPilotScreen(
                             state.errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         }
                     } else {
-                        if (historyContent != null) {
-                            Button(onClick = { mode = ScreenMode.HISTORY },
-                                modifier = Modifier.fillMaxWidth().testTag("open_history")) {
-                                Text("任务历史与失败回顾")
-                            }
-                        }
                         RootPilotSettingsContent(
                             state = state, apiState = apiState, appLaunchState = appLaunchState,
                             busy = busy, recoveryRequired = recoveryRequired, apiReady = apiReady,
                             apiControlsEnabled = apiControlsEnabled, overlayAllowed = overlayAllowed,
                             inputMethodEnabled = inputMethodEnabled, inputMessage = inputMessage,
-                            showDebug = showDebug, onToggleDebug = { showDebug = !showDebug },
+                            showDebug = mode == ScreenMode.DEBUG,
+                            showPermissions = mode == ScreenMode.PERMISSIONS,
+                            onToggleDebug = { mode = ScreenMode.DEBUG },
+                            onOpenPermissions = { mode = ScreenMode.PERMISSIONS },
                             onOpenApps = { showLaunchApps = true; onRefreshLaunchApps() },
                             onApiKeyChanged = onApiKeyChanged, onBaseUrlChanged = onBaseUrlChanged,
                             onModelChanged = onModelChanged, onSaveApiConfig = onSaveApiConfig,
@@ -312,6 +320,12 @@ fun RootPilotScreen(
                             onTestRoot = onTestRoot, onCaptureScreen = onCaptureScreen,
                             onSingleStep = onSingleStep, onOpenLegacyAgent = onOpenLegacyAgent,
                         )
+                        if (mode == ScreenMode.SETTINGS && historyContent != null) {
+                            Button(onClick = { mode = ScreenMode.HISTORY },
+                                modifier = Modifier.fillMaxWidth().testTag("open_history")) {
+                                Text("任务历史与失败回顾")
+                            }
+                        }
                     }
                 }
             }
@@ -319,7 +333,7 @@ fun RootPilotScreen(
     }
 }
 
-private enum class ScreenMode { TASK, CHAT, SETTINGS, HISTORY }
+private enum class ScreenMode { TASK, CHAT, SETTINGS, HISTORY, PERMISSIONS, DEBUG }
 
 @Composable
 private fun NavigationItem(

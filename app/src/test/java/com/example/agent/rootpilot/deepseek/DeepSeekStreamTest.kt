@@ -29,6 +29,78 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class DeepSeekStreamTest {
+    private val toolSchema = Json.parseToJsonElement("""{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}""").jsonObject
+    private val toolChunk = "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\n"
+
+    @Test(timeout = 10_000)
+    fun toolHttpEntry_sendsToolHistoryAndReturnsStructuredCalls() = runBlocking {
+        Server { it.getOutputStream().write(response(toolChunk + chunk(finish = "tool_calls") + DONE)) }.use { server ->
+            val result = HttpDeepSeekClient().streamToolChat(server.config, listOf(
+                ToolChatTurn("user", "hello"),
+                ToolChatTurn("assistant", "", "earlier reasoning", listOf(ChatToolCall("old", "lookup", "{}"))),
+                ToolChatTurn("tool", "old result", toolCallId = "old"),
+            ), listOf(toolSchema), ThinkingEffort.HIGH) {}
+            assertEquals(ToolChatResult.Success("", "", listOf(ChatToolCall("call1", "lookup", "{}"))), result)
+            val body = server.body.get()
+            assertTrue(body.contains("\"tools\""))
+            assertTrue(body.contains("\"reasoning_content\":\"earlier reasoning\""))
+            assertTrue(body.contains("\"tool_call_id\":\"old\""))
+            server.assertReleased()
+        }
+    }
+
+    @Test(timeout = 10_000)
+    fun ordinaryChatAndVisionHttpEntries_rejectToolCalls() = runBlocking {
+        for (vision in listOf(false, true)) {
+            Server { it.getOutputStream().write(response(toolChunk + chunk(finish = "tool_calls") + DONE)) }.use { server ->
+                val client = HttpDeepSeekClient()
+                val result = if (vision) client.requestAction(DeepSeekVisionRequest(
+                    server.config, ScreenshotFrame(byteArrayOf(1), 1, 1, "data:image/jpeg;base64,test"), emptyList(), 1,
+                )) {} else client.streamChat(server.config, listOf(ChatTurn("user", "hello")), ThinkingEffort.HIGH) {}
+                assertEquals(DeepSeekActionResult.Failure("DeepSeek 返回格式无法理解"), result)
+                server.assertReleased()
+            }
+        }
+    }
+
+    @Test(timeout = 10_000)
+    fun toolMalformedAndTruncatedResponses_areSanitized() = runBlocking {
+        for (stream in listOf("data: private synthetic-token\n\n", toolChunk + chunk(finish = "tool_calls") + "data: [DONE]\n")) {
+            Server { socket ->
+                val bytes = stream.toByteArray()
+                socket.getOutputStream().write("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: ${bytes.size}\r\n\r\n".toByteArray() + bytes)
+            }.use { server ->
+                val result = HttpDeepSeekClient().streamToolChat(server.config, listOf(ToolChatTurn("user", "hello")), listOf(toolSchema), ThinkingEffort.HIGH) {}
+                assertEquals(ToolChatResult.Failure("DeepSeek 返回格式无法理解"), result)
+                server.assertReleased()
+            }
+        }
+    }
+
+    @Test(timeout = 10_000)
+    fun toolCallback_isCoveredByDeadlineAndCallerCancellation() = runBlocking {
+        for (cancelCaller in listOf(false, true)) {
+            Server { it.getOutputStream().write(response(chunk(reasoning = "draft"))) }.use { server ->
+                val update = kotlinx.coroutines.CompletableDeferred<Unit>()
+                val result = kotlinx.coroutines.CompletableDeferred<ToolChatResult>()
+                val job = launch {
+                    result.complete(HttpDeepSeekClient(requestTimeoutMillis = if (cancelCaller) 5000 else 500).streamToolChat(
+                        server.config, listOf(ToolChatTurn("user", "hello")), listOf(toolSchema), ThinkingEffort.HIGH,
+                    ) { update.complete(Unit); awaitCancellation() })
+                }
+                kotlinx.coroutines.withTimeout(2000) { update.await() }
+                if (cancelCaller) {
+                    kotlinx.coroutines.withTimeout(1000) { job.cancelAndJoin() }
+                    assertTrue(job.isCancelled)
+                    assertFalse(result.isCompleted)
+                } else {
+                    assertEquals(ToolChatResult.Failure("DeepSeek 请求超时"), kotlinx.coroutines.withTimeout(2000) { result.await() })
+                }
+                server.assertReleased()
+            }
+        }
+    }
+
     @Test
     fun snapshotAndTurnToString_areRedacted() {
         assertFalse(ModelStreamSnapshot("private-reason", "private-content").toString().contains("private"))

@@ -1,6 +1,7 @@
 package com.example.agent.rootpilot.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
@@ -52,6 +53,7 @@ fun ChatScreen(
     onStop: () -> Unit,
     onNewConversation: () -> Unit,
     modifier: Modifier = Modifier,
+    fileControls: (@Composable () -> Unit)? = null,
 ) {
     val keyboardVisible = WindowInsets.isImeVisible
     val list = rememberLazyListState()
@@ -76,71 +78,119 @@ fun ChatScreen(
     Column(modifier.fillMaxSize().imePadding().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         // Preserve room for send/stop when the IME reduces the viewport, especially at large font sizes.
         if (!keyboardVisible) {
-            Text("聊天不截图、不操作设备；历史仅保留在本次会话内存中，不跨进程。", style = MaterialTheme.typography.bodySmall)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Text("DeepSeek 聊天", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
                 Button(onClick = onNewConversation, enabled = !state.generating,
+                    insideMargin = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                     modifier = Modifier.testTag("chat_new")) { Text("新对话") }
             }
+            Text("聊天不截图、不操作手机界面；历史仅保留在本次会话内存中，不跨进程。",
+                color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            fileControls?.invoke()
         }
-        LazyColumn(state = list, modifier = Modifier.weight(1f).fillMaxWidth().testTag("chat_messages"),
-            verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(state.messages, key = { it.id }) { message ->
-                var showReasoning by rememberSaveable(message.id) { mutableStateOf(false) }
-                Card(Modifier.fillMaxWidth().testTag("chat_message_${message.id}")) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(if (message.role == "user") "你" else "DeepSeek", style = MaterialTheme.typography.labelLarge)
-                        if (message.reasoning.isNotEmpty()) {
-                            Button(onClick = { showReasoning = !showReasoning },
-                                modifier = Modifier.testTag("chat_reasoning_${message.id}")) {
-                                Text(if (showReasoning) "收起思考" else "展开思考")
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            if (state.messages.isEmpty()) {
+                Column(Modifier.align(Alignment.Center).padding(24.dp).testTag("chat_empty"),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("从一个问题开始", style = MaterialTheme.typography.titleMedium,
+                        textAlign = TextAlign.Center)
+                    Text("整理思路、解释概念，或一起打磨文字。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                }
+            }
+            LazyColumn(state = list, modifier = Modifier.fillMaxSize().testTag("chat_messages"),
+                contentPadding = PaddingValues(vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(state.messages, key = { it.id }) { message ->
+                    var showReasoning by rememberSaveable(message.id) { mutableStateOf(false) }
+                    val isUser = message.role == "user"
+                    Card(Modifier.fillMaxWidth()
+                        .padding(start = if (isUser) 32.dp else 0.dp, end = if (isUser) 0.dp else 16.dp)
+                        .testTag("chat_message_${message.id}")) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(if (isUser) "你" else "DeepSeek", style = MaterialTheme.typography.labelLarge,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = if (isUser) TextAlign.End else TextAlign.Start,
+                                color = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (message.reasoning.isNotEmpty()) {
+                                Button(onClick = { showReasoning = !showReasoning },
+                                    minWidth = 0.dp, minHeight = 48.dp,
+                                    insideMargin = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                    modifier = Modifier.testTag("chat_reasoning_${message.id}")) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically) {
+                                        Text(if (showReasoning) "−" else "+",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(if (showReasoning) "收起思考" else "展开思考",
+                                            style = MaterialTheme.typography.labelLarge)
+                                    }
+                                }
+                                if (showReasoning) StreamingMarkdown(message.reasoning,
+                                    Modifier.fillMaxWidth().padding(start = 8.dp)
+                                        .testTag("chat_reasoning_body_${message.id}"))
                             }
-                            if (showReasoning) StreamingMarkdown(message.reasoning,
-                                Modifier.fillMaxWidth().testTag("chat_reasoning_body_${message.id}"))
-                        }
-                        if (message.content.isNotEmpty()) StreamingMarkdown(message.content,
-                            Modifier.fillMaxWidth().testTag("chat_content_${message.id}"))
-                        if (message.role == "assistant" && !message.complete) {
-                            if (message.id == state.messages.lastOrNull()?.id && state.generating) {
-                                Text("正在生成…", Modifier.testTag("chat_generating_${message.id}"))
-                            } else {
-                                Text("未完成，不用于后续上下文", Modifier.testTag("chat_incomplete_${message.id}"),
-                                    style = MaterialTheme.typography.bodySmall)
+                            if (message.content.isNotEmpty()) StreamingMarkdown(message.content,
+                                Modifier.fillMaxWidth().testTag("chat_content_${message.id}"))
+                            if (message.role == "assistant" && !message.complete) {
+                                if (message.id == state.messages.lastOrNull()?.id && state.generating) {
+                                    Text("正在生成…", Modifier.testTag("chat_generating_${message.id}"),
+                                        color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
+                                } else {
+                                    Text("未完成，不用于后续上下文", Modifier.testTag("chat_incomplete_${message.id}"),
+                                        style = MaterialTheme.typography.bodySmall)
+                                }
                             }
                         }
                     }
                 }
+                item(key = "tail") { Spacer(Modifier.height(1.dp)) }
             }
-            item(key = "tail") { Spacer(Modifier.height(1.dp)) }
         }
         if (!configured) Text("请先在设置中保存 API 配置。")
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        if (!keyboardVisible) Text("思考强度：${state.effort.displayLabel()}", style = MaterialTheme.typography.bodySmall)
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            ThinkingEffort.entries.forEach { effort ->
-                val selected = state.effort == effort
-                Button(onClick = { onEffortChange(effort) }, enabled = !state.generating,
-                    modifier = Modifier.weight(1f).testTag("chat_effort_${effort.name}")
-                        .semantics { this.selected = selected },
-                    minWidth = 0.dp, minHeight = 48.dp,
-                    insideMargin = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
-                    colors = if (selected) ButtonDefaults.buttonColorsPrimary() else ButtonDefaults.buttonColors(),
-                ) {
-                    Text(effort.displayLabel(), style = MaterialTheme.typography.labelLarge, textAlign = TextAlign.Center)
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (!keyboardVisible) Text("思考强度：${state.effort.displayLabel()}",
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    ThinkingEffort.entries.forEach { effort ->
+                        val selected = state.effort == effort
+                        Button(onClick = { onEffortChange(effort) }, enabled = !state.generating,
+                            modifier = Modifier.weight(1f).testTag("chat_effort_${effort.name}")
+                                .semantics { this.selected = selected },
+                            minWidth = 0.dp, minHeight = 48.dp,
+                            insideMargin = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
+                            colors = if (selected) ButtonDefaults.buttonColorsPrimary() else ButtonDefaults.buttonColors(),
+                        ) {
+                            Text(effort.displayLabel(), style = MaterialTheme.typography.labelLarge, textAlign = TextAlign.Center)
+                        }
+                    }
+                }
+                if (!keyboardVisible) Text("较高档位可能更慢，单次请求时限为 120 秒。",
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                TextField(value = state.draft, onValueChange = onDraftChange,
+                    label = "消息", maxLines = if (keyboardVisible) 3 else 5,
+                    modifier = Modifier.fillMaxWidth().testTag("chat_draft"))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text("${state.draft.length}/16000", modifier = Modifier.weight(1f).padding(start = 4.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                    Button(onClick = onSend, enabled = configured && !state.generating && state.draft.isNotBlank(),
+                        colors = ButtonDefaults.buttonColorsPrimary(),
+                        minWidth = 0.dp, minHeight = 48.dp,
+                        insideMargin = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.testTag("chat_send")) { Text("发送") }
+                    if (state.generating) Button(onClick = onStop,
+                        minWidth = 0.dp, minHeight = 48.dp,
+                        insideMargin = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.testTag("chat_stop")) { Text("停止") }
                 }
             }
-        }
-        if (!keyboardVisible) Text("较高档位可能更慢，单次请求时限为 120 秒。", style = MaterialTheme.typography.bodySmall)
-        TextField(value = state.draft, onValueChange = onDraftChange,
-            label = "消息", maxLines = if (keyboardVisible) 3 else 5,
-            modifier = Modifier.fillMaxWidth().testTag("chat_draft"))
-        Text("${state.draft.length}/16000", style = MaterialTheme.typography.bodySmall)
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onSend, enabled = configured && !state.generating && state.draft.isNotBlank(),
-                colors = ButtonDefaults.buttonColorsPrimary(),
-                modifier = Modifier.weight(1f).testTag("chat_send")) { Text("发送") }
-            if (state.generating) Button(onClick = onStop, modifier = Modifier.testTag("chat_stop")) { Text("停止") }
         }
     }
 }

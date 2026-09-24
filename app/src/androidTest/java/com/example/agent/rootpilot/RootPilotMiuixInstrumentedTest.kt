@@ -85,6 +85,28 @@ class RootPilotMiuixInstrumentedTest {
     }
 
     @Test
+    fun settingsSubpagesReturnToSettingsAndThenChat() {
+        val fixture = Fixture()
+        showFixture { fixture.Content() }
+        compose.onNodeWithTag("open_chat").performClick()
+        compose.onNodeWithTag("open_settings").performClick()
+        compose.onNodeWithTag("open_permissions").performScrollTo().performClick()
+        compose.onNodeWithText("系统权限").assertIsDisplayed()
+        compose.onNodeWithTag("api_status").assertDoesNotExist()
+        saveScreenshot(compose.onNodeWithTag(FIXTURE_TAG), "miuix-permissions.png")
+        compose.onNodeWithTag("back_to_task").performClick()
+        compose.onNodeWithTag("api_status").assertExists()
+        compose.onNodeWithTag("toggle_debug").performScrollTo().performClick()
+        compose.onNodeWithText("测试 Root").assertIsDisplayed()
+        compose.onNodeWithTag("api_status").assertDoesNotExist()
+        saveScreenshot(compose.onNodeWithTag(FIXTURE_TAG), "miuix-debug.png")
+        compose.onNodeWithTag("back_to_task").performClick()
+        compose.onNodeWithTag("open_permissions").assertExists()
+        compose.onNodeWithTag("back_to_task").performClick()
+        compose.onNodeWithTag("chat_draft").assertIsDisplayed()
+    }
+
+    @Test
     fun settingsSwitchCallsBackOnceAndEmptyTokenHasPasswordSemantics() {
         val fixture = Fixture()
         showFixture { fixture.Content() }

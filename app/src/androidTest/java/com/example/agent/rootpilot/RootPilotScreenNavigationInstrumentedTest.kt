@@ -44,6 +44,34 @@ class RootPilotScreenNavigationInstrumentedTest {
     @get:Rule val compose = createComposeRule()
 
     @Test
+    fun settingsSubpagesRestoreAndReturnThroughSettingsToChat() {
+        val fixture = Fixture()
+        val restoration = StateRestorationTester(compose)
+        restoration.setContent { fixture.Content() }
+        compose.onNodeWithTag("open_chat").performClick()
+        compose.onNodeWithTag("open_settings").performClick()
+        compose.onNodeWithText("开启悬浮操作面板").assertDoesNotExist()
+        compose.onNodeWithTag("open_permissions").performScrollTo().performClick()
+        compose.onNodeWithTag("api_status").assertDoesNotExist()
+        compose.onNodeWithTag("bottom_navigation").assertDoesNotExist()
+        restoration.emulateSavedInstanceStateRestore()
+        compose.onNodeWithText("系统权限").assertExists()
+        compose.onNodeWithTag("back_to_task").performClick()
+        compose.onNodeWithTag("api_status").assertExists()
+        compose.onNodeWithTag("toggle_debug").performScrollTo().performClick()
+        compose.onNodeWithText("测试 Root").assertExists()
+        compose.onNodeWithTag("api_status").assertDoesNotExist()
+        compose.onNodeWithTag("back_to_task").performClick()
+        compose.onNodeWithTag("open_permissions").assertExists()
+        compose.onNodeWithTag("back_to_task").performClick()
+        compose.onNodeWithTag("fake_chat").assertIsDisplayed()
+        compose.runOnIdle {
+            assertEquals(0, fixture.started)
+            assertEquals(0, fixture.stopped)
+        }
+    }
+
+    @Test
     fun bottomNavigationSwitchesPagesAndPreservesTaskDraft() {
         val fixture = Fixture()
         fixture.state.value = fixture.state.value.copy(
@@ -350,6 +378,8 @@ class RootPilotScreenNavigationInstrumentedTest {
         compose.onNodeWithTag("toggle_debug").performScrollTo().performClick()
         compose.onNodeWithText("测试 Root").assertIsNotEnabled()
         compose.onNodeWithText("单步执行").assertIsNotEnabled()
+        compose.onNodeWithTag("back_to_task").performClick()
+        compose.onNodeWithTag("api_status").assertExists()
         compose.onNodeWithTag("back_to_task").performClick()
         compose.onNodeWithText("无法确认上一步 Root 动作是否已经生效，不会自动重放。", substring = true)
             .performScrollTo().assertIsDisplayed()

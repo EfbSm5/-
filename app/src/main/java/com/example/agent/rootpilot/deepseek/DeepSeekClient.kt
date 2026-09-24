@@ -19,6 +19,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
@@ -28,6 +29,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.ResponseBody
 import okio.BufferedSink
 
 data class DeepSeekVisionRequest(
@@ -76,7 +78,7 @@ interface DeepSeekChatClient {
 class HttpDeepSeekClient(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val requestTimeoutMillis: Long = REQUEST_TIMEOUT_MILLIS,
-) : DeepSeekClient, DeepSeekChatClient {
+) : DeepSeekClient, DeepSeekChatClient, DeepSeekToolChatClient {
     init {
         require(requestTimeoutMillis > 0) { "Request timeout must be positive" }
     }
@@ -134,14 +136,46 @@ class HttpDeepSeekClient(
         }.toString(),
     )
 
+    override suspend fun streamToolChat(
+        config: RootPilotConfig,
+        messages: List<ToolChatTurn>,
+        tools: List<JsonObject>,
+        effort: ThinkingEffort,
+        onUpdate: suspend (ModelStreamSnapshot) -> Unit,
+    ): ToolChatResult {
+        val body = try {
+            buildToolChatRequest(config, messages, tools, effort)
+        } catch (_: IllegalArgumentException) {
+            return ToolChatResult.Failure("工具聊天消息格式无效或超出限制")
+        }
+        return request(config, body, ToolChatResult::Failure) { response ->
+            val source = response?.source() ?: throw SerializationException("Missing stream")
+            readDeepSeekToolStream(source, onUpdate)
+        }
+    }
+
     private suspend fun request(
         config: RootPilotConfig,
         body: String,
         onUpdate: (suspend (ModelStreamSnapshot) -> Unit)? = null,
-    ): DeepSeekActionResult =
+    ): DeepSeekActionResult = request(config, body, DeepSeekActionResult::Failure) { response ->
+        if (onUpdate != null) {
+            val source = response?.source() ?: throw SerializationException("Missing stream")
+            DeepSeekActionResult.Success(readDeepSeekStream(source, onUpdate))
+        } else {
+            DeepSeekActionResult.Success(parseMessageContent(response?.string().orEmpty()))
+        }
+    }
+
+    private suspend fun <T> request(
+        config: RootPilotConfig,
+        body: String,
+        failure: (String) -> T,
+        readResponse: suspend (ResponseBody?) -> T,
+    ): T =
         withContext(dispatcher) {
             config.apiValidationError()?.let {
-                return@withContext DeepSeekActionResult.Failure(it)
+                return@withContext failure(it)
             }
 
             val call = try {
@@ -166,7 +200,7 @@ class HttpDeepSeekClient(
                     timeout().timeout(requestTimeoutMillis, TimeUnit.MILLISECONDS)
                 }
             } catch (_: IllegalArgumentException) {
-                return@withContext DeepSeekActionResult.Failure("API 地址不可用")
+                return@withContext failure("API 地址不可用")
             }
 
             withTimeoutOrNull(requestTimeoutMillis) {
@@ -184,7 +218,7 @@ class HttpDeepSeekClient(
                             // Error bodies are untrusted and may contain credentials. Abort
                             // unread bodies before close so cleanup cannot drain a slow stream.
                             call.cancel()
-                            return@use DeepSeekActionResult.Failure(
+                            return@use failure(
                                 when (responseCode) {
                                     401, 403 -> "鉴权失败，请检查 Token 或访问权限（HTTP $responseCode）"
                                     402 -> "账户余额不足（HTTP 402）"
@@ -195,35 +229,29 @@ class HttpDeepSeekClient(
                                 },
                             )
                         }
-                        if (onUpdate != null) {
-                            try {
-                                val source = response.body?.source() ?: throw SerializationException("Missing stream")
-                                DeepSeekActionResult.Success(readDeepSeekStream(source, onUpdate))
-                            } finally {
-                                // DONE ends the protocol; do not drain a server that keeps HTTP open.
-                                call.cancel()
-                            }
-                        } else {
-                            val responseBody = response.body?.string().orEmpty()
-                            DeepSeekActionResult.Success(parseMessageContent(responseBody))
+                        try {
+                            readResponse(response.body)
+                        } finally {
+                            // DONE ends the protocol; do not drain a server that keeps HTTP open.
+                            call.cancel()
                         }
                     }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: InterruptedIOException) {
                     currentCoroutineContext().ensureActive()
-                    DeepSeekActionResult.Failure("DeepSeek 请求超时")
+                    failure("DeepSeek 请求超时")
                 } catch (_: SerializationException) {
-                    DeepSeekActionResult.Failure("DeepSeek 返回格式无法理解")
+                    failure("DeepSeek 返回格式无法理解")
                 } catch (_: IOException) {
                     currentCoroutineContext().ensureActive()
-                    DeepSeekActionResult.Failure("DeepSeek 网络请求失败")
+                    failure("DeepSeek 网络请求失败")
                 } catch (_: IllegalArgumentException) {
-                    DeepSeekActionResult.Failure("API 配置格式无效")
+                    failure("API 配置格式无效")
                 } finally {
                     cancellation.cancel()
                 }
-            } ?: DeepSeekActionResult.Failure("DeepSeek 请求超时")
+            } ?: failure("DeepSeek 请求超时")
         }
 
     private fun buildRequest(request: DeepSeekVisionRequest, stream: Boolean = false): String = buildJsonObject {

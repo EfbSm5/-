@@ -1,12 +1,18 @@
 package com.example.agent.rootpilot
 
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.HttpDeepSeekClient
 import com.example.agent.rootpilot.chat.ChatController
+import com.example.agent.rootpilot.chat.FileAgentController
+import com.example.agent.rootpilot.files.FileWorkspace
+import com.example.agent.rootpilot.files.FileEntry
+import com.example.agent.rootpilot.files.WorkspaceBrowserController
+import com.example.agent.rootpilot.files.exportBackupDocument
 import com.example.agent.rootpilot.deepseek.apiValidationError
 import com.example.agent.rootpilot.input.AndroidImeEnvironment
 import com.example.agent.rootpilot.apps.AndroidAppCatalog
@@ -55,16 +61,93 @@ class RootPilotViewModel(
     val uiState: StateFlow<RootPilotUiState> = RootPilotService.uiState
     val historyState = RootPilotService.historyState(appContext)
     fun clearHistory() = RootPilotService.clearHistory(appContext)
-    private val chat = ChatController(viewModelScope, HttpDeepSeekClient())
+    private val workspace = FileWorkspace(appContext)
+    private val browser = WorkspaceBrowserController(viewModelScope, workspace)
+    val workspaceBrowserState = browser.state
+    fun closeWorkspaceBrowser() = browser.close()
+    fun openWorkspaceBrowser() {
+        if (!chatState.value.generating && !_fileWorkspaceBusy.value && fileAgentState.value.directoryLabel != null) browser.open()
+    }
+    fun selectWorkspaceEntry(entry: FileEntry) = browser.select(entry)
+    fun workspaceBrowserBack() = browser.back()
+    fun refreshWorkspaceBrowser() = browser.refresh()
+    private val fileAgent = FileAgentController(workspace, HttpDeepSeekClient())
+    val fileAgentState = fileAgent.state
+    private val _fileWorkspaceBusy = MutableStateFlow(true)
+    val fileWorkspaceBusy = _fileWorkspaceBusy.asStateFlow()
+    private val chat = ChatController(viewModelScope, HttpDeepSeekClient(), fileAgent)
     val chatState = chat.state
     fun updateChatDraft(value: String) = chat.updateDraft(value)
     fun setChatEffort(value: com.example.agent.rootpilot.deepseek.ThinkingEffort) = chat.setEffort(value)
     fun sendChat() {
-        if (_apiState.value.busy || _apiState.value.editing || !canChangeApiConfig()) return
+        if (_fileWorkspaceBusy.value || _apiState.value.busy || _apiState.value.editing || !canChangeApiConfig()) return
+        browser.close()
         chat.send(uiState.value.config, uiState.value.apiConfigured)
     }
     fun stopChat() = chat.stop()
     fun newChat() = chat.newConversation()
+
+    init {
+        viewModelScope.launch {
+            try { reloadFileWorkspace() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { fileAgent.report("工作区信息读取失败，请重新选择目录") }
+            finally { _fileWorkspaceBusy.value = false }
+        }
+        viewModelScope.launch {
+            chatState.map { it.generating }.distinctUntilChanged().collect { generating ->
+                if (!generating) {
+                    try { fileAgent.updateBackups(withContext(ioDispatcher) { workspace.listBackups() }) }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { fileAgent.report("备份列表读取失败，请稍后重新打开应用查看") }
+                }
+            }
+        }
+    }
+
+    private suspend fun reloadFileWorkspace() {
+        val loaded = withContext(ioDispatcher) { workspace.selectedLabel() to workspace.listBackups() }
+        fileAgent.updateWorkspace(loaded.first, loaded.second)
+    }
+
+    private fun changeFileWorkspace(action: suspend () -> Unit) {
+        if (chatState.value.generating || _fileWorkspaceBusy.value) return
+        browser.close()
+        _fileWorkspaceBusy.value = true
+        fileAgent.setEnabled(false)
+        chat.newConversation()
+        viewModelScope.launch {
+            try { withContext(ioDispatcher) { action() }; reloadFileWorkspace() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { fileAgent.report("目录操作失败，请重新选择；文件 Agent 已关闭") }
+            finally { _fileWorkspaceBusy.value = false }
+        }
+    }
+
+    fun selectFileWorkspace(uri: Uri, flags: Int) = changeFileWorkspace { workspace.select(uri, flags) }
+    fun clearFileWorkspace() = changeFileWorkspace { workspace.clear() }
+    fun setFileAgentEnabled(enabled: Boolean) {
+        if (chatState.value.generating || _fileWorkspaceBusy.value) return
+        chat.newConversation()
+        fileAgent.setEnabled(enabled)
+    }
+    fun decideFileWrite(id: String, allowed: Boolean) = fileAgent.decide(id, allowed)
+
+    fun exportFileBackup(id: String, target: Uri) {
+        if (chatState.value.generating || _fileWorkspaceBusy.value) return
+        _fileWorkspaceBusy.value = true
+        viewModelScope.launch {
+            try {
+                withContext(ioDispatcher) {
+                    val bytes = workspace.backupBytes(id)
+                    exportBackupDocument(appContext, target, bytes)
+                }
+                fileAgent.report("原文备份已导出；请检查后手动恢复")
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { fileAgent.report("备份导出未完成，请检查目标文件；本机备份仍保留") }
+            finally { _fileWorkspaceBusy.value = false }
+        }
+    }
     private val _apiState = MutableStateFlow(ApiConfigUiState())
     val apiState: StateFlow<ApiConfigUiState> = _apiState.asStateFlow()
     private val _inputMessage = MutableStateFlow<String?>(null)
@@ -203,6 +286,7 @@ class RootPilotViewModel(
                         RootPilotService.updateApiConfig(draft)
                     }
                     refreshApiUi("配置已安全保存")
+                    fileAgent.setEnabled(false)
                     chat.newConversation()
                 }
             } catch (error: CancellationException) {
@@ -224,6 +308,7 @@ class RootPilotViewModel(
                         RootPilotService.updateApiConfig(null)
                     }
                     refreshApiUi("配置已清除")
+                    fileAgent.setEnabled(false)
                     chat.newConversation()
                 }
             } catch (error: CancellationException) {

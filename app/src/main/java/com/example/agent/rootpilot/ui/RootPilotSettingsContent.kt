@@ -46,7 +46,9 @@ internal fun RootPilotSettingsContent(
     inputMethodEnabled: Boolean,
     inputMessage: String?,
     showDebug: Boolean,
+    showPermissions: Boolean,
     onToggleDebug: () -> Unit,
+    onOpenPermissions: () -> Unit,
     onOpenApps: () -> Unit,
     onApiKeyChanged: (String) -> Unit,
     onBaseUrlChanged: (String) -> Unit,
@@ -64,96 +66,109 @@ internal fun RootPilotSettingsContent(
     onSingleStep: () -> Unit,
     onOpenLegacyAgent: () -> Unit,
 ) {
-    Text("API 配置", style = MaterialTheme.typography.titleMedium)
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(if (apiState.configured) "API 已配置" else "API 未配置", modifier = Modifier.testTag("api_status"))
-            if (apiState.editing) {
-                if (apiState.configured) Text("更换配置需重新输入 Token；保存前仍保留原配置。")
-                OutlinedTextField(
-                    value = apiState.draft.apiKey,
-                    onValueChange = onApiKeyChanged,
-                    modifier = Modifier.fillMaxWidth().testTag("api_token"),
-                    label = { Text("DeepSeek Token（Relay 可留空）") },
-                    visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    singleLine = true,
-                    enabled = apiControlsEnabled,
-                )
-                OutlinedTextField(
-                    value = apiState.draft.baseUrl,
-                    onValueChange = onBaseUrlChanged,
-                    modifier = Modifier.fillMaxWidth().testTag("api_base_url"),
-                    label = { Text("API Base URL / Relay 地址") },
-                    singleLine = true,
-                    enabled = apiControlsEnabled,
-                )
-                OutlinedTextField(
-                    value = apiState.draft.model,
-                    onValueChange = onModelChanged,
-                    modifier = Modifier.fillMaxWidth().testTag("api_model"),
-                    label = { Text("模型名称") },
-                    singleLine = true,
-                    enabled = apiControlsEnabled,
-                )
+    if (!showDebug && !showPermissions) {
+        Text("API 配置", style = MaterialTheme.typography.titleMedium)
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(if (apiState.configured) "API 已配置" else "API 未配置", modifier = Modifier.testTag("api_status"))
+                if (apiState.editing) {
+                    if (apiState.configured) Text("更换配置需重新输入 Token；保存前仍保留原配置。")
+                    OutlinedTextField(
+                        value = apiState.draft.apiKey,
+                        onValueChange = onApiKeyChanged,
+                        modifier = Modifier.fillMaxWidth().testTag("api_token"),
+                        label = { Text("DeepSeek Token（Relay 可留空）") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        singleLine = true,
+                        enabled = apiControlsEnabled,
+                    )
+                    OutlinedTextField(
+                        value = apiState.draft.baseUrl,
+                        onValueChange = onBaseUrlChanged,
+                        modifier = Modifier.fillMaxWidth().testTag("api_base_url"),
+                        label = { Text("API Base URL / Relay 地址") },
+                        singleLine = true,
+                        enabled = apiControlsEnabled,
+                    )
+                    OutlinedTextField(
+                        value = apiState.draft.model,
+                        onValueChange = onModelChanged,
+                        modifier = Modifier.fillMaxWidth().testTag("api_model"),
+                        label = { Text("模型名称") },
+                        singleLine = true,
+                        enabled = apiControlsEnabled,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = onSaveApiConfig, colors = ButtonDefaults.buttonColorsPrimary(), enabled = apiControlsEnabled, modifier = Modifier.testTag("api_save")) {
+                            Text("保存配置")
+                        }
+                        if (apiState.configured) {
+                            Button(onClick = onCancelApiConfigEdit, enabled = apiControlsEnabled) { Text("取消") }
+                        }
+                    }
+                } else {
+                    Text(apiState.draft.model, style = MaterialTheme.typography.titleMedium)
+                    Text(apiState.draft.baseUrl, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Button(onClick = onEditApiConfig, enabled = apiControlsEnabled, modifier = Modifier.testTag("api_edit")) {
+                        Text("更换配置")
+                    }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onSaveApiConfig, colors = ButtonDefaults.buttonColorsPrimary(), enabled = apiControlsEnabled, modifier = Modifier.testTag("api_save")) {
-                        Text("保存配置")
+                    Button(onClick = onTestConnection, enabled = apiControlsEnabled, modifier = Modifier.testTag("api_test")) {
+                        Text("测试连接")
                     }
-                    if (apiState.configured) {
-                        Button(onClick = onCancelApiConfigEdit, enabled = apiControlsEnabled) { Text("取消") }
+                    Button(onClick = onClearApiConfig, enabled = apiControlsEnabled, modifier = Modifier.testTag("api_clear")) {
+                        Text("清除配置")
                     }
                 }
-            } else {
-                Text(apiState.draft.baseUrl)
-                Text(apiState.draft.model)
-                Button(onClick = onEditApiConfig, enabled = apiControlsEnabled, modifier = Modifier.testTag("api_edit")) {
-                    Text("更换配置")
-                }
+                apiState.message?.let { Text(it, modifier = Modifier.testTag("api_message")) }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onTestConnection, enabled = apiControlsEnabled, modifier = Modifier.testTag("api_test")) {
-                    Text("测试连接")
-                }
-                Button(onClick = onClearApiConfig, enabled = apiControlsEnabled, modifier = Modifier.testTag("api_clear")) {
-                    Text("清除配置")
-                }
+        }
+        SettingsGroup("任务偏好") {
+            Button(
+                modifier = Modifier.fillMaxWidth().testTag("launch_apps"),
+                onClick = onOpenApps,
+            ) {
+                Text("允许启动的应用（${appLaunchState.apps.count { it.packageName in appLaunchState.allowedPackages }}）")
             }
-            apiState.message?.let { Text(it, modifier = Modifier.testTag("api_message")) }
+            SettingsToggleRow(
+                label = "每一步都需要人工确认",
+                checked = state.config.manualConfirmation, enabled = !busy,
+                onCheckedChange = onManualConfirmationChanged,
+            )
+            Text("自动模式可执行点击和滑动；打开应用、输入文本及系统按键始终需要确认。",
+                style = MaterialTheme.typography.bodySmall)
+            Text("截图及勾选的可启动应用名称、包名会发送至所配置的 API 服务。",
+                style = MaterialTheme.typography.bodySmall)
+        }
+        SettingsGroup("更多") {
+            Button(onClick = onOpenPermissions, modifier = Modifier.fillMaxWidth().testTag("open_permissions")) {
+                Text("权限与输入")
+            }
+            Text("悬浮窗${if (overlayAllowed) "已授权" else "未授权"} · 输入法${if (inputMethodEnabled) "已启用" else "未启用"}",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Button(onClick = onToggleDebug, modifier = Modifier.fillMaxWidth().testTag("toggle_debug")) {
+                Text("调试工具")
+            }
         }
     }
-    SettingsGroup("应用与权限") {
-        Button(
-            modifier = Modifier.fillMaxWidth().testTag("launch_apps"),
-            onClick = onOpenApps,
-        ) {
-            Text("允许启动的应用（${appLaunchState.apps.count { it.packageName in appLaunchState.allowedPackages }}）")
+    if (showPermissions) {
+        SettingsGroup("系统权限") {
+            Button(onClick = onOverlayPermission, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                Text(if (overlayAllowed) "悬浮操作面板已授权 · 管理权限" else "开启悬浮操作面板")
+            }
+            Button(onClick = onInputMethodSettings, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                Text(if (inputMethodEnabled) "Unicode 输入已启用 · 管理输入法" else "启用 RootPilot 输入法（中文 / Unicode）")
+            }
+            Text("文本通过输入法写入当前光标位置，完成后恢复原输入法；不支持密码框。请先在系统设置中手动启用，平时仍使用常用输入法。",
+                style = MaterialTheme.typography.bodySmall)
+            inputMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
-        Button(onClick = onOverlayPermission, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-            Text(if (overlayAllowed) "悬浮操作面板已授权 · 管理权限" else "开启悬浮操作面板")
-        }
-        Button(onClick = onInputMethodSettings, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-            Text(if (inputMethodEnabled) "Unicode 输入已启用 · 管理输入法" else "启用 RootPilot 输入法（中文 / Unicode）")
-        }
-        Text("文本通过输入法写入当前光标位置，完成后恢复原输入法；不支持密码框。请先在系统设置中手动启用，平时仍使用常用输入法。")
-        inputMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
-    SettingsGroup("执行方式") {
-        SettingsToggleRow(
-            label = "每一步都需要人工确认",
-            checked = state.config.manualConfirmation, enabled = !busy,
-            onCheckedChange = onManualConfirmationChanged,
-        )
-        Text("自动模式可执行点击和滑动；打开应用、输入文本及系统按键始终需要确认。",
-            style = MaterialTheme.typography.bodySmall)
-        Text("截图及勾选的可启动应用名称、包名会发送至所配置的 API 服务。",
-            style = MaterialTheme.typography.bodySmall)
-    }
-    SettingsGroup("调试工具") {
-        Button(onClick = onToggleDebug, modifier = Modifier.testTag("toggle_debug")) {
-            Text(if (showDebug) "收起调试工具" else "展开调试工具")
-        }
-        if (showDebug) {
+    if (showDebug) {
+        SettingsGroup("诊断与实验") {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onTestRoot, enabled = !busy && !recoveryRequired) { Text("测试 Root") }
                 Button(onClick = onCaptureScreen, enabled = !busy && !recoveryRequired) { Text("截取屏幕") }
