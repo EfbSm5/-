@@ -23,6 +23,7 @@ import androidx.compose.runtime.setValue
 import com.example.agent.ui.theme.AgentTheme
 import com.example.agent.rootpilot.ui.RootPilotScreen
 import com.example.agent.rootpilot.ui.ChatScreen
+import com.example.agent.rootpilot.ui.RunHistoryScreen
 
 class RootPilotActivity : ComponentActivity() {
     private var overlayAllowed by mutableStateOf(false)
@@ -50,12 +51,16 @@ class RootPilotActivity : ComponentActivity() {
                 val inputMessage by viewModel.inputMessage.collectAsState()
                 val appLaunchState by viewModel.appLaunchState.collectAsState()
                 val chatState by viewModel.chatState.collectAsState()
+                val historyState by viewModel.historyState.collectAsState()
                 DisposableEffect(apiState.editing) {
                     if (apiState.editing) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                     else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                     onDispose { window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
                 }
                 RootPilotScreen(
+                    historyContent = { onBack ->
+                        RunHistoryScreen(historyState, viewModel::clearHistory, onBack)
+                    },
                     chatGenerating = chatState.generating,
                     chatContent = {
                         ChatScreen(

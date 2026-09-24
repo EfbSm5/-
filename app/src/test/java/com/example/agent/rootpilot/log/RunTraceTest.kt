@@ -9,6 +9,17 @@ import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class RunTraceTest {
+    @Test fun observerFailureCannotPreventDiagnosticSinkOrChangeOutcome() {
+        val lines = mutableListOf<String>()
+        val trace = RunTrace(observer = { error("SECRET") }, sink = { lines += it })
+        trace.outcome = TraceStatus.SUCCESS
+        trace.reason = TraceReason.NONE
+        trace.record(TraceEvent.RUN_END, TraceStatus.SUCCESS)
+        assertEquals(1, lines.size)
+        assertEquals(TraceStatus.SUCCESS, trace.outcome)
+        assertFalse(lines.single().contains("SECRET"))
+    }
+
     @Test
     fun clockAndBoundedSinkKeepOnlySanitizedJsonLines() {
         var now = 100L

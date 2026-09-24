@@ -20,6 +20,8 @@ import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotStatus
 import com.example.agent.rootpilot.model.RootPilotUiState
 import com.example.agent.rootpilot.ui.RootPilotScreen
+import com.example.agent.rootpilot.ui.RunHistoryScreen
+import com.example.agent.rootpilot.history.RunHistoryState
 import com.example.agent.ui.theme.AgentTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -30,6 +32,20 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class RootPilotScreenNavigationInstrumentedTest {
     @get:Rule val compose = createComposeRule()
+
+    @Test
+    fun historyLivesInSettingsAndReturnsWithoutDiscardingTask() {
+        val fixture = Fixture()
+        compose.setContent { fixture.Content() }
+        compose.onNodeWithTag("open_history").assertDoesNotExist()
+        compose.onNodeWithTag("open_settings").performClick()
+        compose.onNodeWithTag("open_history").performScrollTo().performClick()
+        compose.onNodeWithTag("history_empty").assertExists()
+        compose.onNodeWithTag("history_back").performClick()
+        compose.onNodeWithTag("open_history").assertExists()
+        compose.onNodeWithTag("back_to_task").performClick()
+        compose.onNodeWithTag("task_input").assertExists()
+    }
 
     @Test
     fun homeIsMinimalAndSettingsBackDoesNotDiscardDraft() {
@@ -177,6 +193,7 @@ class RootPilotScreenNavigationInstrumentedTest {
             back = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
             AgentTheme {
                 RootPilotScreen(
+                    historyContent = { onBack -> RunHistoryScreen(RunHistoryState(), {}, onBack) },
                     state = state.value, apiState = api.value,
                     onApiKeyChanged = {}, onBaseUrlChanged = {}, onModelChanged = {},
                     onSaveApiConfig = {}, onEditApiConfig = { api.value = api.value.copy(editing = true) },

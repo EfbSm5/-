@@ -37,6 +37,9 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import android.util.Log
 import com.example.agent.rootpilot.log.RunTrace
+import com.example.agent.rootpilot.history.RunHistoryRepository
+import com.example.agent.rootpilot.history.RunHistoryState
+import com.example.agent.rootpilot.history.RunHistoryStore
 
 class RootPilotService : Service(), RootPilotRunHost {
     private lateinit var controller: RootPilotRunController
@@ -69,6 +72,7 @@ class RootPilotService : Service(), RootPilotRunHost {
             logRepository = sharedLogRepository,
             traceSink = { Log.i(RunTrace.TAG, it) },
             host = this,
+            history = historyRepository(this),
         )
         createNotificationChannel()
         controller.restoreInterruptedRun()
@@ -242,6 +246,19 @@ class RootPilotService : Service(), RootPilotRunHost {
         val uiState: StateFlow<RootPilotUiState> = taskState.uiState
         private val stateLock get() = taskState.lock
         private val sharedLogRepository: AgentLogRepository = InMemoryAgentLogRepository()
+        private var sharedHistory: RunHistoryRepository? = null
+
+        @Synchronized
+        private fun historyRepository(context: Context): RunHistoryRepository = sharedHistory
+            ?: RunHistoryRepository(
+                RunHistoryStore(File(context.applicationContext.noBackupFilesDir,
+                    "rootpilot_history/${RunHistoryStore.FILE_NAME}")),
+                CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            ).also { sharedHistory = it }
+
+        fun historyState(context: Context): StateFlow<RunHistoryState> = historyRepository(context).state
+
+        fun clearHistory(context: Context) { historyRepository(context).clear() }
 
         const val ACTION_TEST_ROOT = "com.example.agent.rootpilot.TEST_ROOT"
         const val ACTION_CAPTURE_SCREEN = "com.example.agent.rootpilot.CAPTURE_SCREEN"

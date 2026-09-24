@@ -53,6 +53,8 @@ class RootPilotViewModel(
     private val appLaunchStore: AppLaunchAllowlistStore = AppLaunchAllowlistStore.create(appContext),
 ) : ViewModel() {
     val uiState: StateFlow<RootPilotUiState> = RootPilotService.uiState
+    val historyState = RootPilotService.historyState(appContext)
+    fun clearHistory() = RootPilotService.clearHistory(appContext)
     private val chat = ChatController(viewModelScope, HttpDeepSeekClient())
     val chatState = chat.state
     fun updateChatDraft(value: String) = chat.updateDraft(value)

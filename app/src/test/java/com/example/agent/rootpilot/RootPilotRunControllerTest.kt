@@ -6,6 +6,13 @@ import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.DeepSeekClient
 import com.example.agent.rootpilot.deepseek.DeepSeekVisionRequest
 import com.example.agent.rootpilot.log.InMemoryAgentLogRepository
+import com.example.agent.rootpilot.log.TraceEvent
+import com.example.agent.rootpilot.log.TraceReason
+import com.example.agent.rootpilot.history.RunHistoryRepository
+import com.example.agent.rootpilot.history.RunHistoryRecord
+import com.example.agent.rootpilot.history.RunHistoryStorage
+import com.example.agent.rootpilot.history.RunHistoryStatus
+import com.example.agent.rootpilot.history.RunHistoryError
 import com.example.agent.rootpilot.loop.AgentLoop
 import com.example.agent.rootpilot.model.ExecutableRootAction
 import com.example.agent.rootpilot.model.RootPilotConfig
@@ -39,6 +46,125 @@ import org.junit.rules.TemporaryFolder
 @OptIn(ExperimentalCoroutinesApi::class)
 class RootPilotRunControllerTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test fun historyWriteFailureDoesNotFailOrRetryExecutedAction() = runTest {
+        val fixture = fixture()
+        fixture.failHistoryWrite = true
+        fixture.start()
+        runCurrent()
+        fixture.controller.confirmAction()
+        advanceUntilIdle()
+        runCurrent()
+        assertEquals(1, fixture.executions)
+        assertEquals(RootPilotStatus.COMPLETED, fixture.state.status)
+        assertEquals(RunHistoryStatus.COMPLETED, fixture.history.state.value.records.single().status)
+        assertEquals(RunHistoryError.WRITE_FAILED, fixture.history.state.value.error)
+        assertFalse(fixture.file.exists())
+        fixture.controller.destroy()
+    }
+
+    @Test fun historyWaitsForCancellationCleanupAndRecordsStopped() = runTest {
+        val fixture = fixture()
+        val release = CompletableDeferred<Unit>()
+        fixture.execute = {
+            try { awaitCancellation() } finally { withContext(NonCancellable) { release.await() } }
+        }
+        fixture.start()
+        runCurrent()
+        fixture.controller.confirmAction()
+        runCurrent()
+        fixture.controller.stopAgent(1)
+        runCurrent()
+        assertEquals(RunHistoryStatus.RUNNING, fixture.history.state.value.records.single().status)
+        release.complete(Unit)
+        advanceUntilIdle()
+        runCurrent()
+        val record = fixture.history.state.value.records.single()
+        assertEquals(RunHistoryStatus.STOPPED, record.status)
+        assertEquals(TraceReason.CANCELLED, record.reason)
+        assertTrue(record.events.any { it.event == TraceEvent.RUN_END })
+        fixture.controller.destroy()
+    }
+
+    @Test fun serviceDestructionEndsHistoryAsInterrupted() = runTest {
+        val fixture = fixture()
+        fixture.start()
+        runCurrent()
+        fixture.controller.destroy()
+        advanceUntilIdle()
+        runCurrent()
+        assertEquals(RunHistoryStatus.INTERRUPTED, fixture.history.state.value.records.single().status)
+        assertTrue(fixture.file.exists())
+        assertEquals(0, fixture.executions)
+    }
+
+    @Test fun historyCapturesSnapshotFailureBeforeLoopStart() = runTest {
+        val fixture = fixture()
+        fixture.breakStore()
+        fixture.start()
+        advanceUntilIdle()
+        runCurrent()
+        val record = fixture.history.state.value.records.single()
+        assertEquals(RunHistoryStatus.FAILED, record.status)
+        assertEquals(TraceReason.SNAPSHOT_WRITE_FAILED, record.reason)
+        assertEquals(0, record.stepCount)
+        assertEquals(0, fixture.captures)
+        fixture.controller.destroy()
+    }
+
+    @Test fun successfulHistoryClearDoesNotTouchApprovalSnapshotOrTaskAndLateCompletionStaysCleared() = runTest {
+        val fixture = fixture()
+        fixture.start()
+        runCurrent()
+        val snapshot = fixture.file.readText()
+        val approval = fixture.controller.approval
+        fixture.history.clear()
+        runCurrent()
+        assertEquals(snapshot, fixture.file.readText())
+        assertSame(approval, fixture.controller.approval)
+        assertTrue(fixture.controller.busy)
+        fixture.controller.confirmAction()
+        advanceUntilIdle()
+        runCurrent()
+        assertEquals(1, fixture.executions)
+        assertEquals(RootPilotStatus.COMPLETED, fixture.state.status)
+        assertTrue(fixture.history.state.value.records.isEmpty())
+        fixture.controller.destroy()
+    }
+
+    @Test fun historyFinalStatusIncludesSnapshotClearFailureAfterSuccessfulExecution() = runTest {
+        val fixture = fixture()
+        fixture.host.afterRender = { state ->
+            if (state.status == RootPilotStatus.WAITING_SCREEN) fixture.breakStore()
+        }
+        fixture.start()
+        runCurrent()
+        fixture.controller.confirmAction()
+        advanceUntilIdle()
+        runCurrent()
+        val record = fixture.history.state.value.records.single()
+        assertEquals(1, fixture.executions)
+        assertEquals(RunHistoryStatus.FAILED, record.status)
+        assertEquals(TraceReason.SNAPSHOT_CLEAR_FAILED, record.reason)
+        assertTrue(record.events.any { it.reason == TraceReason.SNAPSHOT_CLEAR_FAILED })
+        fixture.controller.destroy()
+    }
+
+    @Test fun stoppedRunSnapshotClearFailureRemainsInSameHistoryRecord() = runTest {
+        val fixture = fixture()
+        fixture.start()
+        runCurrent()
+        fixture.breakStore()
+        fixture.controller.stopAgent(1)
+        advanceUntilIdle()
+        runCurrent()
+        val record = fixture.history.state.value.records.single()
+        assertEquals(RunHistoryStatus.FAILED, record.status)
+        assertEquals(TraceReason.SNAPSHOT_CLEAR_FAILED, record.reason)
+        assertTrue(record.events.any { it.reason == TraceReason.SNAPSHOT_CLEAR_FAILED })
+        assertEquals(0, fixture.executions)
+        fixture.controller.destroy()
+    }
 
     @Test fun normalCompletionReleasesOwnershipAndClearsSnapshot() = runTest {
         val fixture = fixture()
@@ -320,6 +446,14 @@ class RootPilotRunControllerTest {
     ) = Fixture(this, shared, file)
 
     private class Fixture(scope: TestScope, val shared: RootPilotTaskState, val file: File) {
+        var failHistoryWrite = false
+        val history = RunHistoryRepository(object : RunHistoryStorage {
+            override fun read() = emptyList<RunHistoryRecord>()
+            override fun write(records: List<RunHistoryRecord>) {
+                if (failHistoryWrite) error("private history error")
+            }
+            override fun clear() = Unit
+        }, scope.backgroundScope)
         val state get() = shared.uiState.value
         var captures = 0
         var modelCalls = 0
@@ -374,6 +508,7 @@ class RootPilotRunControllerTest {
             runStore = RootPilotRunStore(file),
             logRepository = InMemoryAgentLogRepository(),
             host = host,
+            history = history,
         )
 
         fun start(id: Int = 1, recovering: Boolean = false) {

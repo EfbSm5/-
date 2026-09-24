@@ -6,6 +6,8 @@ import com.example.agent.rootpilot.log.TraceEvent
 import com.example.agent.rootpilot.log.TraceReason
 import com.example.agent.rootpilot.log.TraceStage
 import com.example.agent.rootpilot.log.TraceStatus
+import com.example.agent.rootpilot.history.RunHistoryRepository
+import com.example.agent.rootpilot.history.RunHistoryStatus
 import com.example.agent.rootpilot.loop.ActionApproval
 import com.example.agent.rootpilot.loop.AgentLoop
 import com.example.agent.rootpilot.loop.AgentLoopEvent
@@ -57,6 +59,7 @@ internal class RootPilotRunController(
     private val logRepository: AgentLogRepository,
     private val traceSink: (String) -> Unit = {},
     host: RootPilotRunHost,
+    private val history: RunHistoryRepository? = null,
 ) {
     private val stateLock get() = taskState.lock
     private val _uiState get() = taskState.mutableState
@@ -70,6 +73,7 @@ internal class RootPilotRunController(
     private var isDeviceRun = false
     private var storageFailure = false
     private var interrupted = false
+    private var snapshotFailureReason = TraceReason.NONE
 
     val busy: Boolean get() = synchronized(stateLock) { taskState.owner != null }
     val approval: ActionApproval? get() = synchronized(stateLock) { pendingApproval }
@@ -173,7 +177,9 @@ internal class RootPilotRunController(
 
         isDeviceRun = true
         storageFailure = false
-        val trace = RunTrace(sink = ::appendTraceLine)
+        snapshotFailureReason = TraceReason.NONE
+        val trace = RunTrace(observer = { history?.record(it) }, sink = ::appendTraceLine)
+        history?.begin(trace.runId)
         lateinit var job: Job
         job = scope.launch(start = CoroutineStart.LAZY) {
             try {
@@ -276,7 +282,7 @@ internal class RootPilotRunController(
         val startId = synchronized(stateLock) {
             if (activeJob === job) {
                 activeJob = null
-                if (activeTrace?.first === job) activeTrace = null
+                val trace = activeTrace?.takeIf { it.first === job }?.second
                 if (storageFailure) {
                     recoveryError("恢复记录读写失败，任务已停止；请核对已执行结果后放弃记录")
                 } else if (interrupted) {
@@ -288,6 +294,23 @@ internal class RootPilotRunController(
                         errorMessage = "用户已停止；已执行的操作不会撤销",
                     )
                 }
+                trace?.let {
+                    val finalStatus = when {
+                        storageFailure -> RunHistoryStatus.FAILED
+                        interrupted -> RunHistoryStatus.INTERRUPTED
+                        job.isCancelled -> RunHistoryStatus.STOPPED
+                        it.outcome == TraceStatus.SUCCESS -> RunHistoryStatus.COMPLETED
+                        it.outcome == TraceStatus.CANCELLED -> RunHistoryStatus.STOPPED
+                        else -> RunHistoryStatus.FAILED
+                    }
+                    history?.finish(it.runId, finalStatus, it.elapsedMs,
+                        when {
+                            storageFailure -> snapshotFailureReason
+                            job.isCancelled -> TraceReason.CANCELLED
+                            else -> it.reason
+                        })
+                }
+                if (trace != null) activeTrace = null
                 taskState.owner = null
                 latestStartId
             } else {
@@ -433,6 +456,7 @@ internal class RootPilotRunController(
             "clear" -> TraceReason.SNAPSHOT_CLEAR_FAILED
             else -> TraceReason.SNAPSHOT_WRITE_FAILED
         }
+        snapshotFailureReason = reason
         (activeTrace?.second ?: RunTrace(sink = ::appendTraceLine)).record(
             TraceEvent.CONTROL, TraceStatus.FAILED, reason, stage = TraceStage.SERVICE,
         )

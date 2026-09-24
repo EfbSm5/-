@@ -77,15 +77,16 @@ fun RootPilotScreen(
     onClearLaunchApps: () -> Unit = {},
     chatContent: (@Composable () -> Unit)? = null,
     chatGenerating: Boolean = false,
+    historyContent: (@Composable (onBack: () -> Unit) -> Unit)? = null,
 ) {
     var mode by rememberSaveable { mutableStateOf(ScreenMode.TASK) }
-    val showSettings = mode == ScreenMode.SETTINGS
+    val showSettings = mode == ScreenMode.SETTINGS || mode == ScreenMode.HISTORY
     var showDebug by rememberSaveable { mutableStateOf(false) }
     var showLaunchApps by rememberSaveable { mutableStateOf(false) }
     val homeScroll = rememberScrollState()
     val settingsScroll = rememberScrollState()
     BackHandler(enabled = (mode != ScreenMode.TASK || chatGenerating) && !showLaunchApps) {
-        if (!chatGenerating) mode = ScreenMode.TASK
+        if (!chatGenerating) mode = if (mode == ScreenMode.HISTORY) ScreenMode.SETTINGS else ScreenMode.TASK
     }
     if (showLaunchApps) {
         AppLaunchPicker(
@@ -153,6 +154,10 @@ fun RootPilotScreen(
         ) { paddingValues ->
             if (mode == ScreenMode.CHAT && chatContent != null) {
                 Box(Modifier.padding(paddingValues).fillMaxSize()) { chatContent() }
+            } else if (mode == ScreenMode.HISTORY && historyContent != null) {
+                Box(Modifier.padding(paddingValues).fillMaxSize()) {
+                    historyContent { mode = ScreenMode.SETTINGS }
+                }
             } else {
                 Column(
                     modifier = Modifier.padding(paddingValues)
@@ -236,6 +241,12 @@ fun RootPilotScreen(
                             state.errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                         }
                     } else {
+                        if (historyContent != null) {
+                            Button(onClick = { mode = ScreenMode.HISTORY },
+                                modifier = Modifier.fillMaxWidth().testTag("open_history")) {
+                                Text("任务历史与失败回顾")
+                            }
+                        }
                         RootPilotSettingsContent(
                             state = state, apiState = apiState, appLaunchState = appLaunchState,
                             busy = busy, recoveryRequired = recoveryRequired, apiReady = apiReady,
@@ -259,7 +270,7 @@ fun RootPilotScreen(
     }
 }
 
-private enum class ScreenMode { TASK, CHAT, SETTINGS }
+private enum class ScreenMode { TASK, CHAT, SETTINGS, HISTORY }
 
 @Composable
 private fun NavigationButton(
