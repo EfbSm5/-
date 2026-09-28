@@ -234,7 +234,7 @@ fun RootPilotScreen(
                                     label = "描述目标和完成条件", minLines = 3, maxLines = 5, enabled = !busy,
                                 )
                                 ToggleRow(
-                                    label = "允许上传当前屏幕截图",
+                                    label = "允许上传截图及前台应用、键盘状态",
                                     checked = state.config.allowScreenUpload, enabled = !busy,
                                     onCheckedChange = onScreenUploadChanged,
                                 )

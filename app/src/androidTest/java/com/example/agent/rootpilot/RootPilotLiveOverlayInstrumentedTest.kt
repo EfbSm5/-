@@ -181,6 +181,9 @@ class RootPilotLiveOverlayInstrumentedTest {
                 }
             }
             val root = object : RootExecutor {
+                override suspend fun observeScreen() = com.example.agent.rootpilot.screen.ScreenObservation(
+                    "com.example.fixture", "com.example.fixture.Main", "com.example.fixture", "abc", false, 1L,
+                )
                 override suspend fun checkRoot(): RootExecutionResult = error("root_check_forbidden")
                 override suspend fun captureScreen(): RootScreenshotResult = error("root_capture_forbidden")
                 override suspend fun execute(action: ExecutableRootAction): RootExecutionResult {

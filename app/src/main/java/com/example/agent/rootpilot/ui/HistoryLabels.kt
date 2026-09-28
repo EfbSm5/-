@@ -46,6 +46,7 @@ internal fun TraceReason.historyLabel(): String = when (this) {
     TraceReason.UPLOAD_NOT_ALLOWED -> "未授权上传截图"
     TraceReason.SCREENSHOT_FAILED -> "截图失败"
     TraceReason.UNCHANGED_SCREEN -> "画面持续未变化"
+    TraceReason.SCREEN_CONTEXT_CHANGED -> "窗口状态变化或无法确认"
     TraceReason.MODEL_FAILED -> "模型请求失败"
     TraceReason.PARSE_FAILED -> "模型动作解析失败"
     TraceReason.MODEL_REPORTED_FAILURE -> "模型报告无法完成"

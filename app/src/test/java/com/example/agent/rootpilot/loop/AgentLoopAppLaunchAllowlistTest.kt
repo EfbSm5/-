@@ -71,6 +71,9 @@ class AgentLoopAppLaunchAllowlistTest {
         },
         deepSeekClient = client,
         rootExecutor = object : RootExecutor {
+            override suspend fun observeScreen() = com.example.agent.rootpilot.screen.ScreenObservation(
+                "com.example.fixture", "com.example.fixture.Main", "com.example.fixture", "abc", false, 1L,
+            )
             override suspend fun checkRoot(): Nothing = error("测试不允许 Root 调用")
             override suspend fun captureScreen(): Nothing = error("测试仅允许 fixture 截图")
             override suspend fun execute(action: ExecutableRootAction): Nothing = error("测试不允许动作或 Shell 执行")

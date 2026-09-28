@@ -223,6 +223,9 @@ class RootPilotServiceStopInstrumentedTest {
     }
 
     private class CleanupExecutor : RootExecutor {
+        override suspend fun observeScreen() = com.example.agent.rootpilot.screen.ScreenObservation(
+            "com.example.fixture", "com.example.fixture.Main", "com.example.fixture", "abc", false, 1L,
+        )
         val entered = CompletableDeferred<Unit>()
         val cleanupEntered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()

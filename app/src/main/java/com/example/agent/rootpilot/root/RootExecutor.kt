@@ -43,6 +43,9 @@ internal object RootCommandBuilder {
 }
 
 interface RootExecutor {
+    suspend fun observeScreen(): com.example.agent.rootpilot.screen.ScreenObservation =
+        com.example.agent.rootpilot.screen.ScreenObservation(null, null, null, null, null, System.nanoTime() / 1_000_000)
+
     suspend fun checkRoot(): RootExecutionResult
 
     suspend fun captureScreen(): RootScreenshotResult
@@ -64,6 +67,9 @@ class SuRootExecutor(
         RootExecutionResult.Failure("文本输入通道未配置")
     },
 ) : RootExecutor {
+    private val screenObserver = RootScreenObserver()
+
+    override suspend fun observeScreen() = screenObserver.observe()
     private val processLock = Any()
     private var activeProcess: Process? = null
     private var cancellationGeneration = 0L
@@ -138,6 +144,7 @@ class SuRootExecutor(
     }
 
     override fun cancel() {
+        screenObserver.cancel()
         synchronized(processLock) {
             cancellationGeneration++
             activeProcess?.destroyForcibly()

@@ -254,6 +254,10 @@ class RootPilotRunControllerTest {
         runCurrent()
         assertEquals(0, replacement.captures)
         replacement.controller.discardInterruptedRun(2)
+        assertFalse(replacement.state.config.allowScreenUpload)
+        replacement.shared.mutableState.value = replacement.state.copy(
+            config = replacement.state.config.copy(allowScreenUpload = true),
+        )
         replacement.start(3)
         runCurrent()
         assertEquals(1, replacement.captures)
@@ -467,6 +471,9 @@ class RootPilotRunControllerTest {
         var confirmationCleanup: () -> Unit = {}
         val host = Host()
         private val root = object : RootExecutor {
+            override suspend fun observeScreen() = com.example.agent.rootpilot.screen.ScreenObservation(
+                "com.example.fixture", "com.example.fixture.Main", "com.example.fixture", "abc", false, 1L,
+            )
             override suspend fun checkRoot(): RootExecutionResult { rootChecks++; return check() }
             override suspend fun captureScreen(): RootScreenshotResult = error("No real screenshots")
             override suspend fun execute(action: ExecutableRootAction): RootExecutionResult {

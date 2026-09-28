@@ -192,6 +192,11 @@ class DeepSeekClientTest {
                         history = emptyList(),
                         remainingSteps = 2,
                         step = step,
+                        observation = com.example.agent.rootpilot.screen.ScreenObservation(
+                            "com.fixture.foreground", "com.fixture.foreground.Main", "com.fixture.foreground",
+                            "LOCAL_WINDOW_TOKEN_NOT_FOR_UPLOAD", true, 20L,
+                        ),
+                        observationStartedAtMillis = 10L,
                         availableApps = listOf(com.example.agent.rootpilot.model.RootPilotApp(
                             "com.example.notes", "记事本", "com.example.notes.Main",
                         )),
@@ -212,6 +217,10 @@ class DeepSeekClientTest {
                 assertTrue(!body.contains("入口约束"))
                 assertTrue(!body.contains("第一步必须返回"))
                 assertTrue(body.contains("image_url"))
+                assertTrue(body.contains("com.fixture.foreground.Main"))
+                assertTrue(body.contains("keyboard_visible"))
+                assertTrue(body.contains("sample_started_elapsed_ms"))
+                assertFalse(body.contains("LOCAL_WINDOW_TOKEN_NOT_FOR_UPLOAD"))
                 val payload = Json.parseToJsonElement(body).jsonObject
                 assertEquals(
                     "enabled",

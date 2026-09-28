@@ -268,6 +268,12 @@ class AgentLoopTraceTest {
     }
 
     private class Root(private val fail: Boolean = false) : RootExecutor {
+        override suspend fun executeConfirmed(action: ExecutableRootAction, confirm: suspend (String?) -> Boolean): RootExecutionResult =
+            if (confirm(if (action is ExecutableRootAction.Type) "com.example.fixture" else null)) execute(action)
+            else RootExecutionResult.Failure("rejected")
+        override suspend fun observeScreen() = com.example.agent.rootpilot.screen.ScreenObservation(
+            "com.example.fixture", "com.example.fixture.Main", "com.example.fixture", "abc", false, 1L,
+        )
         val actions = mutableListOf<ExecutableRootAction>()
         override suspend fun checkRoot() = RootExecutionResult.Success()
         override suspend fun captureScreen() = RootScreenshotResult.Failure("SENTINEL_PRIVATE_PAYLOAD")

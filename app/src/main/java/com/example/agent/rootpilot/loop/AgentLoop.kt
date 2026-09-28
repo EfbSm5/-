@@ -17,6 +17,7 @@ import com.example.agent.rootpilot.root.RootExecutor
 import com.example.agent.rootpilot.screen.ScreenshotCaptureResult
 import com.example.agent.rootpilot.screen.ScreenshotFrame
 import com.example.agent.rootpilot.screen.ScreenshotProvider
+import com.example.agent.rootpilot.screen.ScreenObservation
 import java.security.MessageDigest
 import java.util.UUID
 import java.time.OffsetDateTime
@@ -165,6 +166,7 @@ class AgentLoop(
             trace.stage = TraceStage.SCREENSHOT
             trace.record(TraceEvent.START, TraceStatus.STARTED)
             onEvent(AgentLoopEvent.Capturing(step))
+            val beforeCapture = rootExecutor.observeScreen()
             val captureResult = screenshotProvider.capture()
             val frame = when (captureResult) {
                 is ScreenshotCaptureResult.Failure -> {
@@ -174,6 +176,12 @@ class AgentLoop(
                 }
 
                 is ScreenshotCaptureResult.Success -> captureResult.frame
+            }
+            val observation = rootExecutor.observeScreen()
+            if (!beforeCapture.sameWindow(observation) || beforeCapture.keyboardVisible != observation.keyboardVisible) {
+                trace.fail(TraceReason.SCREEN_CONTEXT_CHANGED)
+                onEvent(AgentLoopEvent.Failed("截图期间窗口状态不可确认或已变化，未发送模型请求，请重新观察"))
+                return
             }
             onEvent(AgentLoopEvent.ScreenshotCaptured(step, frame))
             trace.record(TraceEvent.RESULT, TraceStatus.SUCCESS)
@@ -207,6 +215,8 @@ class AgentLoop(
                         remainingSteps = request.maxSteps - step,
                         step = step,
                         availableApps = availableApps,
+                        observation = observation,
+                        observationStartedAtMillis = beforeCapture.observedAtMillis,
                     ),
                     onUpdate = { onEvent(AgentLoopEvent.ModelOutput(step, it)) },
                 )
@@ -354,6 +364,7 @@ class AgentLoop(
                 null
             }
             var rejected = false
+            var contextChanged = false
             trace.stage = TraceStage.EXECUTION
             val executionResult = rootExecutor.executeConfirmed(executableAction) { targetPackage ->
                 if (approval != null) {
@@ -372,11 +383,29 @@ class AgentLoop(
                     trace.record(TraceEvent.START, TraceStatus.STARTED, action = action, executable = executableAction)
                     onEvent(AgentLoopEvent.Executing(step, action))
                     currentCoroutineContext().ensureActive()
+                    if (action !is RootPilotAction.Wait) {
+                        val current = rootExecutor.observeScreen()
+                        // IME switching intentionally changes keyboard visibility; editor identity is
+                        // additionally checked by InputConnectionBridge immediately before commit.
+                        contextChanged = !observation.sameWindow(current) ||
+                            if (action is RootPilotAction.Type) {
+                                targetPackage != observation.focusedPackage
+                            } else {
+                                observation.keyboardVisible == null ||
+                                    observation.keyboardVisible != current.keyboardVisible
+                            }
+                        currentCoroutineContext().ensureActive()
+                    }
                 }
-                !rejected
+                !rejected && !contextChanged
             }
             if (rejected) {
                 onEvent(AgentLoopEvent.Stopped)
+                return
+            }
+            if (contextChanged) {
+                trace.fail(TraceReason.SCREEN_CONTEXT_CHANGED)
+                onEvent(AgentLoopEvent.Failed("当前窗口或键盘状态已变化／无法确认，未执行动作，请重新观察；若使用了文本输入，请核对原输入法已恢复"))
                 return
             }
             when (executionResult) {
@@ -402,6 +431,11 @@ class AgentLoop(
         trace.fail(TraceReason.STEP_LIMIT)
         onEvent(AgentLoopEvent.Failed("达到最大步骤数 ${request.maxSteps}，已停止"))
     }
+
+    private fun ScreenObservation.sameWindow(other: ScreenObservation): Boolean =
+        foregroundPackage != null && foregroundActivity != null && focusedPackage != null && focusedWindowId != null &&
+            foregroundPackage == other.foregroundPackage && foregroundActivity == other.foregroundActivity &&
+            focusedPackage == other.focusedPackage && focusedWindowId == other.focusedWindowId
 
     private fun RootPilotAction.describeForHistory(): String = when (this) {
         is RootPilotAction.CreateTodo -> buildJsonObject {

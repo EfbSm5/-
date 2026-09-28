@@ -141,7 +141,7 @@ class RootPilotRunStoreTest {
         assertEquals(current.model, restored.model)
         assertEquals("上次任务", restored.task)
         assertTrue(restored.manualConfirmation)
-        assertTrue(restored.allowScreenUpload)
+        assertFalse(restored.allowScreenUpload)
         assertEquals("", snapshot.restoreTask(current.copy(apiKey = "")).apiKey)
         assertFalse(restored.toString().contains(current.apiKey))
     }

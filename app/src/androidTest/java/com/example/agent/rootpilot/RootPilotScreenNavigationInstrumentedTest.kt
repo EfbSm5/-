@@ -238,7 +238,7 @@ class RootPilotScreenNavigationInstrumentedTest {
         compose.onNodeWithTag("open_chat").performClick()
         taskNavigation().performClick()
         compose.onNodeWithTag("screen_upload").performScrollTo().assertIsOn()
-        compose.onNodeWithText("允许上传当前屏幕截图").assertIsDisplayed()
+        compose.onNodeWithText("允许上传截图及前台应用、键盘状态").assertIsDisplayed()
         compose.onNodeWithTag("screen_upload").performClick().assertIsOff()
         compose.runOnIdle {
             assertEquals(2, fixture.uploadChanges)
@@ -293,7 +293,7 @@ class RootPilotScreenNavigationInstrumentedTest {
         val fixture = Fixture()
         compose.setContent { fixture.Content() }
         compose.onNodeWithTag("task_input").assertExists()
-        compose.onNodeWithText("允许上传当前屏幕截图").assertExists()
+        compose.onNodeWithText("允许上传截图及前台应用、键盘状态").assertExists()
         compose.onNodeWithText("执行方式：逐步确认").assertExists()
         compose.onNodeWithTag("stop_task").assertDoesNotExist()
         compose.onNodeWithTag("api_token").assertDoesNotExist()

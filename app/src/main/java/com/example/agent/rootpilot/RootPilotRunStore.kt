@@ -26,7 +26,8 @@ data class RootPilotRunSnapshot(
     fun restoreTask(config: RootPilotConfig): RootPilotConfig = config.copy(
         task = task,
         manualConfirmation = manualConfirmation,
-        allowScreenUpload = allowScreenUpload,
+        // Restored tasks require renewed consent, including the current observation fields.
+        allowScreenUpload = false,
     )
 }
 
