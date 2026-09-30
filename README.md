@@ -80,6 +80,20 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 以 `runId` 关联任务，`step` 从 0 开始，`elapsedMs` 为累计耗时。`stop_requested` 是停止请求，`run_end` 才是协程结束证据；日志可能轮转，不是持久化审计记录。
 
+### 独立测试页验收
+
+`execution-fixture` 是仅 Debug 的独立测试 APK，不是产品入口。它通过签名权限保护的 Provider 只导出自己的 View 画面，排除系统、键盘和其他应用；非空内容必须是固定测试文本。生产代码不依赖该模块，RootPilot 仅 Debug Manifest 声明访问权限。
+
+```sh
+./gradlew :app:assembleDebug :app:assembleDebugAndroidTest :execution-fixture:assembleDebug --no-daemon
+```
+
+在已核对的同一设备上依次安装 fixture、RootPilot Debug 和 androidTest APK（均使用同一 Debug 签名）。需已有 Root、已启用 RootPilot 输入法；真实测试还需手机已保存 DeepSeek 配置和用户同意上传测试页。首次后台启动可能被系统限制，本次小米验收先通过显式目标设备的 Root `am start` 打开 `com.example.rootpilot.fixture/.ExecutionFixtureActivity`，每次用例结束关闭测试页。
+
+仅运行 `LiveExecutionInstrumentedTest#fixtureChannelRendersOnlyKnownContent` 并传入 `fixtureChannelAcceptance=true` 可检查不联网通道；另行明确授权后，运行 `LiveExecutionInstrumentedTest#liveModelTypesFixtureAndObservesCompletion` 并传入 `liveFixtureExecution=true` 才会调用真实 API。两个参数默认关闭，不应将整个测试套件带 live 开关运行。
+
+真实用例只允许一次固定中文 Type，确认由脚本批准；模型必须在下一帧看到输入结果并结束，且输入法恢复断言通过才算成功。它验证 HTTP、执行循环与真实 IME，不替代正式 Service、悬浮窗／通知、物理屏幕或点击验收。
+
 ## 源码导航
 
 | 路径（`app/src/main/java/com/example/agent/` 下） | 职责 |

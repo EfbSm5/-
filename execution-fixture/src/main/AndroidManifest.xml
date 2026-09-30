@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <permission android:name="com.example.rootpilot.fixture.ACCESS"
+        android:protectionLevel="signature" />
+    <application android:allowBackup="false" android:label="RootPilot 执行测试页"
+        android:supportsRtl="true" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name=".ExecutionFixtureActivity" android:exported="true"
+            android:permission="com.example.rootpilot.fixture.ACCESS"
+            android:windowSoftInputMode="stateAlwaysHidden|adjustResize" />
+        <provider android:name=".FixtureProvider"
+            android:authorities="com.example.rootpilot.fixture.state"
+            android:permission="com.example.rootpilot.fixture.ACCESS"
+            android:exported="true" />
+    </application>
+</manifest>

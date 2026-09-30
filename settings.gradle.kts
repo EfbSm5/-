@@ -21,3 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Agent"
 include(":app")
+include(":execution-fixture")
