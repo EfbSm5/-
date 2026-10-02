@@ -134,6 +134,8 @@ private fun HistoryEvent(event: RunTraceEvent) {
     if (event.actionType != TraceActionType.NONE) Text("动作：${event.actionType.historyLabel()}")
     if (event.actionType == TraceActionType.FINISH && event.event == TraceEvent.RUN_END) Text("模型报告结果，未独立验证")
     if (event.reason != TraceReason.NONE) Text("${event.reason.historyLabel()}（${event.reason.name.lowercase()}）")
+    event.modelFailure?.let { Text("模型失败类别：${it.historyLabel()}") }
+    event.modelFailure?.protocolReason?.let { Text("协议原因：${it.name.lowercase()}") }
 }
 
 internal fun RunHistoryStatus.historyLabel(): String = when (this) {

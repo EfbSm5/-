@@ -2,6 +2,7 @@ package com.example.agent.rootpilot.log
 
 import com.example.agent.rootpilot.model.ExecutableRootAction
 import com.example.agent.rootpilot.model.RootPilotAction
+import com.example.agent.rootpilot.deepseek.ModelFailure
 import java.util.UUID
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.buildJsonObject
@@ -39,6 +40,7 @@ data class RunTraceEvent(
     val event: TraceEvent,
     val status: TraceStatus,
     val reason: TraceReason,
+    val modelFailure: ModelFailure? = null,
 )
 
 /** A single invocation owns this trace. Only allowlisted fields can reach either sink. */
@@ -57,6 +59,7 @@ class RunTrace(
     val elapsedMs: Long get() = (clock.elapsedMillis() - startedAt).coerceAtLeast(0)
     var outcome: TraceStatus = TraceStatus.FAILED
     var reason: TraceReason = TraceReason.UNEXPECTED_ERROR
+    private var modelFailure: ModelFailure? = null
 
     fun action(action: RootPilotAction?) {
         actionType = when (action) {
@@ -73,9 +76,10 @@ class RunTrace(
         }
     }
 
-    fun fail(code: TraceReason) {
+    fun fail(code: TraceReason, diagnostic: ModelFailure? = null) {
         outcome = TraceStatus.FAILED
         reason = code
+        modelFailure = diagnostic.takeIf { code == TraceReason.MODEL_FAILED }
         record(TraceEvent.RESULT, TraceStatus.FAILED, code)
     }
 
@@ -97,7 +101,8 @@ class RunTrace(
         executable: ExecutableRootAction? = null,
         stage: TraceStage = this.stage,
     ) {
-        val typed = RunTraceEvent(runId, step, elapsedMs, actionType, stage, event, status, reasonCode)
+        val diagnostic = modelFailure.takeIf { reasonCode == TraceReason.MODEL_FAILED }
+        val typed = RunTraceEvent(runId, step, elapsedMs, actionType, stage, event, status, reasonCode, diagnostic)
         try { observer(typed) } catch (_: Exception) { }
         val line = buildJsonObject {
             put("runId", runId)
@@ -109,6 +114,11 @@ class RunTrace(
             put("actionType", typed.actionType.name.lowercase())
             put("result", status.name.lowercase())
             put("reasonCode", reasonCode.name.lowercase())
+            diagnostic?.let {
+                put("modelFailureCategory", it.category.name.lowercase())
+                it.httpStatus?.let { code -> put("modelHttpStatus", code) }
+                it.protocolReason?.let { code -> put("modelProtocolReason", code.name.lowercase()) }
+            }
             if (action is RootPilotAction.Tap && executable is ExecutableRootAction.Tap) {
                 put("normalizedX", action.x)
                 put("normalizedY", action.y)

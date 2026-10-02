@@ -91,7 +91,7 @@ class FileAgentController(
                     return DeepSeekActionResult.Failure("文件上下文已达上限，请缩小任务；已执行的写入不会撤销")
                 }
                 when (val response = client.streamToolChat(config, turns, FILE_TOOLS, effort, onUpdate)) {
-                    is ToolChatResult.Failure -> return DeepSeekActionResult.Failure(response.message)
+                    is ToolChatResult.Failure -> return DeepSeekActionResult.Failure(response.message, response.diagnostic)
                     is ToolChatResult.Success -> {
                         currentCoroutineContext().ensureActive()
                         if (response.toolCalls.isEmpty()) return DeepSeekActionResult.Success(response.content)

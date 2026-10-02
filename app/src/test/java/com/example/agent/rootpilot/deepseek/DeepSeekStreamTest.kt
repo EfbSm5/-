@@ -57,7 +57,7 @@ class DeepSeekStreamTest {
                 val result = if (vision) client.requestAction(DeepSeekVisionRequest(
                     server.config, ScreenshotFrame(byteArrayOf(1), 1, 1, "data:image/jpeg;base64,test"), emptyList(), 1,
                 )) {} else client.streamChat(server.config, listOf(ChatTurn("user", "hello")), ThinkingEffort.HIGH) {}
-                assertEquals(DeepSeekActionResult.Failure("DeepSeek 返回格式无法理解"), result)
+                assertEquals(DeepSeekActionResult.Failure("DeepSeek 返回格式无法理解", ModelFailure(ModelFailureCategory.RESPONSE_PROTOCOL)), result)
                 server.assertReleased()
             }
         }
@@ -71,7 +71,8 @@ class DeepSeekStreamTest {
                 socket.getOutputStream().write("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: ${bytes.size}\r\n\r\n".toByteArray() + bytes)
             }.use { server ->
                 val result = HttpDeepSeekClient().streamToolChat(server.config, listOf(ToolChatTurn("user", "hello")), listOf(toolSchema), ThinkingEffort.HIGH) {}
-                assertEquals(ToolChatResult.Failure("DeepSeek 返回格式无法理解"), result)
+                val reason = if (stream.startsWith("data: private")) ModelProtocolReason.INVALID_JSON else ModelProtocolReason.INCOMPLETE_STREAM
+                assertEquals(ToolChatResult.Failure("DeepSeek 返回格式无法理解", ModelFailure(ModelFailureCategory.RESPONSE_PROTOCOL, protocolReason = reason)), result)
                 server.assertReleased()
             }
         }
@@ -94,7 +95,7 @@ class DeepSeekStreamTest {
                     assertTrue(job.isCancelled)
                     assertFalse(result.isCompleted)
                 } else {
-                    assertEquals(ToolChatResult.Failure("DeepSeek 请求超时"), kotlinx.coroutines.withTimeout(2000) { result.await() })
+                    assertEquals(ToolChatResult.Failure("DeepSeek 请求超时", ModelFailure(ModelFailureCategory.TIMEOUT)), kotlinx.coroutines.withTimeout(2000) { result.await() })
                 }
                 server.assertReleased()
             }
@@ -213,7 +214,7 @@ class DeepSeekStreamTest {
     @Test(timeout = 10_000)
     fun malformedNetworkResponse_isSanitized() = runBlocking {
         Server { it.getOutputStream().write(response("data: private synthetic-token\n\n")) }.use { server ->
-            assertEquals(DeepSeekActionResult.Failure("DeepSeek 返回格式无法理解"), HttpDeepSeekClient(requestTimeoutMillis = 1500).streamChat(
+            assertEquals(DeepSeekActionResult.Failure("DeepSeek 返回格式无法理解", ModelFailure(ModelFailureCategory.RESPONSE_PROTOCOL)), HttpDeepSeekClient(requestTimeoutMillis = 1500).streamChat(
                 server.config, listOf(ChatTurn("user", "hello")), ThinkingEffort.HIGH,
             ) {})
             server.assertReleased()
@@ -240,7 +241,7 @@ class DeepSeekStreamTest {
     @Test(timeout = 10_000)
     fun suspendedCallback_isIncludedInTotalDeadline() = runBlocking {
         Server { it.getOutputStream().write(response(chunk(reasoning = "partial"))) }.use { server ->
-            assertEquals(DeepSeekActionResult.Failure("DeepSeek 请求超时"), HttpDeepSeekClient(requestTimeoutMillis = 500).streamChat(
+            assertEquals(DeepSeekActionResult.Failure("DeepSeek 请求超时", ModelFailure(ModelFailureCategory.TIMEOUT)), HttpDeepSeekClient(requestTimeoutMillis = 500).streamChat(
                 server.config, listOf(ChatTurn("user", "hello")), ThinkingEffort.HIGH,
             ) { awaitCancellation() })
             server.assertReleased()
@@ -286,7 +287,7 @@ class DeepSeekStreamTest {
                 }
             } catch (_: SocketException) { }
         }.use { server ->
-            assertEquals(DeepSeekActionResult.Failure("DeepSeek 请求超时"), HttpDeepSeekClient(requestTimeoutMillis = 500).streamChat(
+            assertEquals(DeepSeekActionResult.Failure("DeepSeek 请求超时", ModelFailure(ModelFailureCategory.TIMEOUT)), HttpDeepSeekClient(requestTimeoutMillis = 500).streamChat(
                 server.config, listOf(ChatTurn("user", "hello")), ThinkingEffort.MAX,
             ) {})
             server.assertReleased()

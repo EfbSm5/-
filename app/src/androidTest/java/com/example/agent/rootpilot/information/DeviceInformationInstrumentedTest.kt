@@ -148,7 +148,9 @@ class DeviceInformationInstrumentedTest {
                 }.also { result ->
                     if (result is ToolChatResult.Failure) {
                         InstrumentationRegistry.getInstrumentation().sendStatus(0, Bundle().apply {
-                            putString("modelFailureCategory", failureCategory(result.message))
+                            putString("modelFailureCategory", result.diagnostic.category.name)
+                            result.diagnostic.httpStatus?.let { putInt("modelHttpStatus", it) }
+                            result.diagnostic.protocolReason?.let { putString("modelProtocolReason", it.name) }
                             putInt("modelStep", request.step)
                             putInt("toolHistoryTurns", toolHistory.size)
                             putInt("reasoningChars", reasoningChars)
@@ -231,14 +233,6 @@ class DeviceInformationInstrumentedTest {
     }
 
     private fun arguments() = InstrumentationRegistry.getArguments()
-    private fun failureCategory(message: String): String = when (message) {
-        "手机工具消息格式无效或超出限制" -> "REQUEST_CONTRACT"
-        "DeepSeek 返回格式无法理解" -> "RESPONSE_PROTOCOL"
-        "DeepSeek 请求超时" -> "TIMEOUT"
-        "DeepSeek 网络请求失败" -> "NETWORK"
-        "API 地址不可用", "API 配置格式无效" -> "CONFIGURATION"
-        else -> Regex("HTTP ([0-9]{3})").find(message)?.groupValues?.get(1)?.let { "HTTP_$it" } ?: "UNCLASSIFIED"
-    }
     private fun assertFixture(observation: ScreenObservation) {
         assertEquals("fixture_foreground_required", FIXTURE_PACKAGE, observation.foregroundPackage)
         assertEquals("fixture_activity_required", FIXTURE_ACTIVITY, observation.foregroundActivity)

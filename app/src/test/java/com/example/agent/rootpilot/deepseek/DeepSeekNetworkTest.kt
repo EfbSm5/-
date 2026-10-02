@@ -62,7 +62,7 @@ class DeepSeekNetworkTest {
     fun toolBlockedHeadersAndBody_timeOutAndReleaseSocket() {
         for (headers in listOf(false, true)) {
             LocalServer { if (headers) writeHeaders(it) }.use { server ->
-                assertEquals(ToolChatResult.Failure("DeepSeek 请求超时"), requestTool(server, 500))
+                assertEquals(ToolChatResult.Failure("DeepSeek 请求超时", ModelFailure(ModelFailureCategory.TIMEOUT)), requestTool(server, 500))
                 assertTrue(server.closed.await(1, TimeUnit.SECONDS))
                 server.checkFailure()
             }
@@ -117,7 +117,7 @@ class DeepSeekNetworkTest {
             val start = System.nanoTime()
             val result = request(server, HttpDeepSeekClient(requestTimeoutMillis = 500))
             val elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)
-            assertEquals(DeepSeekActionResult.Failure("DeepSeek 请求超时"), result)
+            assertEquals(DeepSeekActionResult.Failure("DeepSeek 请求超时", ModelFailure(ModelFailureCategory.TIMEOUT)), result)
             assertTrue("deadline elapsed=$elapsed", elapsed in 350..1500)
             assertTrue("continuous body progress before deadline", sent.get() >= 5)
             assertTrue("deadline releases socket", server.closed.await(1, TimeUnit.SECONDS))
@@ -134,7 +134,7 @@ class DeepSeekNetworkTest {
     private fun assertDeadline(sendHeaders: Boolean) {
         LocalServer { socket -> if (sendHeaders) writeHeaders(socket) }.use { server ->
             assertEquals(
-                DeepSeekActionResult.Failure("DeepSeek 请求超时"),
+                DeepSeekActionResult.Failure("DeepSeek 请求超时", ModelFailure(ModelFailureCategory.TIMEOUT)),
                 request(server, HttpDeepSeekClient(requestTimeoutMillis = 500)),
             )
             assertTrue(server.closed.await(1, TimeUnit.SECONDS))
@@ -191,7 +191,7 @@ class DeepSeekNetworkTest {
                 "HTTP/1.1 200 OK\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n".toByteArray() + body,
             )
         }.use { server ->
-            assertEquals(DeepSeekActionResult.Failure("DeepSeek 返回格式无法理解"), request(server))
+            assertEquals(DeepSeekActionResult.Failure("DeepSeek 返回格式无法理解", ModelFailure(ModelFailureCategory.RESPONSE_PROTOCOL)), request(server))
             assertTrue(server.closed.await(1, TimeUnit.SECONDS))
             server.checkFailure()
         }
@@ -200,7 +200,7 @@ class DeepSeekNetworkTest {
     @Test(timeout = 10_000)
     fun disconnectedServer_isNotRetriedAndReturnsSanitizedFailure() {
         LocalServer { it.close() }.use { server ->
-            assertEquals(DeepSeekActionResult.Failure("DeepSeek 网络请求失败"), request(server))
+            assertEquals(DeepSeekActionResult.Failure("DeepSeek 网络请求失败", ModelFailure(ModelFailureCategory.NETWORK)), request(server))
             server.assertNoAdditionalConnections()
         }
     }

@@ -74,6 +74,7 @@ class DeepSeekClientTest {
                 worker.join(5_000)
                 assertFalse(worker.isAlive)
                 assertTrue(result.message.contains(status.toString()))
+                assertEquals(ModelFailure(ModelFailureCategory.HTTP, status), result.diagnostic)
                 assertFalse(result.message.contains("test-token"))
                 assertFalse(result.message.contains("private server"))
             }
@@ -92,6 +93,7 @@ class DeepSeekClientTest {
         )
         for (config in configs) {
             val result = HttpDeepSeekClient().testConnection(config) as DeepSeekActionResult.Failure
+            assertEquals(ModelFailureCategory.CONFIGURATION, result.diagnostic.category)
             assertFalse(result.message.contains("test-token"))
         }
     }

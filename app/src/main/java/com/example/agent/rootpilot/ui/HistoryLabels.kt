@@ -4,6 +4,18 @@ import com.example.agent.rootpilot.log.TraceEvent
 import com.example.agent.rootpilot.log.TraceReason
 import com.example.agent.rootpilot.log.TraceStage
 import com.example.agent.rootpilot.log.TraceStatus
+import com.example.agent.rootpilot.deepseek.ModelFailure
+import com.example.agent.rootpilot.deepseek.ModelFailureCategory
+
+internal fun ModelFailure.historyLabel(): String = when (category) {
+    ModelFailureCategory.REQUEST_CONTRACT -> "请求格式或限制"
+    ModelFailureCategory.HTTP -> "HTTP $httpStatus"
+    ModelFailureCategory.NETWORK -> "网络连接或读取"
+    ModelFailureCategory.TIMEOUT -> "请求超时"
+    ModelFailureCategory.RESPONSE_PROTOCOL -> "响应协议或格式"
+    ModelFailureCategory.CONFIGURATION -> "API 配置"
+    ModelFailureCategory.UNKNOWN -> "未分类"
+}
 
 internal fun TraceStage.historyLabel(): String = when (this) {
     TraceStage.RUN -> "任务"

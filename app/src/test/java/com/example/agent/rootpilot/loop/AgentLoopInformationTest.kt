@@ -19,6 +19,19 @@ class AgentLoopInformationTest {
     private fun query(name: String = "get_ui_tree", args: String = "{}") = ToolChatResult.Success("", "private-reasoning",
         listOf(ChatToolCall("call-1", name, args)))
 
+    @Test fun typedModelFailureReachesResultAndRunEndWithoutToolData() = runTest {
+        val diagnostic = ModelFailure(ModelFailureCategory.HTTP, 429)
+        val fixture = Fixture(listOf(query(), ToolChatResult.Failure("fixed failure", diagnostic)))
+        fixture.run()
+        assertEquals(TraceReason.MODEL_FAILED, fixture.trace.reason)
+        assertEquals(0, fixture.executions)
+        val failed = fixture.traceEvents.filter { it.reason == TraceReason.MODEL_FAILED }
+        assertEquals(listOf(TraceEvent.RESULT, TraceEvent.RUN_END), failed.map { it.event })
+        assertTrue(failed.all { it.modelFailure == diagnostic })
+        assertFalse(fixture.traceLines.joinToString().contains("private-content"))
+        assertFalse(fixture.traceLines.joinToString().contains("private-reasoning"))
+    }
+
     @Test fun nativeRoundTripKeepsReasoningAndResultIdentityAndDoesNotConsumeActionStep() = runTest {
         val fixture = Fixture(listOf(query(), tap))
         fixture.run()
@@ -142,7 +155,7 @@ class AgentLoopInformationTest {
     }
 
     private inner class Fixture(
-        private val responses: List<ToolChatResult.Success>,
+        private val responses: List<ToolChatResult>,
         private val samples: List<ScreenObservation> = listOf(initial),
         private val unavailable: Boolean = false,
         private val oversized: Boolean = false,

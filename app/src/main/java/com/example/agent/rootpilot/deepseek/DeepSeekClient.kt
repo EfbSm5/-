@@ -46,7 +46,9 @@ data class DeepSeekVisionRequest(
 sealed interface DeepSeekActionResult {
     data class Success(val rawActionJson: String) : DeepSeekActionResult
 
-    data class Failure(val message: String) : DeepSeekActionResult
+    data class Failure(val message: String, val diagnostic: ModelFailure = ModelFailure()) : DeepSeekActionResult {
+        override fun toString() = "DeepSeekActionResult.Failure(diagnostic=$diagnostic)"
+    }
 }
 
 interface DeepSeekClient {
@@ -64,7 +66,7 @@ interface DeepSeekClient {
         onUpdate: suspend (ModelStreamSnapshot) -> Unit,
     ): ToolChatResult = when (val result = requestAction(request, onUpdate)) {
         is DeepSeekActionResult.Success -> ToolChatResult.Success(result.rawActionJson, "", emptyList())
-        is DeepSeekActionResult.Failure -> ToolChatResult.Failure(result.message)
+        is DeepSeekActionResult.Failure -> ToolChatResult.Failure(result.message, result.diagnostic)
     }
 }
 
@@ -114,7 +116,7 @@ class HttpDeepSeekClient(
                 request, toolHistory, allowTools, SYSTEM_PROMPT, buildUserPrompt(request, allowInformationQueries = true),
             )
         } catch (_: IllegalArgumentException) {
-            return ToolChatResult.Failure("手机工具消息格式无效或超出限制")
+            return ToolChatResult.Failure("手机工具消息格式无效或超出限制", ModelFailure(ModelFailureCategory.REQUEST_CONTRACT))
         }
         return request(request.config, body, ToolChatResult::Failure) { response ->
             val source = response?.source() ?: throw SerializationException("Missing stream")
@@ -129,7 +131,7 @@ class HttpDeepSeekClient(
         onUpdate: suspend (ModelStreamSnapshot) -> Unit,
     ): DeepSeekActionResult {
         if (messages.isEmpty() || messages.any { it.role !in setOf("system", "user", "assistant") }) {
-            return DeepSeekActionResult.Failure("聊天消息格式无效")
+            return DeepSeekActionResult.Failure("聊天消息格式无效", ModelFailure(ModelFailureCategory.REQUEST_CONTRACT))
         }
         val body = buildJsonObject {
             put("model", config.model)
@@ -177,7 +179,7 @@ class HttpDeepSeekClient(
         val body = try {
             buildToolChatRequest(config, messages, tools, effort)
         } catch (_: IllegalArgumentException) {
-            return ToolChatResult.Failure("工具聊天消息格式无效或超出限制")
+            return ToolChatResult.Failure("工具聊天消息格式无效或超出限制", ModelFailure(ModelFailureCategory.REQUEST_CONTRACT))
         }
         return request(config, body, ToolChatResult::Failure) { response ->
             val source = response?.source() ?: throw SerializationException("Missing stream")
@@ -201,12 +203,12 @@ class HttpDeepSeekClient(
     private suspend fun <T> request(
         config: RootPilotConfig,
         body: String,
-        failure: (String) -> T,
+        failure: (String, ModelFailure) -> T,
         readResponse: suspend (ResponseBody?) -> T,
     ): T =
         withContext(dispatcher) {
             config.apiValidationError()?.let {
-                return@withContext failure(it)
+                return@withContext failure(it, ModelFailure(ModelFailureCategory.CONFIGURATION))
             }
 
             val call = try {
@@ -231,7 +233,7 @@ class HttpDeepSeekClient(
                     timeout().timeout(requestTimeoutMillis, TimeUnit.MILLISECONDS)
                 }
             } catch (_: IllegalArgumentException) {
-                return@withContext failure("API 地址不可用")
+                return@withContext failure("API 地址不可用", ModelFailure(ModelFailureCategory.CONFIGURATION))
             }
 
             withTimeoutOrNull(requestTimeoutMillis) {
@@ -257,7 +259,7 @@ class HttpDeepSeekClient(
                                     429 -> "请求频率或额度受限（HTTP 429），请稍后重试"
                                     in 300..399 -> "API 返回重定向，已拒绝转发凭据（HTTP $responseCode）"
                                     else -> "DeepSeek 请求失败，HTTP $responseCode"
-                                },
+                                }, ModelFailure(ModelFailureCategory.HTTP, responseCode),
                             )
                         }
                         try {
@@ -271,18 +273,20 @@ class HttpDeepSeekClient(
                     throw error
                 } catch (_: InterruptedIOException) {
                     currentCoroutineContext().ensureActive()
-                    failure("DeepSeek 请求超时")
+                    failure("DeepSeek 请求超时", ModelFailure(ModelFailureCategory.TIMEOUT))
+                } catch (error: ModelProtocolException) {
+                    failure("DeepSeek 返回格式无法理解", ModelFailure(ModelFailureCategory.RESPONSE_PROTOCOL, protocolReason = error.reason))
                 } catch (_: SerializationException) {
-                    failure("DeepSeek 返回格式无法理解")
+                    failure("DeepSeek 返回格式无法理解", ModelFailure(ModelFailureCategory.RESPONSE_PROTOCOL))
                 } catch (_: IOException) {
                     currentCoroutineContext().ensureActive()
-                    failure("DeepSeek 网络请求失败")
+                    failure("DeepSeek 网络请求失败", ModelFailure(ModelFailureCategory.NETWORK))
                 } catch (_: IllegalArgumentException) {
-                    failure("API 配置格式无效")
+                    failure("API 配置格式无效", ModelFailure(ModelFailureCategory.CONFIGURATION))
                 } finally {
                     cancellation.cancel()
                 }
-            } ?: failure("DeepSeek 请求超时")
+            } ?: failure("DeepSeek 请求超时", ModelFailure(ModelFailureCategory.TIMEOUT))
         }
 
     private fun buildRequest(request: DeepSeekVisionRequest, stream: Boolean = false): String = buildJsonObject {

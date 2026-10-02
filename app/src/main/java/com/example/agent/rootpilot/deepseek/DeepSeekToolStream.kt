@@ -34,7 +34,9 @@ internal suspend fun readDeepSeekToolStream(
     var lastUpdate = 0L
     var published: ModelStreamSnapshot? = null
 
-    fun invalid(): Nothing = throw SerializationException("Invalid or incomplete tool stream")
+    fun invalid(reason: ModelProtocolReason = ModelProtocolReason.INVALID_SHAPE): Nothing = throw ModelProtocolException(reason)
+    fun parse(value: String) = try { Json.parseToJsonElement(value) }
+        catch (_: SerializationException) { invalid(ModelProtocolReason.INVALID_JSON) }
     fun JsonObject.text(key: String): String? {
         val value = this[key] ?: return null
         if (value == JsonNull) return null
@@ -62,13 +64,13 @@ internal suspend fun readDeepSeekToolStream(
         val line = try {
             source.readUtf8LineStrict(MAX_EVENT_BYTES)
         } catch (_: EOFException) {
-            invalid()
+            invalid(if (source.buffer.size > MAX_EVENT_BYTES) ModelProtocolReason.STREAM_LIMIT else ModelProtocolReason.INCOMPLETE_STREAM)
         }
         // UTF-8 length plus two conservatively bounds either LF or CRLF delimiters.
         val bytes = line.toByteArray(Charsets.UTF_8).size + 2L
         eventBytes += bytes
         totalBytes += bytes
-        if (eventBytes > MAX_EVENT_BYTES || totalBytes > MAX_STREAM_BYTES) invalid()
+        if (eventBytes > MAX_EVENT_BYTES || totalBytes > MAX_STREAM_BYTES) invalid(ModelProtocolReason.STREAM_LIMIT)
         if (line.isNotEmpty()) {
             if (line == "data" || line.startsWith("data:")) {
                 if (data.isNotEmpty()) data.append('\n')
@@ -82,14 +84,17 @@ internal suspend fun readDeepSeekToolStream(
         data.setLength(0)
         if (event == "[DONE]") {
             when (finish) {
-                "stop" -> if (calls.isNotEmpty() || content.isBlank()) invalid()
+                "stop" -> {
+                    if (calls.isNotEmpty()) invalid(ModelProtocolReason.FINISH_MISMATCH)
+                    if (content.isBlank()) invalid(ModelProtocolReason.EMPTY_OUTPUT)
+                }
                 "tool_calls" -> {
-                    if (calls.isEmpty() || calls.keys.toList() != (0 until calls.size).toList()) invalid()
+                    if (calls.isEmpty() || calls.keys.toList() != (0 until calls.size).toList()) invalid(ModelProtocolReason.TOOL_IDENTITY)
                     calls.values.forEach {
-                        if (Json.parseToJsonElement(it.arguments.toString()) !is JsonObject) invalid()
+                        if (parse(it.arguments.toString()) !is JsonObject) invalid(ModelProtocolReason.TOOL_ARGUMENTS)
                     }
                 }
-                else -> invalid()
+                else -> invalid(ModelProtocolReason.MISSING_FINISH)
             }
             publish(final = true)
             currentCoroutineContext().ensureActive()
@@ -97,14 +102,15 @@ internal suspend fun readDeepSeekToolStream(
                 ChatToolCall(it.id, it.name, it.arguments.toString())
             })
         }
-        val root = Json.parseToJsonElement(event) as? JsonObject ?: invalid()
-        if ("error" in root) invalid()
+        val root = parse(event) as? JsonObject ?: invalid()
+        if ("error" in root) invalid(ModelProtocolReason.SERVER_ERROR_CHUNK)
         val choices = root["choices"] as? JsonArray ?: invalid()
         if (choices.isEmpty()) {
             if (root["usage"] !is JsonObject) invalid()
             continue
         }
-        if (choices.size != 1 || finish != null) invalid()
+        if (finish != null) invalid(ModelProtocolReason.POST_FINISH_CHUNK)
+        if (choices.size != 1) invalid()
         val choice = choices[0] as? JsonObject ?: invalid()
         if (choice.index() != 0) invalid()
         val delta = choice["delta"] as? JsonObject ?: invalid()
@@ -112,10 +118,12 @@ internal suspend fun readDeepSeekToolStream(
         if (delta.text("role")?.let { it != "assistant" } == true) invalid()
         val thought = delta.text("reasoning_content").orEmpty()
         val answer = delta.text("content").orEmpty()
-        if (reasoning.length.toLong() + content.length + thought.length + answer.length > MAX_STREAM_TEXT_CHARS) invalid()
+        if (reasoning.length.toLong() + content.length + thought.length + answer.length > MAX_STREAM_TEXT_CHARS) invalid(ModelProtocolReason.STREAM_LIMIT)
         if ("tool_calls" in delta) {
+            if (delta["tool_calls"] == JsonNull) invalid(ModelProtocolReason.NULL_TOOL_CALLS)
             val fragments = delta["tool_calls"] as? JsonArray ?: invalid()
-            if (fragments.isEmpty() || fragments.size > MAX_TOOL_CALLS) invalid()
+            if (fragments.isEmpty()) invalid(ModelProtocolReason.EMPTY_TOOL_CALLS)
+            if (fragments.size > MAX_TOOL_CALLS) invalid(ModelProtocolReason.TOOL_IDENTITY)
             val eventIndices = mutableSetOf<Int>()
             fragments.forEach { element ->
                 val fragment = element as? JsonObject ?: invalid()
@@ -129,20 +137,22 @@ internal suspend fun readDeepSeekToolStream(
                     val name = function.text("name") ?: invalid()
                     if (fragment.text("type") != "function" || id.isBlank() || id.length > MAX_TOOL_ID_CHARS ||
                         !ids.add(id) || !TOOL_NAME_PATTERN.matches(name) || arguments.length > MAX_TOOL_ARGUMENT_CHARS
-                    ) invalid()
+                    ) invalid(ModelProtocolReason.TOOL_IDENTITY)
                     calls[index] = PendingTool(id, name, StringBuilder(arguments))
                 } else {
                     // The API puts identity in the first fragment only; subsequent fragments append arguments.
                     if ("id" in fragment || "type" in fragment || "name" in function ||
                         existing.arguments.length.toLong() + arguments.length > MAX_TOOL_ARGUMENT_CHARS
-                    ) invalid()
+                    ) invalid(ModelProtocolReason.TOOL_ARGUMENTS)
                     existing.arguments.append(arguments)
                 }
             }
         }
         val end = choice.text("finish_reason")
         if (end != null) {
-            if (end !in setOf("stop", "tool_calls") || (end == "stop") != calls.isEmpty()) invalid()
+            if (end == "length") invalid(ModelProtocolReason.OUTPUT_LIMIT)
+            if (end !in setOf("stop", "tool_calls")) invalid(ModelProtocolReason.UNSUPPORTED_FINISH)
+            if ((end == "stop") != calls.isEmpty()) invalid(ModelProtocolReason.FINISH_MISMATCH)
             finish = end
         }
         reasoning.append(thought)

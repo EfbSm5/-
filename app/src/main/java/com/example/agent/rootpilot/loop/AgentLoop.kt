@@ -234,7 +234,7 @@ class AgentLoop(
                 )
                 val decision = when (modelResult) {
                     is ToolChatResult.Failure -> {
-                        trace.fail(TraceReason.MODEL_FAILED)
+                        trace.fail(TraceReason.MODEL_FAILED, modelResult.diagnostic)
                         onEvent(AgentLoopEvent.Failed(modelResult.message))
                         return
                     }

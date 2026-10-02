@@ -42,7 +42,9 @@ sealed interface ToolChatResult {
         override fun toString() = "ToolChatResult.Success(contentLength=${content.length}, reasoningLength=${reasoning.length}, toolCallCount=${toolCalls.size})"
     }
 
-    data class Failure(val message: String) : ToolChatResult
+    data class Failure(val message: String, val diagnostic: ModelFailure = ModelFailure()) : ToolChatResult {
+        override fun toString() = "ToolChatResult.Failure(diagnostic=$diagnostic)"
+    }
 }
 
 internal const val MAX_TOOL_CALLS = 128
