@@ -203,9 +203,14 @@ class RootPilotLiveOverlayInstrumentedTest {
                     withContext(Dispatchers.Main.immediate) {
                         val panelOverlay = requireNotNull(overlay)
                         when (event) {
-                            is AgentLoopEvent.Capturing -> {
+                            is AgentLoopEvent.Capturing, is AgentLoopEvent.QueryingInformation -> {
                                 panelOverlay.hide()
-                                state = state.copy(status = RootPilotStatus.CAPTURING, step = event.step)
+                                val step = when (event) {
+                                    is AgentLoopEvent.Capturing -> event.step
+                                    is AgentLoopEvent.QueryingInformation -> event.step
+                                    else -> error("unexpected_capture_event")
+                                }
+                                state = state.copy(status = RootPilotStatus.CAPTURING, step = step)
                                 report("capturing")
                             }
                             is AgentLoopEvent.ScreenshotCaptured -> state = state.copy(frame = event.frame)

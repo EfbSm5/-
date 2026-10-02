@@ -19,6 +19,7 @@ import com.example.agent.rootpilot.apps.AndroidAppCatalog
 import com.example.agent.rootpilot.apps.AllowlistedAppCatalog
 import com.example.agent.rootpilot.apps.AppLaunchAllowlistStore
 import com.example.agent.rootpilot.input.AndroidImeEnvironment
+import com.example.agent.rootpilot.information.AndroidUiTreeProvider
 import com.example.agent.rootpilot.log.AgentLogRepository
 import com.example.agent.rootpilot.log.InMemoryAgentLogRepository
 import com.example.agent.rootpilot.loop.AgentLoop
@@ -56,7 +57,8 @@ class RootPilotService : Service(), RootPilotRunHost {
         }
         val appCatalog = AllowlistedAppCatalog(AndroidAppCatalog(this), AppLaunchAllowlistStore.create(this))
         val textInput = AndroidImeEnvironment.createInput(this)
-        val rootExecutor = SuRootExecutor(appCatalog = appCatalog, typeText = textInput::type)
+        val rootExecutor = SuRootExecutor(appCatalog = appCatalog, typeText = textInput::type,
+            uiTreeProvider = AndroidUiTreeProvider(packageName))
         controller = RootPilotRunController(
             taskState = taskState,
             scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),

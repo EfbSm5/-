@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.ComponentName
 import android.view.inputmethod.InputMethodManager
 import com.example.agent.rootpilot.input.RootPilotInputMethodService
+import com.example.agent.rootpilot.information.RootPilotAccessibilityService
 import android.net.Uri
 import android.provider.Settings
 import android.os.Build
@@ -71,6 +72,7 @@ class RootPilotActivity : ComponentActivity() {
                 val browserState by viewModel.workspaceBrowserState.collectAsState()
                 val fileWorkspaceBusy by viewModel.fileWorkspaceBusy.collectAsState()
                 val historyState by viewModel.historyState.collectAsState()
+                val uiTreeConnected by RootPilotAccessibilityService.connected.collectAsState()
                 DisposableEffect(apiState.editing) {
                     if (apiState.editing) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                     else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -149,6 +151,8 @@ class RootPilotActivity : ComponentActivity() {
                             Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")),
                         )
                     },
+                    uiTreeConnected = uiTreeConnected,
+                    onAccessibilitySettings = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
                 )
             }
         }

@@ -9,6 +9,7 @@ internal fun TraceStage.historyLabel(): String = when (this) {
     TraceStage.RUN -> "任务"
     TraceStage.SCREENSHOT -> "截图"
     TraceStage.MODEL -> "模型请求"
+    TraceStage.INFORMATION -> "页面信息查询"
     TraceStage.PARSE -> "解析"
     TraceStage.POLICY -> "动作校验"
     TraceStage.APPROVAL -> "人工确认"
@@ -29,6 +30,9 @@ internal fun TraceEvent.historyLabel(): String = when (this) {
     TraceEvent.TODO_SAVED -> "待办已保存"
     TraceEvent.STOP_REQUESTED -> "请求停止（尚未结束）"
     TraceEvent.CONTROL -> "控制事件"
+    TraceEvent.READ_SCREEN_CONTEXT -> "读取屏幕状态"
+    TraceEvent.READ_ACTIVITY_STACK -> "读取 Activity 堆栈"
+    TraceEvent.READ_UI_TREE -> "读取页面控件结构"
 }
 
 internal fun TraceStatus.historyLabel(): String = when (this) {
@@ -70,6 +74,9 @@ internal fun TraceReason.historyLabel(): String = when (this) {
     TraceReason.SNAPSHOT_READ_FAILED -> "恢复记录读取失败"
     TraceReason.SNAPSHOT_WRITE_FAILED -> "恢复记录写入失败"
     TraceReason.SNAPSHOT_CLEAR_FAILED -> "恢复记录清除失败"
+    TraceReason.INFORMATION_CALL_INVALID -> "信息工具请求无效"
+    TraceReason.INFORMATION_LIMIT -> "信息查询已达到上限"
+    TraceReason.INFORMATION_UNAVAILABLE -> "页面信息不可用"
 }
 
 internal fun historyDuration(elapsedMs: Long): String {

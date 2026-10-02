@@ -5,9 +5,11 @@ import com.example.agent.rootpilot.action.ActionParseResult
 import com.example.agent.rootpilot.action.ActionPolicy
 import com.example.agent.rootpilot.action.ActionPolicyResult
 import com.example.agent.rootpilot.apps.AppCatalog
-import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.DeepSeekClient
 import com.example.agent.rootpilot.deepseek.DeepSeekVisionRequest
+import com.example.agent.rootpilot.deepseek.ToolChatResult
+import com.example.agent.rootpilot.deepseek.ToolChatTurn
+import com.example.agent.rootpilot.information.DeviceInfoTool
 import com.example.agent.rootpilot.deepseek.ModelStreamSnapshot
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotConfig
@@ -25,6 +27,8 @@ import com.example.agent.agent.model.CreateTodo
 import com.example.agent.agent.planning.TodoRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.put
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.currentCoroutineContext
@@ -68,6 +72,8 @@ sealed interface AgentLoopEvent {
     data class ScreenshotCaptured(val step: Int, val frame: ScreenshotFrame) : AgentLoopEvent
 
     data class RequestingModel(val step: Int) : AgentLoopEvent
+
+    data class QueryingInformation(val step: Int, val tool: DeviceInfoTool) : AgentLoopEvent
 
     data class ModelOutput(val step: Int, val snapshot: ModelStreamSnapshot) : AgentLoopEvent
 
@@ -158,6 +164,7 @@ class AgentLoop(
         var sameFrameCount = 0
         var previousAction: RootPilotAction? = null
         var sameActionCount = 0
+        var informationQueries = 0
 
         for (step in 0 until request.maxSteps) {
             trace.step = step
@@ -203,11 +210,13 @@ class AgentLoop(
             var action: RootPilotAction? = null
             var parseRetryUsed = false
             var requestHistory: List<String> = history
+            val toolHistory = mutableListOf<ToolChatTurn>()
+            var stepInformationQueries = 0
             while (action == null) {
                 trace.stage = TraceStage.MODEL
                 trace.record(TraceEvent.START, TraceStatus.STARTED)
                 onEvent(AgentLoopEvent.RequestingModel(step))
-                val modelResult = deepSeekClient.requestAction(
+                val modelResult = deepSeekClient.requestDecision(
                     DeepSeekVisionRequest(
                         config = request.config,
                         frame = frame,
@@ -218,18 +227,77 @@ class AgentLoop(
                         observation = observation,
                         observationStartedAtMillis = beforeCapture.observedAtMillis,
                     ),
+                    toolHistory = toolHistory,
+                    allowTools = stepInformationQueries < MAX_INFORMATION_QUERIES_PER_STEP &&
+                        informationQueries < MAX_INFORMATION_QUERIES_PER_RUN,
                     onUpdate = { onEvent(AgentLoopEvent.ModelOutput(step, it)) },
                 )
-                val rawActionJson = when (modelResult) {
-                    is DeepSeekActionResult.Failure -> {
+                val decision = when (modelResult) {
+                    is ToolChatResult.Failure -> {
                         trace.fail(TraceReason.MODEL_FAILED)
                         onEvent(AgentLoopEvent.Failed(modelResult.message))
                         return
                     }
 
-                    is DeepSeekActionResult.Success -> modelResult.rawActionJson
+                    is ToolChatResult.Success -> modelResult
                 }
                 trace.record(TraceEvent.RESULT, TraceStatus.SUCCESS)
+                if (decision.toolCalls.isNotEmpty()) {
+                    trace.stage = TraceStage.INFORMATION
+                    if (stepInformationQueries >= MAX_INFORMATION_QUERIES_PER_STEP ||
+                        informationQueries >= MAX_INFORMATION_QUERIES_PER_RUN) {
+                        trace.fail(TraceReason.INFORMATION_LIMIT)
+                        onEvent(AgentLoopEvent.Failed("页面信息查询已达到上限，未执行动作"))
+                        return
+                    }
+                    val call = decision.toolCalls.singleOrNull()
+                    val tool = call?.let { DeviceInfoTool.fromWireName(it.name) }
+                    val args = call?.let {
+                        try { Json.parseToJsonElement(it.arguments) as? JsonObject } catch (_: IllegalArgumentException) { null }
+                    }
+                    if (call == null || tool == null || args == null || args.isNotEmpty()) {
+                        trace.fail(TraceReason.INFORMATION_CALL_INVALID)
+                        onEvent(AgentLoopEvent.Failed("只接受已提供的单个只读信息工具及空参数，未执行动作"))
+                        return
+                    }
+                    stepInformationQueries++
+                    informationQueries++
+                    // The host removes its model-preview overlay before collecting page semantics.
+                    onEvent(AgentLoopEvent.QueryingInformation(step, tool))
+                    currentCoroutineContext().ensureActive()
+                    trace.record(when (tool) {
+                        DeviceInfoTool.SCREEN_CONTEXT -> TraceEvent.READ_SCREEN_CONTEXT
+                        DeviceInfoTool.ACTIVITY_STACK -> TraceEvent.READ_ACTIVITY_STACK
+                        DeviceInfoTool.UI_TREE -> TraceEvent.READ_UI_TREE
+                    }, TraceStatus.STARTED)
+                    val beforeQuery = rootExecutor.observeScreen()
+                    if (!observation.sameWindow(beforeQuery) || observation.keyboardVisible != beforeQuery.keyboardVisible) {
+                        trace.fail(TraceReason.SCREEN_CONTEXT_CHANGED)
+                        onEvent(AgentLoopEvent.Failed("信息查询前窗口状态已变化或无法确认，未采集页面信息"))
+                        return
+                    }
+                    val result = rootExecutor.queryDeviceInfo(tool, beforeQuery)
+                    currentCoroutineContext().ensureActive()
+                    val afterQuery = rootExecutor.observeScreen()
+                    if (!beforeQuery.sameWindow(afterQuery) || beforeQuery.keyboardVisible != afterQuery.keyboardVisible) {
+                        trace.fail(TraceReason.SCREEN_CONTEXT_CHANGED)
+                        onEvent(AgentLoopEvent.Failed("信息查询期间窗口状态已变化或无法确认，未发送查询结果"))
+                        return
+                    }
+                    val text = result.toModelJson(tool, UUID.randomUUID().toString())
+                    if (text.toByteArray(Charsets.UTF_8).size > MAX_INFORMATION_RESULT_BYTES) {
+                        trace.fail(TraceReason.INFORMATION_LIMIT)
+                        onEvent(AgentLoopEvent.Failed("页面信息超过返回大小限制，未发送查询结果"))
+                        return
+                    }
+                    trace.record(TraceEvent.RESULT,
+                        if (result.unavailable == null) TraceStatus.SUCCESS else TraceStatus.FAILED,
+                        if (result.unavailable == null) TraceReason.NONE else TraceReason.INFORMATION_UNAVAILABLE)
+                    toolHistory += ToolChatTurn("assistant", decision.content, decision.reasoning, decision.toolCalls)
+                    toolHistory += ToolChatTurn("tool", text, toolCallId = call.id)
+                    continue
+                }
+                val rawActionJson = decision.content
                 trace.stage = TraceStage.PARSE
                 when (val parseResult = actionParser.parse(rawActionJson)) {
                     is ActionParseResult.Success -> action = parseResult.action
@@ -463,5 +531,8 @@ class AgentLoop(
         const val MAX_SAME_FRAME_REPEATS = 2
         const val MAX_SAME_ACTION_REPEATS = 2
         const val SCREEN_SETTLE_MILLIS = 500L
+        const val MAX_INFORMATION_QUERIES_PER_STEP = 3
+        const val MAX_INFORMATION_QUERIES_PER_RUN = 12
+        const val MAX_INFORMATION_RESULT_BYTES = 256 * 1024
     }
 }

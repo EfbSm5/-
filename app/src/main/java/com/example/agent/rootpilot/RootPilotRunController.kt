@@ -494,6 +494,11 @@ internal class RootPilotRunController(
                     persistRunSnapshot(RootPilotStatus.CAPTURING, event.step)
                 }
 
+                is AgentLoopEvent.QueryingInformation -> {
+                    updateState(status = RootPilotStatus.CAPTURING, step = event.step)
+                    persistRunSnapshot(RootPilotStatus.CAPTURING, event.step)
+                }
+
                 is AgentLoopEvent.ScreenshotCaptured -> {
                     updateState(
                         status = RootPilotStatus.CAPTURING,

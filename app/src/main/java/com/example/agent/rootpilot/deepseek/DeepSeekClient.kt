@@ -56,6 +56,16 @@ interface DeepSeekClient {
         request: DeepSeekVisionRequest,
         onUpdate: suspend (ModelStreamSnapshot) -> Unit,
     ): DeepSeekActionResult = requestAction(request)
+
+    suspend fun requestDecision(
+        request: DeepSeekVisionRequest,
+        toolHistory: List<ToolChatTurn>,
+        allowTools: Boolean,
+        onUpdate: suspend (ModelStreamSnapshot) -> Unit,
+    ): ToolChatResult = when (val result = requestAction(request, onUpdate)) {
+        is DeepSeekActionResult.Success -> ToolChatResult.Success(result.rawActionJson, "", emptyList())
+        is DeepSeekActionResult.Failure -> ToolChatResult.Failure(result.message)
+    }
 }
 
 enum class ThinkingEffort(val wireValue: String) { NONE("none"), LOW("low"), HIGH("high"), MAX("max") }
@@ -92,6 +102,25 @@ class HttpDeepSeekClient(
         request: DeepSeekVisionRequest,
         onUpdate: suspend (ModelStreamSnapshot) -> Unit,
     ): DeepSeekActionResult = request(request.config, buildRequest(request, stream = true), onUpdate)
+
+    override suspend fun requestDecision(
+        request: DeepSeekVisionRequest,
+        toolHistory: List<ToolChatTurn>,
+        allowTools: Boolean,
+        onUpdate: suspend (ModelStreamSnapshot) -> Unit,
+    ): ToolChatResult {
+        val body = try {
+            buildDeviceDecisionRequest(
+                request, toolHistory, allowTools, SYSTEM_PROMPT, buildUserPrompt(request, allowInformationQueries = true),
+            )
+        } catch (_: IllegalArgumentException) {
+            return ToolChatResult.Failure("手机工具消息格式无效或超出限制")
+        }
+        return request(request.config, body, ToolChatResult::Failure) { response ->
+            val source = response?.source() ?: throw SerializationException("Missing stream")
+            readDeepSeekToolStream(source, onUpdate)
+        }
+    }
 
     override suspend fun streamChat(
         config: RootPilotConfig,
@@ -298,9 +327,10 @@ class HttpDeepSeekClient(
         }
     }.toString()
 
-    private fun buildUserPrompt(request: DeepSeekVisionRequest): String = buildString {
+    private fun buildUserPrompt(request: DeepSeekVisionRequest, allowInformationQueries: Boolean = false): String = buildString {
         appendLine("根据当前 Android 截图执行用户任务。")
-        appendLine("只返回一个动作 JSON，不要 Markdown、解释或 Shell 命令。")
+        appendLine(if (allowInformationQueries) "可先使用已提供的只读信息工具；最终只返回一个动作 JSON。"
+            else "只返回一个动作 JSON，不要 Markdown、解释或 Shell 命令。")
         appendLine("用户任务：${request.config.task}")
         appendLine("当前本地时间（含时区偏移）：${java.time.OffsetDateTime.now()}")
         appendLine("当前步骤：${request.step + 1}")

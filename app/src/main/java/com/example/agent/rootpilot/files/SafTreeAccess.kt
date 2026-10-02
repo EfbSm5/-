@@ -13,7 +13,7 @@ internal class SafTreeAccess(
     private val tree: Uri,
     private val checkpoint: () -> Unit = {},
 ) {
-    internal class Node(val id: String, val name: String, val mime: String, val flags: Long, val size: Long?) {
+    internal class Node(val id: String, val name: String, val mime: String?, val flags: Long, val size: Long?, val modifiedAtMs: Long? = null) {
         val directory get() = mime == Document.MIME_TYPE_DIR
         override fun toString() = "SafNode(redacted)"
     }
@@ -24,7 +24,33 @@ internal class SafTreeAccess(
 
     private val rootId = DocumentsContract.getTreeDocumentId(tree)
     private val columns = arrayOf(Document.COLUMN_DOCUMENT_ID, Document.COLUMN_DISPLAY_NAME,
-        Document.COLUMN_MIME_TYPE, Document.COLUMN_FLAGS, Document.COLUMN_SIZE)
+        Document.COLUMN_MIME_TYPE, Document.COLUMN_FLAGS, Document.COLUMN_SIZE, Document.COLUMN_LAST_MODIFIED)
+
+    fun stat(path: String = ""): FileStat {
+        val node = resolve(path, allowRoot = true).node ?: fail(FileErrorCode.NOT_FOUND)
+        checkpoint()
+        return describe(node, path)
+    }
+
+    fun search(path: String, query: String, scope: FileSearchScope): FileSearchResult =
+        FileSearchEngine(object : FileSearchBackend<Node> {
+            override fun resolve(path: String): Node = this@SafTreeAccess.resolve(path, allowRoot = true).node
+                ?: fail(FileErrorCode.NOT_FOUND)
+            override fun describe(node: Node, path: String) = this@SafTreeAccess.describe(node, path)
+            override fun identity(node: Node) = node.id
+            override fun children(node: Node) = this@SafTreeAccess.children(node).map { it.name to it }
+            override fun open(node: Node, path: String): java.io.InputStream {
+                // Provider contents can change outside our process lock; revalidate the actual path.
+                val checked = this@SafTreeAccess.resolve(path).node ?: fail(FileErrorCode.NOT_FOUND)
+                if (checked.id != node.id) fail(FileErrorCode.CONFLICT)
+                requireText(checked)
+                checkpoint()
+                return resolver.openInputStream(uri(checked.id)) ?: fail(FileErrorCode.UNSUPPORTED_PROVIDER)
+            }
+        }, checkpoint).search(path, query, scope)
+
+    private fun describe(node: Node, path: String) =
+        FileStat(path, node.directory, node.mime, node.size, node.modifiedAtMs)
 
     fun root(): Node {
         val nodes = query(uri(rootId), false)
@@ -128,7 +154,7 @@ internal class SafTreeAccess(
     }
 
     private fun requireText(node: Node) {
-        if (node.directory || !(node.mime.startsWith("text/") || node.mime in setOf("application/json", "application/xml"))) {
+        if (node.directory || !(node.mime?.startsWith("text/") == true || node.mime in setOf("application/json", "application/xml"))) {
             fail(FileErrorCode.NOT_TEXT)
         }
         if (node.size != null && node.size > FileRules.MAX_BYTES) fail(FileErrorCode.TOO_LARGE)
@@ -152,7 +178,8 @@ internal class SafTreeAccess(
                 val id = it.requiredString(Document.COLUMN_DOCUMENT_ID)
                 val name = it.requiredString(Document.COLUMN_DISPLAY_NAME)
                 if (id.isEmpty() || FileRules.segments(name).size != 1) fail(FileErrorCode.UNSUPPORTED_PROVIDER)
-                val mime = it.requiredString(Document.COLUMN_MIME_TYPE)
+                val mimeIndex = it.getColumnIndex(Document.COLUMN_MIME_TYPE)
+                val mime = if (mimeIndex >= 0 && !it.isNull(mimeIndex)) it.getString(mimeIndex) else null
                 val flagIndex = it.getColumnIndex(Document.COLUMN_FLAGS)
                 if (flagIndex < 0 || it.isNull(flagIndex)) fail(FileErrorCode.UNSUPPORTED_PROVIDER)
                 val flags = it.getLong(flagIndex)
@@ -162,7 +189,9 @@ internal class SafTreeAccess(
                 val sizeIndex = it.getColumnIndex(Document.COLUMN_SIZE)
                 val size = if (sizeIndex >= 0 && !it.isNull(sizeIndex)) it.getLong(sizeIndex) else null
                 if (size != null && size < 0) fail(FileErrorCode.UNSUPPORTED_PROVIDER)
-                result += Node(id, name, mime, flags, size)
+                val modifiedIndex = it.getColumnIndex(Document.COLUMN_LAST_MODIFIED)
+                val modifiedAtMs = if (modifiedIndex >= 0 && !it.isNull(modifiedIndex)) it.getLong(modifiedIndex) else null
+                result += Node(id, name, mime, flags, size, modifiedAtMs)
             }
             result
         }

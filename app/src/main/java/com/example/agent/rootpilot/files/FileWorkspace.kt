@@ -99,6 +99,31 @@ class FileWorkspace(context: Context) : WorkspaceAccess {
         access.read(node)
     }
 
+    override suspend fun stat(path: String): FileStat = selectedRead { it.stat(path) }
+
+    override suspend fun search(path: String, query: String, scope: FileSearchScope): FileSearchResult =
+        selectedRead { it.search(path, query, scope) }
+
+    private suspend fun <T> selectedRead(block: (SafTreeAccess) -> T): T {
+        var token: String? = null
+        val result = operation {
+            val selected = requireSelection()
+            token = selected.token
+            block(access(selected)).also {
+                checkpoint()
+                if (requireSelection().token != selected.token) fail(FileErrorCode.CONFLICT)
+            }
+        }
+        // Selection can change while withContext dispatches its result back to the caller.
+        currentCoroutineContext().ensureActive()
+        synchronized(lock) {
+            sanitized {
+                if (requireSelection().token != token) fail(FileErrorCode.CONFLICT)
+            }
+        }
+        return result
+    }
+
     override suspend fun prepareCreate(path: String, content: String): PreparedFileChange = prepare {
         engine.prepareCreate(path, content)
     }

@@ -65,6 +65,8 @@ internal fun RootPilotSettingsContent(
     onCaptureScreen: () -> Unit,
     onSingleStep: () -> Unit,
     onOpenLegacyAgent: () -> Unit,
+    uiTreeConnected: Boolean,
+    onAccessibilitySettings: () -> Unit,
 ) {
     if (!showDebug && !showPermissions) {
         Text("API 配置", style = MaterialTheme.typography.titleMedium)
@@ -140,7 +142,7 @@ internal fun RootPilotSettingsContent(
             )
             Text("自动模式可执行点击和滑动；打开应用、输入文本及系统按键始终需要确认。",
                 style = MaterialTheme.typography.bodySmall)
-            Text("截图及勾选的可启动应用名称、包名会发送至所配置的 API 服务。",
+            Text("同意上传后，截图、当前任务的 Activity 信息、页面控件结构及勾选的应用名称、包名会发送至所配置的 API 服务。",
                 style = MaterialTheme.typography.bodySmall)
         }
         SettingsGroup("更多") {
@@ -165,6 +167,12 @@ internal fun RootPilotSettingsContent(
             Text("文本通过输入法写入当前光标位置，完成后恢复原输入法；不支持密码框。请先在系统设置中手动启用，平时仍使用常用输入法。",
                 style = MaterialTheme.typography.bodySmall)
             inputMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            Button(onClick = onAccessibilitySettings, enabled = !busy,
+                modifier = Modifier.fillMaxWidth().testTag("accessibility_settings")) {
+                Text(if (uiTreeConnected) "页面结构读取已连接 · 管理服务" else "启用页面结构读取（可选）")
+            }
+            Text("手动启用 RootPilot 页面结构读取后，任务可按需查询当前应用的控件文字、位置和状态。服务仅提供读取，未启用时仍可使用截图；读取结果不保存。",
+                style = MaterialTheme.typography.bodySmall)
         }
     }
     if (showDebug) {

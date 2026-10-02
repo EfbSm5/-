@@ -5,6 +5,13 @@ import com.example.agent.agent.planning.TodoRepository
 import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.DeepSeekClient
 import com.example.agent.rootpilot.deepseek.DeepSeekVisionRequest
+import com.example.agent.rootpilot.deepseek.ChatToolCall
+import com.example.agent.rootpilot.deepseek.ModelStreamSnapshot
+import com.example.agent.rootpilot.deepseek.ToolChatResult
+import com.example.agent.rootpilot.deepseek.ToolChatTurn
+import com.example.agent.rootpilot.information.DeviceInfoResult
+import com.example.agent.rootpilot.information.DeviceInfoSource
+import com.example.agent.rootpilot.information.DeviceInfoTool
 import com.example.agent.rootpilot.log.InMemoryAgentLogRepository
 import com.example.agent.rootpilot.log.TraceEvent
 import com.example.agent.rootpilot.log.TraceReason
@@ -38,6 +45,8 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -46,6 +55,57 @@ import org.junit.rules.TemporaryFolder
 @OptIn(ExperimentalCoroutinesApi::class)
 class RootPilotRunControllerTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test fun informationQueryUsesCapturingStateAndDoesNotPersistReceipt() = runTest {
+        val fixture = fixture()
+        fixture.informationFirst = true
+        fixture.query = {
+            assertEquals(RootPilotStatus.CAPTURING, fixture.state.status)
+            assertFalse(fixture.file.readText().contains("private-query-data"))
+            DeviceInfoResult(DeviceInfoSource.UI_SEMANTICS, 1, 2,
+                buildJsonObject { put("text", "private-query-data") })
+        }
+        fixture.start()
+        runCurrent()
+        assertEquals(1, fixture.queries)
+        assertEquals(2, fixture.modelCalls)
+        assertEquals(RootPilotStatus.WAITING_CONFIRMATION, fixture.state.status)
+        assertFalse(fixture.file.readText().contains("private-query-data"))
+        assertFalse(fixture.history.state.value.records.single().toString().contains("private-query-data"))
+        fixture.controller.confirmAction()
+        advanceUntilIdle()
+        assertEquals(1, fixture.executions)
+        assertFalse(fixture.file.exists())
+        fixture.controller.destroy()
+    }
+
+    @Test fun stoppingInformationQueryRetainsLeaseUntilQueryCleanupFinishes() = runTest {
+        val fixture = fixture()
+        fixture.informationFirst = true
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        fixture.query = {
+            try { awaitCancellation() } finally { withContext(NonCancellable) { entered.complete(Unit); release.await() } }
+        }
+        fixture.start()
+        runCurrent()
+        assertEquals(1, fixture.queries)
+        val snapshot = fixture.file.readText()
+        fixture.controller.stopAgent(1)
+        runCurrent()
+        assertTrue(entered.isCompleted)
+        assertTrue(fixture.controller.busy)
+        assertEquals(RootPilotStatus.STOPPING, fixture.state.status)
+        assertEquals(snapshot, fixture.file.readText())
+        assertEquals(0, fixture.executions)
+        assertEquals(1, fixture.modelCalls)
+        release.complete(Unit)
+        advanceUntilIdle()
+        assertFalse(fixture.controller.busy)
+        assertFalse(fixture.file.exists())
+        assertEquals(RootPilotStatus.STOPPED, fixture.state.status)
+        fixture.controller.destroy()
+    }
 
     @Test fun historyWriteFailureDoesNotFailOrRetryExecutedAction() = runTest {
         val fixture = fixture()
@@ -461,6 +521,11 @@ class RootPilotRunControllerTest {
         val state get() = shared.uiState.value
         var captures = 0
         var modelCalls = 0
+        var queries = 0
+        var informationFirst = false
+        var query: suspend () -> DeviceInfoResult = {
+            DeviceInfoResult(DeviceInfoSource.UI_SEMANTICS, 1, 2, buildJsonObject {})
+        }
         var executions = 0
         var rootChecks = 0
         var cancels = 0
@@ -475,6 +540,10 @@ class RootPilotRunControllerTest {
                 "com.example.fixture", "com.example.fixture.Main", "com.example.fixture", "abc", false, 1L,
             )
             override suspend fun checkRoot(): RootExecutionResult { rootChecks++; return check() }
+            override suspend fun queryDeviceInfo(tool: DeviceInfoTool, expected: com.example.agent.rootpilot.screen.ScreenObservation): DeviceInfoResult {
+                queries++
+                return query()
+            }
             override suspend fun captureScreen(): RootScreenshotResult = error("No real screenshots")
             override suspend fun execute(action: ExecutableRootAction): RootExecutionResult {
                 executions++
@@ -504,6 +573,13 @@ class RootPilotRunControllerTest {
                     override suspend fun requestAction(request: DeepSeekVisionRequest): DeepSeekActionResult {
                         modelCalls++
                         return DeepSeekActionResult.Success(response)
+                    }
+                    override suspend fun requestDecision(request: DeepSeekVisionRequest, toolHistory: List<ToolChatTurn>,
+                        allowTools: Boolean, onUpdate: suspend (ModelStreamSnapshot) -> Unit): ToolChatResult {
+                        modelCalls++
+                        return if (informationFirst && modelCalls == 1) ToolChatResult.Success("", "",
+                            listOf(ChatToolCall("query", "get_ui_tree", "{}")))
+                        else ToolChatResult.Success(response, "", emptyList())
                     }
                 },
                 rootExecutor = root,

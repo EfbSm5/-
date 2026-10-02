@@ -97,6 +97,8 @@ fun RootPilotScreen(
     chatContent: (@Composable () -> Unit)? = null,
     chatGenerating: Boolean = false,
     historyContent: (@Composable (onBack: () -> Unit) -> Unit)? = null,
+    uiTreeConnected: Boolean = false,
+    onAccessibilitySettings: () -> Unit = {},
 ) {
     var mode by rememberSaveable { mutableStateOf(ScreenMode.TASK) }
     var settingsOrigin by rememberSaveable { mutableStateOf(ScreenMode.TASK) }
@@ -234,7 +236,7 @@ fun RootPilotScreen(
                                     label = "描述目标和完成条件", minLines = 3, maxLines = 5, enabled = !busy,
                                 )
                                 ToggleRow(
-                                    label = "允许上传截图及前台应用、键盘状态",
+                                    label = "允许上传截图、页面结构及前台应用、键盘状态",
                                     checked = state.config.allowScreenUpload, enabled = !busy,
                                     onCheckedChange = onScreenUploadChanged,
                                 )
@@ -319,6 +321,7 @@ fun RootPilotScreen(
                             onManualConfirmationChanged = onManualConfirmationChanged,
                             onTestRoot = onTestRoot, onCaptureScreen = onCaptureScreen,
                             onSingleStep = onSingleStep, onOpenLegacyAgent = onOpenLegacyAgent,
+                            uiTreeConnected = uiTreeConnected, onAccessibilitySettings = onAccessibilitySettings,
                         )
                         if (mode == ScreenMode.SETTINGS && historyContent != null) {
                             Button(onClick = { mode = ScreenMode.HISTORY },

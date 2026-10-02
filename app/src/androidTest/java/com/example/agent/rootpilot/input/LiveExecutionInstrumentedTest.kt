@@ -179,7 +179,7 @@ class LiveExecutionInstrumentedTest {
         }
     }
 
-    private class FixtureClient(private val context: Context) {
+    internal class FixtureClient(private val context: Context) {
         private val uri = Uri.parse("content://com.example.rootpilot.fixture.state")
         fun verifyIdentity() {
             val provider = context.packageManager.resolveContentProvider(uri.authority!!, 0)

@@ -1,6 +1,8 @@
 <resources>
     <string name="app_name">Agent</string>
     <string name="rootpilot_input_method">RootPilot 临时文本输入</string>
+    <string name="rootpilot_accessibility_service">RootPilot 页面结构读取</string>
+    <string name="rootpilot_accessibility_description">任务需要时读取当前应用的控件文字、位置和状态，帮助识别页面。只有同意上传屏幕信息并启动任务后，才会将读取结果发送给配置的模型服务。此服务不点击、不输入，不保存页面内容。</string>
 
     <string-array name="agent_allowed_app_packages">
         <item>com.android.settings</item>

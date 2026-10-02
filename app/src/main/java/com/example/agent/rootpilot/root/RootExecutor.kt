@@ -5,6 +5,13 @@ import com.example.agent.rootpilot.model.RootPilotApp
 import com.example.agent.rootpilot.model.RootPilotKey
 import com.example.agent.rootpilot.apps.AppCatalog
 import com.example.agent.rootpilot.input.InputText
+import com.example.agent.rootpilot.information.DeviceInfoResult
+import com.example.agent.rootpilot.information.DeviceInfoSource
+import com.example.agent.rootpilot.information.DeviceInfoTool
+import com.example.agent.rootpilot.information.DeviceInfoUnavailable
+import com.example.agent.rootpilot.information.UiTreeProvider
+import com.example.agent.rootpilot.information.publicMetadata
+import com.example.agent.rootpilot.screen.ScreenObservation
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
@@ -48,6 +55,15 @@ interface RootExecutor {
 
     suspend fun checkRoot(): RootExecutionResult
 
+    suspend fun queryDeviceInfo(tool: DeviceInfoTool, expected: ScreenObservation): DeviceInfoResult {
+        val now = System.nanoTime() / 1_000_000
+        return DeviceInfoResult(when (tool) {
+            DeviceInfoTool.SCREEN_CONTEXT -> DeviceInfoSource.SCREEN_OBSERVER
+            DeviceInfoTool.ACTIVITY_STACK -> DeviceInfoSource.ACTIVITY_DUMP
+            DeviceInfoTool.UI_TREE -> DeviceInfoSource.UI_SEMANTICS
+        }, now, now, unavailable = DeviceInfoUnavailable.NOT_SUPPORTED)
+    }
+
     suspend fun captureScreen(): RootScreenshotResult
 
     suspend fun execute(action: ExecutableRootAction): RootExecutionResult
@@ -66,10 +82,35 @@ class SuRootExecutor(
     private val typeText: suspend (String, suspend (String) -> Boolean) -> RootExecutionResult = { _, _ ->
         RootExecutionResult.Failure("文本输入通道未配置")
     },
+    private val uiTreeProvider: UiTreeProvider? = null,
 ) : RootExecutor {
     private val screenObserver = RootScreenObserver()
+    private val deviceInfoProvider = RootDeviceInfoProvider()
 
     override suspend fun observeScreen() = screenObserver.observe()
+
+    override suspend fun queryDeviceInfo(tool: DeviceInfoTool, expected: ScreenObservation): DeviceInfoResult = when (tool) {
+        DeviceInfoTool.SCREEN_CONTEXT -> {
+            val startedAt = System.nanoTime() / 1_000_000
+            val current = screenObserver.observe()
+            val matches = expected.foregroundPackage != null && expected.foregroundActivity != null &&
+                expected.focusedPackage != null && expected.focusedWindowId != null &&
+                expected.foregroundPackage == current.foregroundPackage &&
+                expected.foregroundActivity == current.foregroundActivity &&
+                expected.focusedPackage == current.focusedPackage &&
+                expected.focusedWindowId == current.focusedWindowId &&
+                expected.keyboardVisible == current.keyboardVisible
+            if (matches) DeviceInfoResult(DeviceInfoSource.SCREEN_OBSERVER, startedAt,
+                current.observedAtMillis, current.publicMetadata())
+            else DeviceInfoResult(DeviceInfoSource.SCREEN_OBSERVER, startedAt,
+                current.observedAtMillis, unavailable = DeviceInfoUnavailable.TARGET_NOT_READY)
+        }
+        DeviceInfoTool.ACTIVITY_STACK -> deviceInfoProvider.activityStack(expected)
+        DeviceInfoTool.UI_TREE -> uiTreeProvider?.query(expected) ?: run {
+            val now = System.nanoTime() / 1_000_000
+            DeviceInfoResult(DeviceInfoSource.UI_SEMANTICS, now, now, unavailable = DeviceInfoUnavailable.NOT_SUPPORTED)
+        }
+    }
     private val processLock = Any()
     private var activeProcess: Process? = null
     private var cancellationGeneration = 0L
@@ -145,6 +186,7 @@ class SuRootExecutor(
 
     override fun cancel() {
         screenObserver.cancel()
+        deviceInfoProvider.cancel()
         synchronized(processLock) {
             cancellationGeneration++
             activeProcess?.destroyForcibly()
