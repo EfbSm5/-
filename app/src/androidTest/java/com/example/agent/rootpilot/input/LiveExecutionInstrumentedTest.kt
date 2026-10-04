@@ -198,7 +198,11 @@ class LiveExecutionInstrumentedTest {
             catch (error: Exception) {
                 val reason = when (error) {
                     is SecurityException -> "permission_denied"
-                    is IllegalArgumentException -> "invalid_command"
+                    is IllegalArgumentException -> when (error.message) {
+                        "fixture_command_not_allowed" -> "invalid_command"
+                        "Unknown authority com.example.rootpilot.fixture.state" -> "unknown_provider"
+                        else -> "invalid_argument"
+                    }
                     is IllegalStateException -> "remote_state"
                     is NullPointerException -> "missing_result"
                     else -> "transport_failure"

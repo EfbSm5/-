@@ -2,6 +2,7 @@ package com.example.agent.rootpilot
 
 import android.app.KeyguardManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.Point
 import android.graphics.Rect
@@ -25,6 +26,7 @@ import com.example.agent.rootpilot.deepseek.ModelProtocolReason
 import com.example.agent.rootpilot.history.RunHistoryRecord
 import com.example.agent.rootpilot.history.RunHistoryStatus
 import com.example.agent.rootpilot.information.RootPilotAccessibilityService
+import com.example.agent.rootpilot.input.LiveExecutionInstrumentedTest.FixtureClient
 import com.example.agent.rootpilot.log.TraceActionType
 import com.example.agent.rootpilot.log.TraceEvent
 import com.example.agent.rootpilot.log.TraceReason
@@ -53,6 +55,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -68,12 +71,31 @@ import org.junit.runner.RunWith
 /**
  * Opt-in production Service/model/overlay acceptance. Launch RootPilot normally beforehand and
  * run instrumentation with --no-restart and liveVirtualCalculatorAcceptance=true.
- * No UiAutomation, fixture, main-display input, screenshot command, or direct confirmation API
- * is used. The fixed calculation may append history but never clears it. Only calculator frames
+ * No UiAutomation, screenshot command, or direct confirmation API is used. The isolation entry
+ * additionally requests three host ADB taps on a signed, content-free main-display fixture.
+ * The fixed calculation may append history but never clears it. Only calculator frames
  * already captured by the production virtual run are saved to a unique local cache directory.
  */
 @RunWith(AndroidJUnit4::class)
 class VirtualDisplayServiceAcceptanceInstrumentedTest {
+    @Test
+    fun realServiceStopsDuringVirtualModelRequest() = runBlocking {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("virtualStopModelAcceptance") == "true")
+        Acceptance(InstrumentationRegistry.getInstrumentation().targetContext, mode = Mode.STOP_MODEL).run()
+    }
+
+    @Test
+    fun realServiceStopsAtVirtualTapConfirmation() = runBlocking {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("virtualStopApprovalAcceptance") == "true")
+        Acceptance(InstrumentationRegistry.getInstrumentation().targetContext, mode = Mode.STOP_APPROVAL).run()
+    }
+
+    @Test
+    fun realServiceCalculatesWhileMainDisplayIsUsed() = runBlocking {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("virtualIsolationAcceptance") == "true")
+        Acceptance(InstrumentationRegistry.getInstrumentation().targetContext, mode = Mode.ISOLATION).run()
+    }
+
     @Test
     fun realServiceCalculatesOnOwnedVirtualDisplay() {
         assumeTrue(InstrumentationRegistry.getArguments().getString("liveVirtualCalculatorAcceptance") == "true")
@@ -198,7 +220,10 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
     private data class PriorRun(val id: String, val directory: String)
     private data class PriorChain(val firstKeyIndex: Int, val receipts: List<PriorRun>)
 
-    private class Acceptance(private val context: Context, private val prior: PriorChain? = null) {
+    private enum class Mode { FULL, STOP_MODEL, STOP_APPROVAL, ISOLATION }
+
+    private class Acceptance(private val context: Context, private val prior: PriorChain? = null,
+        private val mode: Mode = Mode.FULL) {
         private val firstKeyIndex = prior?.firstKeyIndex ?: 0
         private val remainingKeys = KEYS.size - firstKeyIndex
         private val manager = context.getSystemService(DisplayManager::class.java) ?: fail(Reason.DISPLAY_IDENTITY)
@@ -207,7 +232,9 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
         private val originalState = RootPilotService.uiState.value
         private val originalConfig = originalState.config
         private val previousIds = history.value.records.map { it.id }.toSet()
-        private val evidence = Evidence(firstKeyIndex, prior?.receipts?.lastOrNull()?.id.orEmpty())
+        private val evidence = Evidence(firstKeyIndex, prior?.receipts?.lastOrNull()?.id.orEmpty(), mode)
+        private val fixture = if (mode == Mode.ISOLATION) FixtureClient(context) else null
+        private var fixtureLaunched = false
         private var originalSelection: ByteArray? = null
         private var installedSelection: ByteArray? = null
         private var originalIme: String? = null
@@ -230,10 +257,14 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                     execute()
                 }
             } catch (error: Throwable) {
+                evidence.failureStage = evidence.stage
                 failure = reason(error)
             } finally {
                 withContext(NonCancellable) {
                     cleanup()
+                    try {
+                        record()?.let { evidence.directory?.resolve("history.json")?.writeText(Json.encodeToString(it)) }
+                    } catch (_: Exception) { if (failure == null) failure = Reason.ARTIFACT_WRITE }
                     evidence.failure = failure?.name ?: "none"
                     evidence.passed = failure == null && evidence.bodyComplete && evidence.cleanupConfirmed &&
                         evidence.configRestored && evidence.allowlistRestored
@@ -259,6 +290,7 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
             check(RootPilotAccessibilityService.connectedService != null, Reason.ACCESSIBILITY_UNAVAILABLE)
             check(privateDisplays().isEmpty(), Reason.EXISTING_PRIVATE_DISPLAY)
             check(history.value.error == null, Reason.HISTORY_UNAVAILABLE)
+            fixture?.verifyIdentity()
             if (prior != null) verifyPriorPrefix(prior)
             val component = context.packageManager.getLaunchIntentForPackage(CALCULATOR)?.component
             check(component != null && component.packageName == CALCULATOR &&
@@ -402,6 +434,19 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
         }
 
         private suspend fun execute() {
+            if (fixture != null) {
+                evidence.stage = "main_fixture_launch"
+                fixtureLaunched = true
+                context.startActivity(Intent().setClassName("com.example.rootpilot.fixture",
+                    "com.example.rootpilot.fixture.ExecutionFixtureActivity")
+                    .putExtra("rootpilotIsolation", true)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+                evidence.stage = "main_fixture_wait"
+                withTimeout(5_000) {
+                    while (!fixture.call("state").getBoolean("isolationReady")) delay(POLL_MS)
+                }
+                check(fixture.call("state").getInt("isolationClicks") == 0, Reason.MAIN_FIXTURE_CHANGED)
+            }
             evidence.stage = "start"
             requestedAt = System.currentTimeMillis()
             // A dispatch exception does not prove the Service failed to receive the command.
@@ -417,6 +462,20 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                 check(state.config == testConfig, Reason.CONFIG_CHANGED)
                 val events = liveEvents()
                 checkNoUnsupportedTools(events)
+                if (mode == Mode.STOP_MODEL && state.status == RootPilotStatus.REQUESTING_MODEL &&
+                    evidence.opened && !evidence.stopRequested && modelRequestInFlight(events)) {
+                    if (stopOverlay(state)) evidence.stopRequested = true
+                }
+                if (mode == Mode.STOP_APPROVAL && state.status == RootPilotStatus.WAITING_CONFIRMATION &&
+                    evidence.opened && !evidence.stopRequested) {
+                    check(state.pendingAction is RootPilotAction.Tap && evidence.approvedKeys == 0,
+                        Reason.ACTION_OUTSIDE_SCOPE)
+                    if (stopOverlay(state)) evidence.stopRequested = true
+                }
+                if (mode == Mode.STOP_MODEL && evidence.opened && !evidence.stopRequested &&
+                    state.status == RootPilotStatus.WAITING_CONFIRMATION && state.pendingAction is RootPilotAction.Tap) {
+                    fail(Reason.STOP_BOUNDARY_MISSED)
+                }
                 // Observe after the production settle/capture cycle, not during the equals animation.
                 if (evidence.opened && evidence.approvedKeys == remainingKeys && !evidence.result5535 &&
                     state.step >= resultStep && state.frame != null &&
@@ -427,13 +486,18 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                 }
                 if (evidence.result5535 && !evidence.resultImage) saveResultFrame()
                 if (state.status == RootPilotStatus.WAITING_CONFIRMATION &&
-                    (state.pendingAction !== approvedAction || state.step != approvedStep)) {
+                    (state.pendingAction !== approvedAction || state.step != approvedStep) &&
+                    !evidence.stopRequested && (mode !in setOf(Mode.STOP_MODEL, Mode.STOP_APPROVAL) || !evidence.opened)) {
                     approve(state, events)
                 }
                 if (!state.running && state.status in TERMINAL) break
                 delay(POLL_MS)
             }
             val terminal = RootPilotService.uiState.value
+            if (mode == Mode.STOP_MODEL || mode == Mode.STOP_APPROVAL) {
+                verifyStopped()
+                return
+            }
             check(terminal.status == RootPilotStatus.COMPLETED, Reason.TERMINAL_NOT_COMPLETED)
             check(evidence.opened && evidence.approvedKeys == remainingKeys, Reason.APPROVAL_COUNT)
             check(terminal.pendingAction == null && terminal.savedTodos.isEmpty(), Reason.UNEXPECTED_SIDE_EFFECT)
@@ -460,7 +524,123 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
             check(events.any { it.step >= resultStep && it.stage == TraceStage.MODEL &&
                 it.event == TraceEvent.START }, Reason.FINAL_MODEL_REQUEST_MISSING)
             evidence.executionsMatched = true
+            if (fixture != null) {
+                val finalFixture = fixture.call("state")
+                check(evidence.mainClicks == 3 && finalFixture.getInt("isolationClicks") == 3 &&
+                    finalFixture.getBoolean("empty"), Reason.MAIN_FIXTURE_CHANGED)
+            }
             evidence.bodyComplete = true
+        }
+
+        private fun modelRequestInFlight(events: List<LiveEvent>) =
+            events.count { it.stage == "model" && it.event == "start" } == 1 &&
+                events.none { it.stage == "model" && it.event == "result" }
+
+        private fun stopOverlay(expected: RootPilotUiState): Boolean {
+            var clicked = false
+            var rejected: Throwable? = null
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                try {
+                    val current = RootPilotService.uiState.value
+                    if (!current.running || current.status != expected.status ||
+                        current.pendingAction !== expected.pendingAction || current.step != expected.step) return@runOnMainSync
+                    check(current.config == testConfig, Reason.CONFIG_CHANGED)
+                    validateDisplay(owned ?: fail(Reason.DISPLAY_IDENTITY))
+                    if (mode == Mode.STOP_MODEL && !modelRequestInFlight(liveEvents())) return@runOnMainSync
+                    val panel = WindowInspector.getGlobalWindowViews().singleOrNull {
+                        it.isAttachedToWindow && (it.layoutParams as? WindowManager.LayoutParams)?.title == "RootPilotOverlay"
+                    } ?: return@runOnMainSync
+                    check((panel.layoutParams as WindowManager.LayoutParams).flags and
+                        WindowManager.LayoutParams.FLAG_SECURE != 0, Reason.OVERLAY_IDENTITY)
+                    val button = views(panel).filterIsInstance<Button>().singleOrNull { it.text.toString() == "停止" }
+                        ?: return@runOnMainSync
+                    if (button.isShown && button.isEnabled) clicked = button.performClick()
+                } catch (error: Throwable) { rejected = error }
+            }
+            rejected?.let { throw it }
+            return clicked
+        }
+
+        private suspend fun verifyStopped() {
+            check(evidence.stopRequested && evidence.opened && evidence.approvedKeys == 0,
+                Reason.STOP_BOUNDARY_MISSED)
+            withTimeout(5_000) {
+                while (record()?.events?.lastOrNull()?.event != TraceEvent.RUN_END ||
+                    record()?.status == RunHistoryStatus.RUNNING) delay(POLL_MS)
+            }
+            val state = RootPilotService.uiState.value
+            val stopped = record() ?: fail(Reason.HISTORY_UNAVAILABLE)
+            check(state.status == RootPilotStatus.STOPPED && !state.running && state.pendingAction == null &&
+                state.savedTodos.isEmpty() && stopped.status == RunHistoryStatus.STOPPED && !stopped.eventsTruncated,
+                Reason.TERMINAL_NOT_STOPPED)
+            val events = stopped.events
+            val executions = events.filter { it.stage == TraceStage.EXECUTION }
+            check(executions.map { it.event } == listOf(TraceEvent.START, TraceEvent.RESULT) &&
+                executions.all { it.actionType == TraceActionType.OPEN_APP } &&
+                executions.last().status == TraceStatus.SUCCESS &&
+                events.count { it.event == TraceEvent.CONFIRMED } == 1,
+                Reason.EXECUTION_COUNT)
+            val modelStarts = events.count { it.stage == TraceStage.MODEL && it.event == TraceEvent.START }
+            check(if (mode == Mode.STOP_MODEL) modelStarts == 1 else modelStarts > 0 &&
+                events.count { it.stage == TraceStage.MODEL && it.event == TraceEvent.RESULT &&
+                    it.status == TraceStatus.SUCCESS } == modelStarts, Reason.EXECUTION_COUNT)
+            val stopIndex = events.indexOfFirst { it.event == TraceEvent.STOP_REQUESTED }
+            check(stopIndex >= 0 && events.drop(stopIndex + 1).none {
+                it.stage == TraceStage.EXECUTION || it.stage == TraceStage.SCREENSHOT ||
+                    it.stage == TraceStage.MODEL && it.event == TraceEvent.START
+            } && events.none { it.event in FORBIDDEN_TOOLS || it.event == TraceEvent.TODO_SAVED },
+                Reason.ACTION_AFTER_STOP)
+            val end = events.last()
+            check(end.status == TraceStatus.CANCELLED && end.stage ==
+                if (mode == Mode.STOP_MODEL) TraceStage.MODEL else TraceStage.APPROVAL, Reason.STOP_BOUNDARY_MISSED)
+            evidence.executionsMatched = true
+            evidence.bodyComplete = true
+        }
+
+        private suspend fun useMainDisplay() {
+            val client = fixture ?: return
+            val before = client.call("state")
+            evidence.mainFocusLostBeforeTap = evidence.mainFocusLostBeforeTap || !before.getBoolean("isolationFocused")
+            check(before.getBoolean("isolationReady") && before.getBoolean("empty") &&
+                before.getInt("isolationClicks") == evidence.mainClicks, Reason.MAIN_FIXTURE_CHANGED)
+            val x = before.getInt("buttonX")
+            val y = before.getInt("buttonY")
+            var safe = false
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                safe = WindowInspector.getGlobalWindowViews().filter {
+                    it.isAttachedToWindow && it.isShown &&
+                        it.display?.displayId == Display.DEFAULT_DISPLAY &&
+                        (it.layoutParams as? WindowManager.LayoutParams)?.type == WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                }.none {
+                    val location = IntArray(2)
+                    it.getLocationOnScreen(location)
+                    Rect().let { bounds ->
+                        val visible = it.getLocalVisibleRect(bounds)
+                        bounds.offset(location[0], location[1])
+                        visible && bounds.contains(x, y)
+                    }
+                }
+            }
+            check(x > 0 && y > 0 && safe, Reason.MAIN_INPUT_TARGET)
+            InstrumentationRegistry.getInstrumentation().sendStatus(0, Bundle().apply {
+                putBoolean("mainInputReady", true)
+                putInt("mainInputSequence", evidence.mainClicks + 1)
+                putInt("mainInputX", x); putInt("mainInputY", y)
+            })
+            // The host may inject exactly one display-0 tap at the fresh fixed button coordinates.
+            withTimeout(15_000) {
+                while (true) {
+                    val observed = client.call("state")
+                    check(observed.getBoolean("empty") &&
+                        observed.getInt("isolationClicks") in evidence.mainClicks..evidence.mainClicks + 1,
+                        Reason.MAIN_FIXTURE_CHANGED)
+                    if (observed.getInt("isolationClicks") == evidence.mainClicks + 1 &&
+                        observed.getBoolean("isolationReady") && observed.getBoolean("isolationFocused")) break
+                    delay(POLL_MS)
+                }
+            }
+            evidence.mainClicks++
+            validateDisplay(owned ?: fail(Reason.DISPLAY_IDENTITY))
         }
 
         private suspend fun approve(expected: RootPilotUiState, events: List<LiveEvent>) {
@@ -478,6 +658,8 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                 }
                 is RootPilotAction.Tap -> {
                     check(evidence.opened && evidence.approvedKeys < remainingKeys, Reason.ACTION_OUTSIDE_SCOPE)
+                    if (fixture != null && evidence.approvedKeys in setOf(0, 3, 6) &&
+                        evidence.mainClicks == evidence.approvedKeys / 3) useMainDisplay()
                     val successful = events.count { it.executionSuccess("tap") }
                     check(successful == evidence.approvedKeys &&
                         events.count { it.executionSuccess("open_app") } == 1, Reason.EXECUTION_ORDER)
@@ -770,7 +952,7 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                 try {
                     val ended = record()?.events?.any { it.event == TraceEvent.RUN_END } == true
                     val stopSent = !ended || RootPilotService.uiState.value.running
-                    evidence.stopRequested = stopSent
+                    evidence.stopRequested = evidence.stopRequested || stopSent
                     if (stopSent) RootPilotService.send(context, RootPilotService.ACTION_STOP)
                     withTimeout(20_000) {
                         while (true) {
@@ -797,6 +979,18 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
             evidence.cleanupConfirmed = settled
             // A missing STOP/release receipt deliberately retains the active test environment.
             if (!settled) return
+            if (fixtureLaunched) {
+                try {
+                    fixture!!.call("finish")
+                    withTimeout(5_000) {
+                        while (!fixture.call("state").isEmpty) delay(POLL_MS)
+                    }
+                    evidence.fixtureClosed = true
+                } catch (_: Exception) {
+                    evidence.cleanupReason = Reason.MAIN_FIXTURE_CLEANUP.name
+                    if (failure == null) failure = Reason.MAIN_FIXTURE_CLEANUP
+                }
+            }
             try {
                 check(currentIme() == originalIme && !context.noBackupFilesDir.resolve("rootpilot_original_ime").exists(),
                     Reason.IME_CHANGED)
@@ -847,11 +1041,12 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
         fun knownProduct() = product && complete && expression in setOf(Expression.COMPLETE, Expression.PRODUCT, Expression.EQUATION)
     }
 
-    private class Evidence(private val firstKeyIndex: Int, private val priorRunId: String) {
+    private class Evidence(private val firstKeyIndex: Int, private val priorRunId: String, private val mode: Mode) {
         var directory: File? = null
         var runId = ""
         var stage = "preflight"
         var failure = "none"
+        var failureStage = "none"
         var cleanupReason = "none"
         var passed = false
         var bodyComplete = false
@@ -873,11 +1068,19 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
         var imeUnchanged = false
         var configRestored = false
         var allowlistRestored = false
+        var mainClicks = 0
+        var fixtureClosed = false
+        var mainFocusLostBeforeTap = false
 
         fun publish() {
             val metadata = buildJsonObject {
                 put("runId", runId); put("stage", stage); put("failure", failure); put("cleanupReason", cleanupReason)
+                put("failureStage", failureStage)
                 put("passed", passed); put("bodyComplete", bodyComplete)
+                put("mode", mode.name); put("mainDisplayButtonClicks", mainClicks)
+                put("mainInputSource", if (mode == Mode.ISOLATION) "host_adb_display_0" else "none")
+                put("fixtureClosed", fixtureClosed)
+                put("mainFocusLostBeforeTap", mainFocusLostBeforeTap)
                 put("executionSource", "production_service")
                 put("confirmationSource", "script_local_view_click")
                 put("physicalHumanConfirmation", false)
@@ -917,6 +1120,11 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
         HISTORY_INCOMPLETE, EXECUTION_COUNT, FINAL_MODEL_REQUEST_MISSING, CLEANUP_UNCONFIRMED, IME_CHANGED,
         ALLOWLIST_RESTORE_UNCERTAIN, ALLOWLIST_CHANGED, ALLOWLIST_RESTORE_FAILED, CONFIG_RESTORE_FAILED,
         ACCEPTANCE_INCOMPLETE, PRIOR_RECEIPT_INVALID, PRIOR_RECEIPT_SUPERSEDED, TIMEOUT, CANCELLED, UNEXPECTED,
+        MAIN_FIXTURE_CHANGED, MAIN_INPUT_TARGET, MAIN_FIXTURE_CLEANUP,
+        STOP_BOUNDARY_MISSED, TERMINAL_NOT_STOPPED, ACTION_AFTER_STOP,
+        PERMISSION_DENIED,
+        FIXTURE_INVALID_COMMAND, FIXTURE_REMOTE_STATE, FIXTURE_MISSING_RESULT, FIXTURE_TRANSPORT_FAILURE,
+        FIXTURE_UNKNOWN_PROVIDER, FIXTURE_INVALID_ARGUMENT,
     }
 
     private companion object {
@@ -989,6 +1197,17 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
             is AcceptanceFailure -> error.reason
             is TimeoutCancellationException -> Reason.TIMEOUT
             is CancellationException -> Reason.CANCELLED
+            is SecurityException -> Reason.PERMISSION_DENIED
+            is IllegalStateException -> when (error.message) {
+                "fixture_call_failed:state:permission_denied", "fixture_call_failed:finish:permission_denied" -> Reason.PERMISSION_DENIED
+                "fixture_call_failed:state:invalid_command", "fixture_call_failed:finish:invalid_command" -> Reason.FIXTURE_INVALID_COMMAND
+                "fixture_call_failed:state:unknown_provider", "fixture_call_failed:finish:unknown_provider" -> Reason.FIXTURE_UNKNOWN_PROVIDER
+                "fixture_call_failed:state:invalid_argument", "fixture_call_failed:finish:invalid_argument" -> Reason.FIXTURE_INVALID_ARGUMENT
+                "fixture_call_failed:state:remote_state", "fixture_call_failed:finish:remote_state" -> Reason.FIXTURE_REMOTE_STATE
+                "fixture_call_failed:state:missing_result", "fixture_call_failed:finish:missing_result" -> Reason.FIXTURE_MISSING_RESULT
+                "fixture_call_failed:state:transport_failure", "fixture_call_failed:finish:transport_failure" -> Reason.FIXTURE_TRANSPORT_FAILURE
+                else -> Reason.UNEXPECTED
+            }
             else -> Reason.UNEXPECTED
         }
     }

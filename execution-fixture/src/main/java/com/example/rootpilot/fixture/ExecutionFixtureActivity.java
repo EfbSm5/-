@@ -4,11 +4,13 @@ import android.app.Activity;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
+import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import java.io.ByteArrayOutputStream;
@@ -21,6 +23,8 @@ public final class ExecutionFixtureActivity extends Activity {
     private LinearLayout page;
     private EditText editor;
     private boolean resumed;
+    private Button isolationButton;
+    private int isolationClicks;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(null);
@@ -49,6 +53,19 @@ public final class ExecutionFixtureActivity extends Activity {
         editor.setSaveEnabled(false);
         editor.setLongClickable(false);
         page.addView(editor);
+        if (getIntent().getBooleanExtra("rootpilotIsolation", false)) {
+            // This mode is only used by the signed, opt-in multi-display acceptance.
+            editor.setVisibility(View.GONE);
+            View spacer = new View(this);
+            page.addView(spacer, new LinearLayout.LayoutParams(1, 0, 1));
+            isolationButton = new Button(this);
+            isolationButton.setText("主屏隔离测试：0");
+            isolationButton.setOnClickListener(view -> {
+                isolationClicks++;
+                isolationButton.setText("主屏隔离测试：" + isolationClicks);
+            });
+            page.addView(isolationButton, new LinearLayout.LayoutParams(-1, 180));
+        }
         setContentView(page);
         editor.requestFocus();
     }
@@ -69,6 +86,19 @@ public final class ExecutionFixtureActivity extends Activity {
         result.putBoolean("empty", text.isEmpty());
         result.putBoolean("matches", EXPECTED.equals(text));
         result.putInt("fieldId", editor.getId());
+        if (isolationButton != null) {
+            Rect bounds = new Rect();
+            boolean visible = isolationButton.getLocalVisibleRect(bounds);
+            int[] location = new int[2];
+            isolationButton.getLocationOnScreen(location);
+            bounds.offset(location[0], location[1]);
+            result.putBoolean("isolationReady", resumed && visible
+                    && getDisplay() != null && getDisplay().getDisplayId() == 0);
+            result.putBoolean("isolationFocused", hasWindowFocus());
+            result.putInt("isolationClicks", isolationClicks);
+            result.putInt("buttonX", bounds.centerX());
+            result.putInt("buttonY", bounds.centerY());
+        }
         if (!includeImage) return result;
         // Do not transmit arbitrary text introduced by a person, autofill, or another IME.
         if (!ready || (!text.isEmpty() && !EXPECTED.equals(text))) {
