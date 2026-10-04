@@ -1,6 +1,8 @@
 package com.example.agent.rootpilot.ui
 
+import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
@@ -16,6 +18,7 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.geometry.Offset
@@ -45,6 +48,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -55,6 +59,7 @@ import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
 import com.example.agent.rootpilot.ApiConfigUiState
 import com.example.agent.rootpilot.AppLaunchUiState
+import com.example.agent.rootpilot.model.ExecutionDisplay
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotUiState
 import com.example.agent.rootpilot.model.RootPilotStatus
@@ -99,6 +104,8 @@ fun RootPilotScreen(
     historyContent: (@Composable (onBack: () -> Unit) -> Unit)? = null,
     uiTreeConnected: Boolean = false,
     onAccessibilitySettings: () -> Unit = {},
+    onExecutionDisplayChanged: (ExecutionDisplay) -> Unit = {},
+    onVirtualDisplayStartPackageChanged: (String) -> Unit = {},
 ) {
     var mode by rememberSaveable { mutableStateOf(ScreenMode.TASK) }
     var settingsOrigin by rememberSaveable { mutableStateOf(ScreenMode.TASK) }
@@ -131,6 +138,11 @@ fun RootPilotScreen(
     val recoveryRequired = state.status == RootPilotStatus.RECOVERY_REQUIRED
     val apiControlsEnabled = !busy && !apiState.busy
     val apiReady = apiState.configured && !apiState.editing && !apiState.busy
+    val virtualDisplay = state.config.executionDisplay == ExecutionDisplay.VIRTUAL
+    val virtualStartApp = appLaunchState.apps.firstOrNull {
+        it.packageName == state.config.virtualDisplayStartPackage && it.packageName in appLaunchState.allowedPackages
+    }
+    val displayReady = !virtualDisplay || (!appLaunchState.busy && virtualStartApp != null)
     val keyboardVisible = WindowInsets.isImeVisible
     val returnFromSettings = {
         mode = if (taskBusy || chatContent == null) ScreenMode.TASK else settingsOrigin
@@ -236,13 +248,28 @@ fun RootPilotScreen(
                                     label = "描述目标和完成条件", minLines = 3, maxLines = 5, enabled = !busy,
                                 )
                                 ToggleRow(
-                                    label = "允许上传截图、页面结构及前台应用、键盘状态",
+                                    label = if (virtualDisplay) "允许上传副屏截图及任务所需的页面、应用信息"
+                                        else "允许上传截图、页面结构及前台应用、键盘状态",
                                     checked = state.config.allowScreenUpload, enabled = !busy,
                                     onCheckedChange = onScreenUploadChanged,
                                 )
-                                Text(if (state.config.manualConfirmation) "执行方式：逐步确认" else "执行方式：自动点击/滑动",
+                                if (virtualDisplay) {
+                                    Text("执行屏幕：独立副屏（实验）", style = MaterialTheme.typography.titleSmall)
+                                    Text(when {
+                                        appLaunchState.busy -> "正在核对副屏起始应用…"
+                                        virtualStartApp != null -> "起始应用：${virtualStartApp.label}（${virtualStartApp.packageName}），打开前仍需确认。"
+                                        state.config.virtualDisplayStartPackage.isEmpty() -> "请在设置中明确选择副屏起始应用。"
+                                        else -> "起始应用不可用：${state.config.virtualDisplayStartPackage}。请在设置中检查允许启动的应用。"
+                                    }, style = MaterialTheme.typography.bodySmall,
+                                        color = if (displayReady) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.testTag("virtual_display_start_status"))
+                                }
+                                Text(when {
+                                    virtualDisplay || state.config.manualConfirmation -> "执行方式：逐步确认"
+                                    else -> "执行方式：自动点击/滑动"
+                                },
                                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Button(onClick = onAutoExecute, enabled = !busy && !recoveryRequired && apiReady,
+                                Button(onClick = onAutoExecute, enabled = !busy && !recoveryRequired && apiReady && displayReady,
                                     colors = ButtonDefaults.buttonColorsPrimary(),
                                     modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("start_task")) { Text("开始") }
                             }
@@ -264,6 +291,13 @@ fun RootPilotScreen(
                         }
                         if (!taskBusy) TaskOverview(state, stopping, onStop)
                         TaskResultCard(state)
+                        if (virtualDisplay && taskBusy && state.status != RootPilotStatus.WAITING_CONFIRMATION) {
+                            Card(Modifier.fillMaxWidth()) {
+                                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    VirtualDisplayFramePreview(state)
+                                }
+                            }
+                        }
                         if (state.status == RootPilotStatus.WAITING_CONFIRMATION) {
                             Card(Modifier.fillMaxWidth()) {
                                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -271,6 +305,7 @@ fun RootPilotScreen(
                                     Text(state.pendingAction?.let {
                                         if (it is RootPilotAction.Type) it.overlayDetails() else it.describe()
                                     } ?: "等待动作信息", modifier = Modifier.testTag("pending_action"))
+                                    if (virtualDisplay) VirtualDisplayFramePreview(state)
                                     Button(onClick = onConfirmAction, enabled = state.pendingAction != null,
                                         colors = ButtonDefaults.buttonColorsPrimary(),
                                         modifier = Modifier.fillMaxWidth().testTag("confirm_action")) {
@@ -288,10 +323,11 @@ fun RootPilotScreen(
                                     Text("上次任务中断", style = MaterialTheme.typography.titleMedium)
                                     Text(
                                         "无法确认上一步 Root 动作是否已经生效，不会自动重放。" +
-                                            "请确认当前屏幕后重新规划，或放弃上次任务。",
+                                            if (virtualDisplay) "恢复会新建副屏，重新确认打开起始应用；不会复用上次副屏。请重新同意上传，或放弃上次任务。"
+                                            else "请确认当前屏幕后重新规划，或放弃上次任务。",
                                     )
-                                    Button(onClick = onRecoverInterruptedRun, enabled = apiReady) {
-                                        Text("从当前屏幕重新规划")
+                                    Button(onClick = onRecoverInterruptedRun, enabled = apiReady && displayReady) {
+                                        Text(if (virtualDisplay) "新建副屏并重新规划" else "从当前屏幕重新规划")
                                     }
                                     Button(onClick = onDiscardInterruptedRun) {
                                         Text("放弃上次任务")
@@ -322,6 +358,8 @@ fun RootPilotScreen(
                             onTestRoot = onTestRoot, onCaptureScreen = onCaptureScreen,
                             onSingleStep = onSingleStep, onOpenLegacyAgent = onOpenLegacyAgent,
                             uiTreeConnected = uiTreeConnected, onAccessibilitySettings = onAccessibilitySettings,
+                            onExecutionDisplayChanged = onExecutionDisplayChanged,
+                            onVirtualDisplayStartPackageChanged = onVirtualDisplayStartPackageChanged,
                         )
                         if (mode == ScreenMode.SETTINGS && historyContent != null) {
                             Button(onClick = { mode = ScreenMode.HISTORY },
@@ -333,6 +371,25 @@ fun RootPilotScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun VirtualDisplayFramePreview(state: RootPilotUiState) {
+    val frame = state.frame
+    val image = remember(frame?.bytes) {
+        frame?.let { BitmapFactory.decodeByteArray(it.bytes, 0, it.bytes.size)?.asImageBitmap() }
+    }
+    Text("副屏截图（最近采集，非实时）", style = MaterialTheme.typography.titleSmall)
+    if (image == null) {
+        Text(if (frame == null) "暂无副屏截图；起始应用仍需确认后才会启动。" else "副屏截图无法显示，请停止任务后检查。",
+            style = MaterialTheme.typography.bodySmall)
+    } else {
+        Image(
+            bitmap = image,
+            contentDescription = "当前任务的副屏截图",
+            modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).testTag("virtual_display_frame"),
+        )
     }
 }
 

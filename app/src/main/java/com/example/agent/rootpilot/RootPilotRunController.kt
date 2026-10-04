@@ -24,6 +24,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+import com.example.agent.rootpilot.model.ExecutionDisplay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -40,6 +45,7 @@ internal class RootPilotTaskState {
             mutableState.value = mutableState.value.copy(running = value != null)
         }
     var recoveryBlocked = false
+    var executionBlocked = false
 }
 
 internal interface RootPilotRunHost {
@@ -125,24 +131,37 @@ internal class RootPilotRunController(
 
     fun captureScreen(startId: Int) {
         startOneShot(startId) { trace ->
-            appendLog(trace, TraceReason.CAPTURE_STARTED, TraceStatus.STARTED)
-            when (val result = loop.captureScreen()) {
-                is ScreenshotCaptureResult.Success -> {
-                    updateState(
-                        status = RootPilotStatus.IDLE,
-                        frame = result.frame,
-                        errorMessage = null,
-                    )
-                    appendLog(trace, TraceReason.CAPTURE_OK, TraceStatus.SUCCESS)
-                }
+            if (uiState.value.config.executionDisplay == ExecutionDisplay.VIRTUAL) {
+                updateState(status = RootPilotStatus.FAILED, errorMessage = "副屏仅在完整任务中创建，不在任务外截取主屏")
+                return@startOneShot
+            }
+            val prepared = rootExecutor.beginRun(uiState.value.config)
+            if (prepared is RootExecutionResult.Failure) {
+                updateState(status = RootPilotStatus.FAILED, errorMessage = prepared.message)
+                return@startOneShot
+            }
+            try {
+                appendLog(trace, TraceReason.CAPTURE_STARTED, TraceStatus.STARTED)
+                when (val result = loop.captureScreen()) {
+                    is ScreenshotCaptureResult.Success -> {
+                        updateState(
+                            status = RootPilotStatus.IDLE,
+                            frame = result.frame,
+                            errorMessage = null,
+                        )
+                        appendLog(trace, TraceReason.CAPTURE_OK, TraceStatus.SUCCESS)
+                    }
 
-                is ScreenshotCaptureResult.Failure -> {
-                    appendLog(trace, TraceReason.CAPTURE_FAILED, TraceStatus.FAILED)
-                    updateState(
-                        status = RootPilotStatus.FAILED,
-                        errorMessage = result.message,
-                    )
+                    is ScreenshotCaptureResult.Failure -> {
+                        appendLog(trace, TraceReason.CAPTURE_FAILED, TraceStatus.FAILED)
+                        updateState(
+                            status = RootPilotStatus.FAILED,
+                            errorMessage = result.message,
+                        )
+                    }
                 }
+            } finally {
+                withContext(NonCancellable) { rootExecutor.endRun() }
             }
         }
     }
@@ -155,10 +174,13 @@ internal class RootPilotRunController(
             return@synchronized
         }
         val problem = when {
+            taskState.executionBlocked -> "副屏退出未确认，禁止启动任务；请先核对副屏已消失再重启 RootPilot"
             taskState.recoveryBlocked -> "恢复记录不可用，请先核对已执行结果，再放弃记录"
             !recovering && uiState.value.status == RootPilotStatus.RECOVERY_REQUIRED -> "请先处理上次中断的任务"
             config.task.isBlank() -> "请先输入自然语言任务"
             !config.allowScreenUpload -> "发送截图前请先打开上传确认"
+            singleStep && config.executionDisplay == ExecutionDisplay.VIRTUAL -> "副屏仅支持完整任务，不支持任务间保留单步会话"
+            config.executionDisplay == ExecutionDisplay.VIRTUAL && config.virtualDisplayStartPackage.isBlank() -> "请选择副屏起始应用"
             else -> null
         }
         if (problem != null) {
@@ -170,7 +192,8 @@ internal class RootPilotRunController(
             finishHost(startId)
             return@synchronized
         }
-        _uiState.value = _uiState.value.copy(savedTodos = emptyList(), modelReportedResult = false)
+        _uiState.value = _uiState.value.copy(savedTodos = emptyList(), modelReportedResult = false,
+            frame = if (config.executionDisplay == ExecutionDisplay.VIRTUAL) null else _uiState.value.frame)
         updateStateLocked(
             status = RootPilotStatus.CAPTURING, step = 0, clearPendingAction = true,
         )
@@ -182,8 +205,19 @@ internal class RootPilotRunController(
         history?.begin(trace.runId)
         lateinit var job: Job
         job = scope.launch(start = CoroutineStart.LAZY) {
+            var beginAttempted = false
+            var terminal: AgentLoopEvent? = null
+            val virtual = config.executionDisplay == ExecutionDisplay.VIRTUAL
             try {
                 persistRunSnapshot(RootPilotStatus.CAPTURING, step = 0)
+                trace.record(TraceEvent.RUN_START, TraceStatus.STARTED)
+                beginAttempted = true
+                val prepared = rootExecutor.beginRun(config)
+                if (prepared is RootExecutionResult.Failure) {
+                    trace.fail(TraceReason.EXECUTION_FAILED)
+                    terminal = AgentLoopEvent.Failed(prepared.message)
+                    return@launch
+                }
                 loop.run(
                     request = AgentLoopRequest(
                         config = config,
@@ -191,7 +225,13 @@ internal class RootPilotRunController(
                         singleStep = singleStep,
                     ),
                     trace = trace,
-                    onEvent = ::handleEvent,
+                    recordRunLifecycle = false,
+                    onEvent = { event ->
+                        if (virtual && (event is AgentLoopEvent.Completed || event is AgentLoopEvent.Failed)) {
+                            terminal = event
+                            handleEvent(AgentLoopEvent.WaitingScreen(uiState.value.step))
+                        } else handleEvent(event)
+                    },
                 )
             } catch (error: CancellationException) {
                 throw error
@@ -199,7 +239,10 @@ internal class RootPilotRunController(
                 // The persistence boundary latched the failure before any executor cleanup.
                 if (!storageFailure) markStorageFailure(error.operation)
             } catch (_: Exception) {
-                synchronized(stateLock) {
+                if (virtual) {
+                    trace.fail(TraceReason.UNEXPECTED_ERROR)
+                    terminal = AgentLoopEvent.Failed("副屏任务执行异常，未自动重放")
+                } else synchronized(stateLock) {
                     if (!destroyed && uiState.value.status != RootPilotStatus.STOPPING && clearRunSnapshot()) {
                         updateStateLocked(
                             status = RootPilotStatus.FAILED,
@@ -207,6 +250,30 @@ internal class RootPilotRunController(
                             clearPendingAction = true,
                         )
                     }
+                }
+            } finally {
+                val runContext = currentCoroutineContext()
+                withContext(NonCancellable) {
+                    val closed = if (!beginAttempted) true else try {
+                        rootExecutor.endRun() is RootExecutionResult.Success
+                    } catch (_: Exception) { false }
+                    val cancelled = !runContext.isActive
+                    if (!closed) {
+                        trace.fail(TraceReason.EXECUTION_FAILED)
+                        synchronized(stateLock) {
+                            taskState.executionBlocked = true
+                            pendingApproval?.reject()
+                            pendingApproval = null
+                            recoveryError("副屏释放未确认，保留恢复记录并禁止新任务；请核对副屏状态", blocked = true)
+                        }
+                    } else if (!cancelled && !storageFailure && !destroyed) {
+                        terminal?.let { handleEvent(it) }
+                    }
+                    if (!runContext.isActive && closed && !storageFailure) {
+                        trace.outcome = TraceStatus.CANCELLED
+                        trace.reason = TraceReason.CANCELLED
+                    }
+                    if (beginAttempted) trace.record(TraceEvent.RUN_END, trace.outcome, trace.reason)
                 }
             }
         }
@@ -226,7 +293,7 @@ internal class RootPilotRunController(
                 if (taskState.owner !== this) finishHost(startId)
                 return
             }
-            if (uiState.value.status == RootPilotStatus.RECOVERY_REQUIRED || taskState.recoveryBlocked) {
+            if (uiState.value.status == RootPilotStatus.RECOVERY_REQUIRED || taskState.recoveryBlocked || taskState.executionBlocked) {
                 finishHost(startId)
                 return
             }
@@ -285,6 +352,8 @@ internal class RootPilotRunController(
                 val trace = activeTrace?.takeIf { it.first === job }?.second
                 if (storageFailure) {
                     recoveryError("恢复记录读写失败，任务已停止；请核对已执行结果后放弃记录")
+                } else if (taskState.executionBlocked) {
+                    recoveryError("副屏释放未确认，禁止继续执行；请先核对副屏状态", blocked = true)
                 } else if (interrupted) {
                     recoveryError("服务已中断，执行已退出；请核对已执行结果，不会自动重放", blocked = false)
                 } else if (_uiState.value.status == RootPilotStatus.STOPPING && clearRunSnapshot()) {
@@ -297,6 +366,7 @@ internal class RootPilotRunController(
                 trace?.let {
                     val finalStatus = when {
                         storageFailure -> RunHistoryStatus.FAILED
+                        taskState.executionBlocked -> RunHistoryStatus.FAILED
                         interrupted -> RunHistoryStatus.INTERRUPTED
                         job.isCancelled -> RunHistoryStatus.STOPPED
                         it.outcome == TraceStatus.SUCCESS -> RunHistoryStatus.COMPLETED
@@ -306,6 +376,7 @@ internal class RootPilotRunController(
                     history?.finish(it.runId, finalStatus, it.elapsedMs,
                         when {
                             storageFailure -> snapshotFailureReason
+                            taskState.executionBlocked -> TraceReason.EXECUTION_FAILED
                             job.isCancelled -> TraceReason.CANCELLED
                             else -> it.reason
                         })
@@ -323,6 +394,11 @@ internal class RootPilotRunController(
     fun stopAgent(startId: Int) {
         val running = synchronized(stateLock) {
             if (destroyed) return
+            if (taskState.executionBlocked) {
+                recoveryError("副屏退出未确认，不能通过停止命令清除恢复记录", blocked = true)
+                finishHost(startId)
+                return
+            }
             if (taskState.owner != null && taskState.owner !== this) {
                 finishHost(startId)
                 return
@@ -381,6 +457,7 @@ internal class RootPilotRunController(
                 pendingAction = null,
                 savedTodos = emptyList(),
                 modelReportedResult = false,
+                frame = if (snapshot.executionDisplay == ExecutionDisplay.VIRTUAL) null else _uiState.value.frame,
             )
             notifyState()
         }
@@ -390,6 +467,11 @@ internal class RootPilotRunController(
     fun discardInterruptedRun(startId: Int) = synchronized(stateLock) {
         if (destroyed || taskState.owner != null) {
             if (taskState.owner !== this) finishHost(startId)
+            return@synchronized
+        }
+        if (taskState.executionBlocked) {
+            recoveryError("副屏退出未确认，不能通过放弃恢复记录解除执行隔离", blocked = true)
+            finishHost(startId)
             return@synchronized
         }
         if (clearRunSnapshot()) {
@@ -414,6 +496,8 @@ internal class RootPilotRunController(
                     model = config.model,
                     task = config.task,
                     manualConfirmation = config.manualConfirmation,
+                    executionDisplay = config.executionDisplay,
+                    virtualDisplayStartPackage = config.virtualDisplayStartPackage,
                     allowScreenUpload = config.allowScreenUpload,
                     status = status.name,
                     step = step,

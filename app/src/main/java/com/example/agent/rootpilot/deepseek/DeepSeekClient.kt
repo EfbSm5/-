@@ -338,6 +338,10 @@ class HttpDeepSeekClient(
 
     private fun buildUserPrompt(request: DeepSeekVisionRequest, allowInformationQueries: Boolean = false): String = buildString {
         appendLine("根据当前 Android 截图执行用户任务。")
+        if (request.config.executionDisplay == com.example.agent.rootpilot.model.ExecutionDisplay.VIRTUAL) {
+            appendLine("当前仅操作本次独立副屏，所选起始应用已经过用户确认并启动。只能执行 open_app、tap、wait、ask_user、finish；不支持文字输入、滑动或系统按键。所有点击需确认。")
+            appendLine("仅 get_screen_context 可用；get_ui_tree 和 get_activity_stack 在副屏返回 not_supported。请根据副屏截图观察，不请求读取主屏。")
+        }
         appendLine(if (allowInformationQueries) "可先使用已提供的只读信息工具；最终只返回一个动作 JSON。"
             else "只返回一个动作 JSON，不要 Markdown、解释或 Shell 命令。")
         appendLine("用户任务：${request.config.task}")

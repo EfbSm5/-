@@ -1,7 +1,10 @@
 package com.example.agent.rootpilot
 
 import com.example.agent.rootpilot.model.RootPilotConfig
+import com.example.agent.rootpilot.model.ExecutionDisplay
 import java.nio.file.Files
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -144,6 +147,93 @@ class RootPilotRunStoreTest {
         assertFalse(restored.allowScreenUpload)
         assertEquals("", snapshot.restoreTask(current.copy(apiKey = "")).apiKey)
         assertFalse(restored.toString().contains(current.apiKey))
+    }
+
+    @Test
+    fun recovery_legacySnapshotDefaultsToMainAndClearsVirtualSelection() {
+        val file = temporaryFolder.newFile("legacy-run.json")
+        file.writeText(
+            """{
+                "baseUrl":"http://localhost:18765",
+                "model":"old-model",
+                "task":"旧任务",
+                "manualConfirmation":true,
+                "allowScreenUpload":true,
+                "status":"WAITING_CONFIRMATION",
+                "step":2
+            }""".trimIndent(),
+        )
+        val loaded = RootPilotRunStore(file).read()!!
+        val current = RootPilotConfig(
+            executionDisplay = ExecutionDisplay.VIRTUAL,
+            virtualDisplayStartPackage = "com.example.current",
+            allowScreenUpload = true,
+        )
+
+        val restored = loaded.restoreTask(current)
+
+        assertEquals(ExecutionDisplay.MAIN, loaded.executionDisplay)
+        assertEquals("", loaded.virtualDisplayStartPackage)
+        assertEquals(ExecutionDisplay.MAIN, restored.executionDisplay)
+        assertEquals("", restored.virtualDisplayStartPackage)
+        assertEquals("旧任务", restored.task)
+        assertFalse(restored.allowScreenUpload)
+    }
+
+    @Test
+    fun recovery_virtualSnapshotRestoresOnlySelectionAndRequiresRenewedUploadConsent() {
+        val file = temporaryFolder.newFile("virtual-run.json")
+        val saved = snapshot().copy(
+            executionDisplay = ExecutionDisplay.VIRTUAL,
+            virtualDisplayStartPackage = "com.example.selected",
+        )
+        RootPilotRunStore(file).write(saved)
+        val current = RootPilotConfig(
+            apiKey = "synthetic-current-key", baseUrl = "https://example.invalid", model = "current-model",
+            allowScreenUpload = true, virtualDisplayStartPackage = "com.example.other",
+        )
+
+        val loaded = RootPilotRunStore(file).read()!!
+        val restored = loaded.restoreTask(current)
+
+        assertEquals(saved, loaded)
+        assertEquals(ExecutionDisplay.VIRTUAL, restored.executionDisplay)
+        assertEquals("com.example.selected", restored.virtualDisplayStartPackage)
+        assertEquals(current.apiKey, restored.apiKey)
+        assertEquals(current.baseUrl, restored.baseUrl)
+        assertEquals(current.model, restored.model)
+        assertFalse(restored.allowScreenUpload)
+        assertFalse(file.readText().contains(current.apiKey))
+        assertEquals(
+            setOf("baseUrl", "model", "task", "manualConfirmation", "allowScreenUpload", "status", "step",
+                "actionSummary", "executionDisplay", "virtualDisplayStartPackage"),
+            Json.parseToJsonElement(file.readText()).jsonObject.keys,
+        )
+    }
+
+    @Test
+    fun recovery_keepsUnavailableStartPackageWithoutChoosingAReplacement() {
+        val unavailablePackage = "com.example.no.longer.allowed"
+        val saved = snapshot().copy(
+            executionDisplay = ExecutionDisplay.VIRTUAL,
+            virtualDisplayStartPackage = unavailablePackage,
+        )
+        val current = RootPilotConfig(virtualDisplayStartPackage = "com.example.other")
+
+        assertEquals(unavailablePackage, saved.restoreTask(current).virtualDisplayStartPackage)
+        assertEquals("", saved.copy(virtualDisplayStartPackage = "").restoreTask(current).virtualDisplayStartPackage)
+    }
+
+    @Test
+    fun recovery_mainSnapshotKeepsMainDisplayAndRequiresRenewedConsent() {
+        val saved = snapshot()
+        val current = RootPilotConfig(allowScreenUpload = true)
+
+        val restored = saved.restoreTask(current)
+
+        assertEquals(ExecutionDisplay.MAIN, restored.executionDisplay)
+        assertEquals("", restored.virtualDisplayStartPackage)
+        assertFalse(restored.allowScreenUpload)
     }
 
     @Test

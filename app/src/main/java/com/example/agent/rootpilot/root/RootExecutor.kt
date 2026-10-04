@@ -50,6 +50,17 @@ internal object RootCommandBuilder {
 }
 
 interface RootExecutor {
+    suspend fun beginRun(config: com.example.agent.rootpilot.model.RootPilotConfig): RootExecutionResult =
+        if (config.executionDisplay == com.example.agent.rootpilot.model.ExecutionDisplay.MAIN) RootExecutionResult.Success()
+        else RootExecutionResult.Failure("当前执行端不支持副屏")
+
+    suspend fun endRun(): RootExecutionResult = RootExecutionResult.Success()
+
+    val initialApp: RootPilotApp? get() = null
+    val sessionIdentity: String? get() = null
+    suspend fun validateSession(): Boolean = true
+    fun supports(action: ExecutableRootAction): Boolean = true
+
     suspend fun observeScreen(): com.example.agent.rootpilot.screen.ScreenObservation =
         com.example.agent.rootpilot.screen.ScreenObservation(null, null, null, null, null, System.nanoTime() / 1_000_000)
 

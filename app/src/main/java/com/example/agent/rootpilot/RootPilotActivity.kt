@@ -141,6 +141,8 @@ class RootPilotActivity : ComponentActivity() {
                     onRecoverInterruptedRun = viewModel::recoverInterruptedRun,
                     onDiscardInterruptedRun = viewModel::discardInterruptedRun,
                     onManualConfirmationChanged = viewModel::setManualConfirmation,
+                    onExecutionDisplayChanged = viewModel::setExecutionDisplay,
+                    onVirtualDisplayStartPackageChanged = viewModel::setVirtualDisplayStartPackage,
                     onScreenUploadChanged = viewModel::setAllowScreenUpload,
                     overlayAllowed = overlayAllowed,
                     inputMethodEnabled = inputMethodEnabled,

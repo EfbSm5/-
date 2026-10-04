@@ -2,6 +2,7 @@ package com.example.agent.rootpilot.root
 
 import com.example.agent.rootpilot.screen.ScreenObservation
 import com.example.agent.rootpilot.screen.ScreenObserver
+import com.example.agent.rootpilot.screen.DisplaySession
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -21,10 +22,16 @@ class RootScreenObserver internal constructor(
     private val maxOutputBytes: Int,
     private val clock: () -> Long,
     private val start: (String) -> Process,
+    private val session: DisplaySession? = null,
 ) : ScreenObserver {
     constructor() : this(
         Dispatchers.IO, 3_000, 256 * 1024, { System.nanoTime() / 1_000_000 },
         { ProcessBuilder("su", "-c", it).redirectErrorStream(true).start() },
+    )
+
+    constructor(session: DisplaySession) : this(
+        Dispatchers.IO, 3_000, 256 * 1024, { System.nanoTime() / 1_000_000 },
+        { ProcessBuilder("su", "-c", it).redirectErrorStream(true).start() }, session,
     )
 
     init {
@@ -52,7 +59,8 @@ class RootScreenObserver internal constructor(
                     val displays = collect("exec dumpsys window displays")
                     val ime = collect("exec dumpsys input_method --dump-priority CRITICAL")
                     currentCoroutineContext().ensureActive()
-                    ScreenObservationParser.parse(activities, windows, ime, clock(), displays)
+                    if (session == null) ScreenObservationParser.parse(activities, windows, ime, clock(), displays)
+                    else ScreenObservationParser.parseVirtual(activities, windows, displays, clock(), session)
                 } ?: ScreenObservationParser.parse(null, null, null, clock())
             }
         } finally {
@@ -122,6 +130,46 @@ internal object ScreenObservationParser {
     private val windowDisplay = Regex("(?:Display: )?mDisplayId=([0-9]+)(?: .*)?")
     private val displayHeader = Regex("Display: mDisplayId=([0-9]+)(?: \\(organized\\))?")
     private val sleeping = Regex("mSleeping=true(?: mAllSleepTokens=\\[\\])?")
+
+    /** Opt-in parser for an owned display. The default-screen parser stays fail-closed. */
+    fun parseVirtual(
+        activities: String?, windows: String?, displays: String?, observedAtMillis: Long, session: DisplaySession,
+    ): ScreenObservation {
+        fun unavailable() = ScreenObservation(null, null, null, null, null, observedAtMillis,
+            session.displayId, session.sessionId)
+        val id = session.displayId.toString()
+        val tasks = displaySections(activities.orEmpty().lines(), activityDisplay, "Display #", activitySummary = true)
+            ?.displays?.get(id) ?: return unavailable()
+        val displayLines = displays.orEmpty().replace(Regex("[ \\t]+(?=Display:)"), "\n").lines()
+        val display = displaySections(displayLines, displayHeader, "Display:")?.displays?.get(id)
+            ?: return unavailable()
+        val candidates = tasks.filter {
+            it.startsWith("mResumedActivity") || it.startsWith("topResumedActivity") ||
+                it.startsWith("Resumed:") || it.startsWith("ResumedActivity:")
+        }.map { activity.matchEntire(it) }
+        if (candidates.isEmpty() || candidates.any { it == null } ||
+            candidates.map { it!!.groupValues[1] }.distinct().size != 1) return unavailable()
+        val foreground = candidates.first()!!
+        val pkg = foreground.groupValues[2]
+        val component = foreground.groupValues[3].let { if (it.startsWith('.')) pkg + it else it }
+        val token = display.filter { it.startsWith("mCurrentFocus") }.singleOrNull()
+            ?.let(focus::matchEntire)?.groupValues?.get(1) ?: return unavailable()
+        val rawWindows = windows.orEmpty().lines()
+        val matching = rawWindows.indices.filter {
+            window.matchEntire(rawWindows[it].trim())?.groupValues?.get(1) == token
+        }.singleOrNull() ?: return unavailable()
+        val block = windowBlock(rawWindows, matching)
+        if (block.filter { it.startsWith("mDisplayId") }.singleOrNull()
+                ?.let(windowDisplay::matchEntire)?.groupValues?.get(1) != id) return unavailable()
+        val focusPackage = block.filter { it.startsWith("mOwnerUid") }.singleOrNull()
+            ?.let(owner::matchEntire)?.groupValues?.get(1) ?: return unavailable()
+        if (focusPackage != pkg) return unavailable()
+        // Text input is unsupported here. Never infer the secondary IME state from the main screen.
+        val imeWindows = display.filter { it.startsWith("mImeWindow=") }
+        val keyboard = if (imeWindows.isNotEmpty() && imeWindows.all { it == "mImeWindow=null" }) false else null
+        return ScreenObservation(pkg, component, focusPackage, token, keyboard, observedAtMillis,
+            session.displayId, session.sessionId)
+    }
 
     fun parse(
         activities: String?, windows: String?, ime: String?, observedAtMillis: Long,

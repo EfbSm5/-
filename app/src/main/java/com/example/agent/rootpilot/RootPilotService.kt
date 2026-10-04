@@ -28,6 +28,8 @@ import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotStatus
 import com.example.agent.rootpilot.model.RootPilotUiState
 import com.example.agent.rootpilot.root.SuRootExecutor
+import com.example.agent.rootpilot.root.DisplayRoutingRootExecutor
+import com.example.agent.rootpilot.model.ExecutionDisplay
 import com.example.agent.rootpilot.screen.RootScreenshotProvider
 import com.example.agent.rootpilot.ui.RootPilotOverlay
 import kotlinx.coroutines.CoroutineScope
@@ -57,8 +59,9 @@ class RootPilotService : Service(), RootPilotRunHost {
         }
         val appCatalog = AllowlistedAppCatalog(AndroidAppCatalog(this), AppLaunchAllowlistStore.create(this))
         val textInput = AndroidImeEnvironment.createInput(this)
-        val rootExecutor = SuRootExecutor(appCatalog = appCatalog, typeText = textInput::type,
-            uiTreeProvider = AndroidUiTreeProvider(packageName))
+        val rootExecutor = DisplayRoutingRootExecutor(this,
+            SuRootExecutor(appCatalog = appCatalog, typeText = textInput::type,
+                uiTreeProvider = AndroidUiTreeProvider(packageName)), appCatalog)
         controller = RootPilotRunController(
             taskState = taskState,
             scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
@@ -84,7 +87,12 @@ class RootPilotService : Service(), RootPilotRunHost {
         latestStartId = startId
         controller.commandStarted(startId)
         startForeground(NOTIFICATION_ID, buildNotification())
-        intent?.readConfig()?.let(::updateConfig)
+        val incoming = intent?.readConfig()
+        if (intent?.hasExtra(EXTRA_TASK) == true && incoming == null) {
+            stopSelfResult(startId)
+            return START_NOT_STICKY
+        }
+        incoming?.let(::updateConfig)
         when (intent?.action) {
             ACTION_TEST_ROOT -> controller.testRoot(startId)
             ACTION_CAPTURE_SCREEN -> controller.captureScreen(startId)
@@ -229,10 +237,16 @@ class RootPilotService : Service(), RootPilotRunHost {
 
     private fun Intent.readConfig(): RootPilotConfig? {
         if (!hasExtra(EXTRA_TASK)) return null
+        val display = if (hasExtra(EXTRA_EXECUTION_DISPLAY)) {
+            ExecutionDisplay.entries.singleOrNull { it.name == getStringExtra(EXTRA_EXECUTION_DISPLAY) } ?: return null
+        } else uiState.value.config.executionDisplay
         return uiState.value.config.copy(
             task = getStringExtra(EXTRA_TASK).orEmpty(),
             manualConfirmation = getBooleanExtra(EXTRA_MANUAL_CONFIRMATION, true),
             allowScreenUpload = getBooleanExtra(EXTRA_ALLOW_SCREEN_UPLOAD, false),
+            executionDisplay = display,
+            virtualDisplayStartPackage = if (hasExtra(EXTRA_VIRTUAL_START_PACKAGE)) getStringExtra(EXTRA_VIRTUAL_START_PACKAGE).orEmpty()
+                else uiState.value.config.virtualDisplayStartPackage,
         )
     }
 
@@ -276,6 +290,8 @@ class RootPilotService : Service(), RootPilotRunHost {
         const val EXTRA_TASK = "extra_task"
         const val EXTRA_MANUAL_CONFIRMATION = "extra_manual_confirmation"
         const val EXTRA_ALLOW_SCREEN_UPLOAD = "extra_allow_screen_upload"
+        const val EXTRA_EXECUTION_DISPLAY = "extra_execution_display"
+        const val EXTRA_VIRTUAL_START_PACKAGE = "extra_virtual_start_package"
 
         fun updateConfig(config: RootPilotConfig) {
             synchronized(stateLock) {
@@ -286,6 +302,8 @@ class RootPilotService : Service(), RootPilotRunHost {
                         task = config.task,
                         manualConfirmation = config.manualConfirmation,
                         allowScreenUpload = config.allowScreenUpload,
+                        executionDisplay = config.executionDisplay,
+                        virtualDisplayStartPackage = config.virtualDisplayStartPackage,
                     ),
                 )
             }
@@ -312,6 +330,8 @@ class RootPilotService : Service(), RootPilotRunHost {
                 intent.putExtra(EXTRA_TASK, it.task)
                 intent.putExtra(EXTRA_MANUAL_CONFIRMATION, it.manualConfirmation)
                 intent.putExtra(EXTRA_ALLOW_SCREEN_UPLOAD, it.allowScreenUpload)
+                intent.putExtra(EXTRA_EXECUTION_DISPLAY, it.executionDisplay.name)
+                intent.putExtra(EXTRA_VIRTUAL_START_PACKAGE, it.virtualDisplayStartPackage)
             }
             context.startForegroundService(intent)
         }

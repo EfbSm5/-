@@ -7,6 +7,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.example.agent.rootpilot.apps.AppCatalog
 import com.example.agent.rootpilot.apps.AppLaunchAllowlistStore
 import com.example.agent.rootpilot.model.RootPilotApp
+import com.example.agent.rootpilot.model.ExecutionDisplay
 import java.io.File
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
@@ -50,6 +51,18 @@ class RootPilotAppLaunchViewModelInstrumentedTest {
         }
         try {
             val first = model()
+            instrumentation.runOnMainSync {
+                first.setExecutionDisplay(ExecutionDisplay.MAIN)
+                first.setAllowScreenUpload(true)
+                first.setExecutionDisplay(ExecutionDisplay.VIRTUAL)
+                assertFalse(RootPilotService.uiState.value.config.allowScreenUpload)
+                first.setAllowScreenUpload(true)
+                first.setExecutionDisplay(ExecutionDisplay.VIRTUAL)
+                assertTrue(RootPilotService.uiState.value.config.allowScreenUpload)
+                first.setExecutionDisplay(ExecutionDisplay.MAIN)
+                assertFalse(RootPilotService.uiState.value.config.allowScreenUpload)
+                RootPilotService.updateConfig(prior.config)
+            }
             val staleEditor = model()
             assertTrue(first.appLaunchState.value.allowedPackages.isEmpty())
             instrumentation.runOnMainSync { first.setAppLaunchAllowed("com.example.notes", true) }

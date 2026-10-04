@@ -3,6 +3,7 @@ package com.example.agent.rootpilot.ui
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,12 +17,17 @@ import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
@@ -31,6 +37,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.agent.rootpilot.ApiConfigUiState
 import com.example.agent.rootpilot.AppLaunchUiState
+import com.example.agent.rootpilot.model.ExecutionDisplay
 import com.example.agent.rootpilot.model.RootPilotUiState
 
 @Composable
@@ -67,7 +74,11 @@ internal fun RootPilotSettingsContent(
     onOpenLegacyAgent: () -> Unit,
     uiTreeConnected: Boolean,
     onAccessibilitySettings: () -> Unit,
+    onExecutionDisplayChanged: (ExecutionDisplay) -> Unit,
+    onVirtualDisplayStartPackageChanged: (String) -> Unit,
 ) {
+    val virtualDisplay = state.config.executionDisplay == ExecutionDisplay.VIRTUAL
+    val displayControlsEnabled = !busy && !recoveryRequired
     if (!showDebug && !showPermissions) {
         Text("API 配置", style = MaterialTheme.typography.titleMedium)
         Card(modifier = Modifier.fillMaxWidth()) {
@@ -136,11 +147,33 @@ internal fun RootPilotSettingsContent(
                 Text("允许启动的应用（${appLaunchState.apps.count { it.packageName in appLaunchState.allowedPackages }}）")
             }
             SettingsToggleRow(
+                label = "独立副屏（实验）",
+                checked = virtualDisplay, enabled = displayControlsEnabled,
+                onCheckedChange = { onExecutionDisplayChanged(if (it) ExecutionDisplay.VIRTUAL else ExecutionDisplay.MAIN) },
+                testTag = "execution_display_virtual",
+            )
+            if (virtualDisplay) {
+                VirtualDisplayAppSelector(
+                    appLaunchState = appLaunchState,
+                    selectedPackage = state.config.virtualDisplayStartPackage,
+                    enabled = displayControlsEnabled,
+                    onSelected = onVirtualDisplayStartPackageChanged,
+                )
+                Text("每次任务新建副屏，退出会关闭其中页面；已有应用可能被迁到副屏，不提供账号或数据隔离。",
+                    style = MaterialTheme.typography.bodySmall)
+                Text("首期仅支持应用启动和点击，不支持文字输入、系统按键或滑动。起始应用仍需确认打开后才会启动；同意上传后，副屏截图仍会发送至所配置的 API。",
+                    style = MaterialTheme.typography.bodySmall)
+                if (recoveryRequired) {
+                    Text("请先恢复或放弃上次任务，再修改执行屏幕和起始应用。", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            SettingsToggleRow(
                 label = "每一步都需要人工确认",
-                checked = state.config.manualConfirmation, enabled = !busy,
+                checked = virtualDisplay || state.config.manualConfirmation, enabled = !busy && !virtualDisplay,
                 onCheckedChange = onManualConfirmationChanged,
             )
-            Text("自动模式可执行点击和滑动；打开应用、输入文本及系统按键始终需要确认。",
+            Text(if (virtualDisplay) "副屏实验模式下，打开应用和每次点击都需要确认。"
+                else "自动模式可执行点击和滑动；打开应用、输入文本及系统按键始终需要确认。",
                 style = MaterialTheme.typography.bodySmall)
             Text("同意上传后，截图、当前任务的 Activity 信息、页面控件结构及勾选的应用名称、包名会发送至所配置的 API 服务。",
                 style = MaterialTheme.typography.bodySmall)
@@ -179,19 +212,24 @@ internal fun RootPilotSettingsContent(
         SettingsGroup("诊断与实验") {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onTestRoot, enabled = !busy && !recoveryRequired) { Text("测试 Root") }
-                Button(onClick = onCaptureScreen, enabled = !busy && !recoveryRequired) { Text("截取屏幕") }
+                Button(onClick = onCaptureScreen, enabled = !busy && !recoveryRequired && !virtualDisplay) { Text("截取屏幕") }
             }
-            Button(onClick = onSingleStep, enabled = !busy && !recoveryRequired && apiReady) { Text("单步执行") }
+            Button(onClick = onSingleStep, enabled = !busy && !recoveryRequired && apiReady && !virtualDisplay) { Text("单步执行") }
+            if (virtualDisplay) {
+                Text("副屏按任务新建和关闭，请从任务页开始；副屏模式不提供任务外截屏或单步执行。",
+                    style = MaterialTheme.typography.bodySmall)
+            }
             Text("最近动作：${state.lastAction?.describe() ?: "无"}")
-            val image = state.frame?.let { frame ->
+            val frame = state.frame?.takeIf { !virtualDisplay }
+            val image = frame?.let {
                 remember(frame.bytes) {
                     BitmapFactory.decodeByteArray(frame.bytes, 0, frame.bytes.size)?.asImageBitmap()
                 }
             }
-            image?.let {
-                Text("当前截图：${state.frame.width}x${state.frame.height}")
+            if (image != null && frame != null) {
+                Text("当前截图：${frame.width}x${frame.height}")
                 Image(
-                    bitmap = it,
+                    bitmap = image,
                     contentDescription = "当前手机屏幕截图",
                     modifier = Modifier
                         .fillMaxWidth()
@@ -218,6 +256,64 @@ internal fun RootPilotSettingsContent(
 }
 
 @Composable
+private fun VirtualDisplayAppSelector(
+    appLaunchState: AppLaunchUiState,
+    selectedPackage: String,
+    enabled: Boolean,
+    onSelected: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val apps = appLaunchState.apps.filter { it.packageName in appLaunchState.allowedPackages }
+    val selectedApp = apps.firstOrNull { it.packageName == selectedPackage }
+    val selectionEnabled = enabled && !appLaunchState.busy
+    Text("副屏起始应用", style = MaterialTheme.typography.titleSmall)
+    Box(Modifier.fillMaxWidth()) {
+        Button(
+            onClick = { expanded = true }, enabled = selectionEnabled,
+            modifier = Modifier.fillMaxWidth().testTag("virtual_display_start_app"),
+        ) {
+            Text(when {
+                selectedApp != null -> "${selectedApp.label}\n$selectedPackage"
+                appLaunchState.busy -> "正在核对起始应用…"
+                selectedPackage.isNotEmpty() -> "已选应用不可用：$selectedPackage"
+                else -> "请选择起始应用"
+            })
+        }
+        DropdownMenu(
+            expanded = expanded && selectionEnabled,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.heightIn(max = 300.dp),
+        ) {
+            DropdownMenuItem(
+                text = { Text("不选择起始应用") },
+                onClick = { expanded = false; onSelected("") },
+            )
+            apps.forEach { app ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(app.label)
+                            Text(app.packageName, style = MaterialTheme.typography.bodySmall)
+                        }
+                    },
+                    onClick = { expanded = false; onSelected(app.packageName) },
+                    modifier = Modifier.testTag("virtual_display_app_${app.packageName}"),
+                )
+            }
+        }
+    }
+    when {
+        appLaunchState.busy -> Text("正在读取或保存应用列表…", style = MaterialTheme.typography.bodySmall)
+        selectedPackage.isNotEmpty() && selectedApp == null -> Text(
+            "起始应用不可用：不在允许启动列表或已卸载。请重新允许该应用，或在可编辑时重新选择起始应用。",
+            color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
+        )
+        apps.isEmpty() -> Text("请先在允许启动的应用中勾选应用，再明确选择起始应用。", style = MaterialTheme.typography.bodySmall)
+        selectedPackage.isEmpty() -> Text("需明确选择起始应用后才能开始；选择本身不会启动应用。", style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
 private fun SettingsGroup(title: String, content: @Composable () -> Unit) {
     Text(title, style = MaterialTheme.typography.titleMedium)
     Card(Modifier.fillMaxWidth()) {
@@ -230,9 +326,10 @@ private fun SettingsGroup(title: String, content: @Composable () -> Unit) {
 @Composable
 private fun SettingsToggleRow(
     label: String, checked: Boolean, enabled: Boolean, onCheckedChange: (Boolean) -> Unit,
+    testTag: String = "manual_confirmation",
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(label, Modifier.weight(1f).padding(end = 12.dp))
-        Switch(checked, onCheckedChange, enabled = enabled, modifier = Modifier.testTag("manual_confirmation"))
+        Switch(checked, onCheckedChange, enabled = enabled, modifier = Modifier.testTag(testTag))
     }
 }

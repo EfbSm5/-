@@ -19,6 +19,7 @@ import com.example.agent.rootpilot.apps.AndroidAppCatalog
 import com.example.agent.rootpilot.apps.AppCatalog
 import com.example.agent.rootpilot.apps.AppLaunchAllowlistStore
 import com.example.agent.rootpilot.model.RootPilotApp
+import com.example.agent.rootpilot.model.ExecutionDisplay
 import com.example.agent.rootpilot.root.RootExecutionResult
 import com.example.agent.rootpilot.model.RootPilotConfig
 import com.example.agent.rootpilot.model.RootPilotStatus
@@ -373,6 +374,30 @@ class RootPilotViewModel(
         copy(allowScreenUpload = enabled)
     }
 
+    fun setExecutionDisplay(display: ExecutionDisplay) {
+        if (!canChangeExecutionDisplay()) return
+        updateConfig { copy(executionDisplay = display,
+            allowScreenUpload = allowScreenUpload && executionDisplay == display) }
+    }
+
+    fun setVirtualDisplayStartPackage(packageName: String) {
+        if (!canChangeExecutionDisplay() || uiState.value.config.executionDisplay != ExecutionDisplay.VIRTUAL) return
+        val apps = _appLaunchState.value
+        if (apps.busy) return
+        if (packageName.isNotEmpty() &&
+            (packageName !in apps.allowedPackages || apps.apps.none { it.packageName == packageName })) return
+        updateConfig { copy(virtualDisplayStartPackage = packageName) }
+    }
+
+    private fun canChangeExecutionDisplay(): Boolean {
+        val state = uiState.value
+        return !chatState.value.generating && !state.running && state.status !in setOf(
+            RootPilotStatus.CAPTURING, RootPilotStatus.REQUESTING_MODEL, RootPilotStatus.EXECUTING,
+            RootPilotStatus.WAITING_SCREEN, RootPilotStatus.WAITING_CONFIRMATION, RootPilotStatus.STOPPING,
+            RootPilotStatus.RECOVERY_REQUIRED,
+        )
+    }
+
     fun testRoot() = send(RootPilotService.ACTION_TEST_ROOT)
 
     fun captureScreen() = send(RootPilotService.ACTION_CAPTURE_SCREEN)
@@ -396,7 +421,10 @@ class RootPilotViewModel(
     private fun send(action: String) {
         if (chatState.value.generating && action != RootPilotService.ACTION_STOP &&
             action != RootPilotService.ACTION_CONFIRM) return
-        RootPilotService.send(appContext, action, uiState.value.config)
+        val config = uiState.value.config
+        if (config.executionDisplay == ExecutionDisplay.VIRTUAL &&
+            (action == RootPilotService.ACTION_CAPTURE_SCREEN || action == RootPilotService.ACTION_SINGLE_STEP)) return
+        RootPilotService.send(appContext, action, config)
     }
 
     private fun startTask(action: String) {

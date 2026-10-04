@@ -84,6 +84,7 @@ data class DeviceInfoResult(
 }
 
 fun ScreenObservation.publicMetadata(): JsonObject = buildJsonObject {
+    if (displayId > 0) put("display_id", displayId)
     put("foreground_package", foregroundPackage)
     put("foreground_activity", foregroundActivity)
     put("focused_package", focusedPackage)

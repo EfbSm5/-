@@ -20,6 +20,8 @@ import com.example.agent.rootpilot.screen.ScreenshotCaptureResult
 import com.example.agent.rootpilot.screen.ScreenshotFrame
 import com.example.agent.rootpilot.screen.ScreenshotProvider
 import com.example.agent.rootpilot.screen.ScreenObservation
+import com.example.agent.rootpilot.screen.sameTarget
+import com.example.agent.rootpilot.model.ExecutionDisplay
 import java.security.MessageDigest
 import java.util.UUID
 import java.time.OffsetDateTime
@@ -110,10 +112,11 @@ class AgentLoop(
     suspend fun run(
         request: AgentLoopRequest,
         trace: RunTrace = RunTrace(),
+        recordRunLifecycle: Boolean = true,
         onEvent: suspend (AgentLoopEvent) -> Unit,
     ) {
         try {
-            trace.record(TraceEvent.RUN_START, TraceStatus.STARTED)
+            if (recordRunLifecycle) trace.record(TraceEvent.RUN_START, TraceStatus.STARTED)
             runSteps(request, trace) { event ->
                 when (event) {
                     is AgentLoopEvent.Completed -> {
@@ -137,7 +140,7 @@ class AgentLoop(
                 trace.outcome = TraceStatus.CANCELLED
                 trace.reason = TraceReason.CANCELLED
             }
-            trace.record(TraceEvent.RUN_END, trace.outcome, trace.reason)
+            if (recordRunLifecycle) trace.record(TraceEvent.RUN_END, trace.outcome, trace.reason)
         }
     }
 
@@ -156,6 +159,9 @@ class AgentLoop(
             onEvent(AgentLoopEvent.Failed("发送截图前请先打开上传确认"))
             return
         }
+
+        if (request.config.executionDisplay == ExecutionDisplay.VIRTUAL &&
+            !launchInitialApp(trace, onEvent)) return
 
         val history = mutableListOf<String>()
         // Only successful writes in this run participate; prior runs are independent user requests.
@@ -240,6 +246,11 @@ class AgentLoop(
                     }
 
                     is ToolChatResult.Success -> modelResult
+                }
+                if (!rootExecutor.validateSession()) {
+                    trace.fail(TraceReason.SCREEN_CONTEXT_CHANGED)
+                    onEvent(AgentLoopEvent.Failed("执行屏幕会话已失效，未继续执行"))
+                    return
                 }
                 trace.record(TraceEvent.RESULT, TraceStatus.SUCCESS, modelUsage = decision.usage)
                 if (decision.toolCalls.isNotEmpty()) {
@@ -424,12 +435,17 @@ class AgentLoop(
             val approval = if (
                 actionPolicy.requiresConfirmation(
                     action = action,
-                    manualConfirmation = request.config.manualConfirmation,
+                    manualConfirmation = request.config.manualConfirmation || request.config.executionDisplay == ExecutionDisplay.VIRTUAL,
                 )
             ) {
                 ActionApproval(CompletableDeferred())
             } else {
                 null
+            }
+            if (!rootExecutor.supports(executableAction)) {
+                trace.fail(TraceReason.POLICY_REJECTED)
+                onEvent(AgentLoopEvent.Failed("当前执行屏幕不支持该动作，副屏首版仅支持启动、点击和等待"))
+                return
             }
             var rejected = false
             var contextChanged = false
@@ -500,10 +516,57 @@ class AgentLoop(
         onEvent(AgentLoopEvent.Failed("达到最大步骤数 ${request.maxSteps}，已停止"))
     }
 
-    private fun ScreenObservation.sameWindow(other: ScreenObservation): Boolean =
-        foregroundPackage != null && foregroundActivity != null && focusedPackage != null && focusedWindowId != null &&
-            foregroundPackage == other.foregroundPackage && foregroundActivity == other.foregroundActivity &&
-            focusedPackage == other.focusedPackage && focusedWindowId == other.focusedWindowId
+    private fun ScreenObservation.sameWindow(other: ScreenObservation): Boolean = sameTarget(other)
+
+    private suspend fun launchInitialApp(trace: RunTrace, onEvent: suspend (AgentLoopEvent) -> Unit): Boolean {
+        val app = rootExecutor.initialApp
+        val session = rootExecutor.sessionIdentity
+        if (app == null || session == null || !rootExecutor.validateSession()) {
+            trace.fail(TraceReason.EXECUTION_FAILED)
+            onEvent(AgentLoopEvent.Failed("副屏尚未就绪，未启动应用"))
+            return false
+        }
+        val action = RootPilotAction.OpenApp(app.packageName, "在本次临时副屏打开所选起始应用；结束时关闭该副屏页面")
+        val checked = actionPolicy.toExecutable(action, ScreenSize(1080, 1920), appCatalog.listApps())
+        if (checked !is ActionPolicyResult.Allowed) {
+            trace.fail(TraceReason.POLICY_REJECTED)
+            onEvent(AgentLoopEvent.Failed("副屏起始应用不在允许启动列表中"))
+            return false
+        }
+        val approval = ActionApproval(CompletableDeferred())
+        trace.step = 0
+        trace.action(action)
+        trace.stage = TraceStage.APPROVAL
+        trace.record(TraceEvent.WAITING, TraceStatus.WAITING)
+        onEvent(AgentLoopEvent.AwaitingConfirmation(0, action, approval))
+        val approved = approval.await()
+        trace.approval(approved)
+        if (!approved) {
+            onEvent(AgentLoopEvent.Stopped)
+            return false
+        }
+        currentCoroutineContext().ensureActive()
+        if (rootExecutor.sessionIdentity != session || !rootExecutor.validateSession()) {
+            trace.fail(TraceReason.SCREEN_CONTEXT_CHANGED)
+            onEvent(AgentLoopEvent.Failed("确认对应的副屏会话已失效，未启动应用"))
+            return false
+        }
+        onEvent(AgentLoopEvent.Executing(0, action))
+        currentCoroutineContext().ensureActive()
+        trace.stage = TraceStage.EXECUTION
+        trace.record(TraceEvent.START, TraceStatus.STARTED, action = action, executable = checked.action)
+        when (val result = rootExecutor.execute(checked.action)) {
+            is RootExecutionResult.Failure -> {
+                trace.fail(TraceReason.EXECUTION_FAILED)
+                onEvent(AgentLoopEvent.Failed(result.message))
+                return false
+            }
+            is RootExecutionResult.Success -> trace.record(TraceEvent.RESULT, TraceStatus.SUCCESS)
+        }
+        onEvent(AgentLoopEvent.WaitingScreen(0))
+        delay(SCREEN_SETTLE_MILLIS)
+        return true
+    }
 
     private fun RootPilotAction.describeForHistory(): String = when (this) {
         is RootPilotAction.CreateTodo -> buildJsonObject {

@@ -15,6 +15,7 @@ import com.example.agent.rootpilot.information.DeviceInfoTool
 import com.example.agent.rootpilot.log.InMemoryAgentLogRepository
 import com.example.agent.rootpilot.log.TraceEvent
 import com.example.agent.rootpilot.log.TraceReason
+import com.example.agent.rootpilot.log.TraceStatus
 import com.example.agent.rootpilot.history.RunHistoryRepository
 import com.example.agent.rootpilot.history.RunHistoryRecord
 import com.example.agent.rootpilot.history.RunHistoryStorage
@@ -23,6 +24,9 @@ import com.example.agent.rootpilot.history.RunHistoryError
 import com.example.agent.rootpilot.loop.AgentLoop
 import com.example.agent.rootpilot.model.ExecutableRootAction
 import com.example.agent.rootpilot.model.RootPilotConfig
+import com.example.agent.rootpilot.model.ExecutionDisplay
+import com.example.agent.rootpilot.model.RootPilotApp
+import com.example.agent.rootpilot.apps.AppCatalog
 import com.example.agent.rootpilot.model.RootPilotStatus
 import com.example.agent.rootpilot.model.RootPilotUiState
 import com.example.agent.rootpilot.model.SavedTodoResult
@@ -55,6 +59,124 @@ import org.junit.rules.TemporaryFolder
 @OptIn(ExperimentalCoroutinesApi::class)
 class RootPilotRunControllerTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test fun beginFailureMakesNoCaptureAndClosesBeforeClearingSnapshot() = runTest {
+        val fixture = fixture()
+        fixture.begin = { RootExecutionResult.Failure("fixed") }
+        fixture.end = { assertTrue(fixture.file.exists()); RootExecutionResult.Success() }
+        fixture.start()
+        advanceUntilIdle()
+        assertEquals(1, fixture.begins)
+        assertEquals(1, fixture.ends)
+        assertEquals(0, fixture.captures)
+        assertEquals(0, fixture.modelCalls)
+        assertFalse(fixture.file.exists())
+        assertEquals(RootPilotStatus.FAILED, fixture.state.status)
+        fixture.controller.destroy()
+    }
+
+    @Test fun virtualCompletionWaitsForSessionCloseBeforeReleasingOwnerAndSnapshot() = runTest {
+        val fixture = fixture()
+        fixture.useVirtual()
+        fixture.response = """{"action":"finish","success":true,"message":"fixed"}"""
+        val entered = CompletableDeferred<Unit>()
+        val released = CompletableDeferred<Unit>()
+        fixture.end = { entered.complete(Unit); released.await(); RootExecutionResult.Success() }
+        fixture.start(singleStep = false)
+        runCurrent()
+        assertEquals(RootPilotStatus.WAITING_CONFIRMATION, fixture.state.status)
+        fixture.controller.confirmAction()
+        advanceUntilIdle()
+        assertTrue(entered.isCompleted)
+        assertTrue(fixture.controller.busy)
+        assertTrue(fixture.file.exists())
+        assertNotEquals(RootPilotStatus.COMPLETED, fixture.state.status)
+        assertFalse(fixture.history.state.value.records.single().events.any { it.event == TraceEvent.RUN_END })
+        fixture.start(2, singleStep = false)
+        assertEquals(1, fixture.begins)
+        released.complete(Unit)
+        advanceUntilIdle()
+        runCurrent()
+        assertFalse(fixture.controller.busy)
+        assertFalse(fixture.file.exists())
+        assertEquals(RootPilotStatus.COMPLETED, fixture.state.status)
+        assertEquals(TraceEvent.RUN_END, fixture.history.state.value.records.single().events.last().event)
+        fixture.controller.destroy()
+    }
+
+    @Test fun stopWhileClosingRecordsCancellationAfterCleanup() = runTest {
+        val fixture = fixture()
+        fixture.useVirtual()
+        fixture.response = """{"action":"finish","success":true,"message":"fixed"}"""
+        val closing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        fixture.end = { closing.complete(Unit); release.await(); RootExecutionResult.Success() }
+        fixture.start(singleStep = false)
+        runCurrent()
+        fixture.controller.confirmAction()
+        advanceUntilIdle()
+        assertTrue(closing.isCompleted)
+        fixture.controller.stopAgent(2)
+        assertTrue(fixture.controller.busy)
+        release.complete(Unit)
+        advanceUntilIdle()
+        runCurrent()
+        assertEquals(RootPilotStatus.STOPPED, fixture.state.status)
+        val record = fixture.history.state.value.records.single()
+        assertEquals(RunHistoryStatus.STOPPED, record.status)
+        val ended = record.events.single { it.event == TraceEvent.RUN_END }
+        assertEquals(TraceStatus.CANCELLED, ended.status)
+        assertEquals(TraceReason.CANCELLED, ended.reason)
+        assertFalse(fixture.file.exists())
+        fixture.controller.destroy()
+    }
+
+    @Test fun failedSessionCloseCannotBeBypassedByStopDiscardOrAnotherTask() = runTest {
+        val fixture = fixture()
+        fixture.useVirtual()
+        fixture.response = """{"action":"finish","success":true,"message":"fixed"}"""
+        fixture.end = { RootExecutionResult.Failure("fixed") }
+        fixture.start(singleStep = false)
+        runCurrent()
+        fixture.controller.confirmAction()
+        advanceUntilIdle()
+        runCurrent()
+        assertTrue(fixture.shared.executionBlocked)
+        assertEquals(RootPilotStatus.RECOVERY_REQUIRED, fixture.state.status)
+        assertTrue(fixture.file.exists())
+        assertEquals(RunHistoryStatus.FAILED, fixture.history.state.value.records.single().status)
+        fixture.controller.stopAgent(2)
+        assertTrue(fixture.shared.executionBlocked)
+        assertEquals(RootPilotStatus.RECOVERY_REQUIRED, fixture.state.status)
+        assertTrue(fixture.file.exists())
+        fixture.controller.discardInterruptedRun(2)
+        assertTrue(fixture.file.exists())
+        fixture.start(3, recovering = true, singleStep = false)
+        advanceUntilIdle()
+        assertEquals(1, fixture.begins)
+        fixture.controller.destroy()
+    }
+
+    @Test fun stopDuringBeginStillClosesSessionAndKeepsLeaseUntilCloseReturns() = runTest {
+        val fixture = fixture()
+        val closing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        fixture.begin = { awaitCancellation() }
+        fixture.end = { closing.complete(Unit); release.await(); RootExecutionResult.Success() }
+        fixture.start()
+        runCurrent()
+        fixture.controller.stopAgent(2)
+        runCurrent()
+        assertTrue(closing.isCompleted)
+        assertTrue(fixture.controller.busy)
+        assertEquals(0, fixture.captures)
+        release.complete(Unit)
+        advanceUntilIdle()
+        assertFalse(fixture.controller.busy)
+        assertEquals(RootPilotStatus.STOPPED, fixture.state.status)
+        assertFalse(fixture.file.exists())
+        fixture.controller.destroy()
+    }
 
     @Test fun informationQueryUsesCapturingStateAndDoesNotPersistReceipt() = runTest {
         val fixture = fixture()
@@ -527,6 +649,10 @@ class RootPilotRunControllerTest {
             DeviceInfoResult(DeviceInfoSource.UI_SEMANTICS, 1, 2, buildJsonObject {})
         }
         var executions = 0
+        var begins = 0
+        var ends = 0
+        var begin: suspend () -> RootExecutionResult = { RootExecutionResult.Success() }
+        var end: suspend () -> RootExecutionResult = { RootExecutionResult.Success() }
         var rootChecks = 0
         var cancels = 0
         var response = """{"action":"tap","x":500,"y":250,"reason":"test"}"""
@@ -536,6 +662,10 @@ class RootPilotRunControllerTest {
         var confirmationCleanup: () -> Unit = {}
         val host = Host()
         private val root = object : RootExecutor {
+            override suspend fun beginRun(config: RootPilotConfig): RootExecutionResult { begins++; return begin() }
+            override suspend fun endRun(): RootExecutionResult { ends++; return end() }
+            override val initialApp get() = if (state.config.executionDisplay == ExecutionDisplay.VIRTUAL) testApp else null
+            override val sessionIdentity get() = if (state.config.executionDisplay == ExecutionDisplay.VIRTUAL) "test-session" else null
             override suspend fun observeScreen() = com.example.agent.rootpilot.screen.ScreenObservation(
                 "com.example.fixture", "com.example.fixture.Main", "com.example.fixture", "abc", false, 1L,
             )
@@ -583,6 +713,7 @@ class RootPilotRunControllerTest {
                     }
                 },
                 rootExecutor = root,
+                appCatalog = AppCatalog { listOf(testApp) },
                 todoRepository = object : TodoRepository {
                     override suspend fun addAll(todos: List<CreateTodo>) = saveTodos()
                     override suspend fun list(): List<CreateTodo> = emptyList()
@@ -594,9 +725,14 @@ class RootPilotRunControllerTest {
             history = history,
         )
 
-        fun start(id: Int = 1, recovering: Boolean = false) {
+        private val testApp get() = RootPilotApp("com.example.fixture", "Fixture", "com.example.fixture.Main")
+        fun useVirtual() {
+            shared.mutableState.value = state.copy(config = state.config.copy(executionDisplay = ExecutionDisplay.VIRTUAL,
+                virtualDisplayStartPackage = testApp.packageName))
+        }
+        fun start(id: Int = 1, recovering: Boolean = false, singleStep: Boolean = true) {
             controller.commandStarted(id)
-            controller.startRun(singleStep = true, startId = id, recovering = recovering)
+            controller.startRun(singleStep = singleStep, startId = id, recovering = recovering)
         }
         fun breakStore() {
             if (file.isFile) check(file.delete())

@@ -1,5 +1,6 @@
 package com.example.agent.rootpilot
 
+import com.example.agent.rootpilot.model.ExecutionDisplay
 import com.example.agent.rootpilot.model.RootPilotConfig
 import java.io.File
 import java.io.IOException
@@ -21,11 +22,15 @@ data class RootPilotRunSnapshot(
     val status: String,
     val step: Int,
     val actionSummary: String? = null,
+    val executionDisplay: ExecutionDisplay = ExecutionDisplay.MAIN,
+    val virtualDisplayStartPackage: String = "",
 ) {
     // API credentials and endpoint are owned by the saved configuration, never by a run.
     fun restoreTask(config: RootPilotConfig): RootPilotConfig = config.copy(
         task = task,
         manualConfirmation = manualConfirmation,
+        executionDisplay = executionDisplay,
+        virtualDisplayStartPackage = virtualDisplayStartPackage,
         // Restored tasks require renewed consent, including the current observation fields.
         allowScreenUpload = false,
     )
