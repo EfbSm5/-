@@ -47,6 +47,8 @@
 
 信息查询只接受固定空参数工具，每个动作规划步骤最多 3 次、整个任务最多 12 次，不占动作步骤；用尽后只允许返回最终动作。返回注明来源、采样时间、available／unavailable 和截断状态；最多 200 个 UI 节点、每字段 120 字符，Activity 最多 32 项，结果总上限 256 KiB。无服务、非焦点／非默认显示窗口、未知格式或采集失败不会假装为空树。查询结果仅留在当前规划步骤内存，不写入恢复快照或任务历史。工具和截图是分时采样，不是原子快照；Activity 堆栈不等于 Fragment／Compose 导航，也不保证返回键去向。
 
+当前验收版本的设备动作请求（含只读信息工具决策）使用 LOW 思考、输出上限 65536 Token，与 [DeepSeek 普通思考模式的默认预算](https://api-docs.deepseek.com/api/create-chat-completion/)一致；聊天及文件 Agent 的思考选择和预算不受影响。LOW 仍是验收中的档位选择，不保证不超限或点位正确；仍保留单请求时限、协议校验及逐动作确认，不自动重试失败动作。
+
 屏幕共享的显示结果不等于本机输入结果。RootPilot 输入法与确认悬浮窗使用 `FLAG_SECURE`，可能无法在共享端显示；验收需回读目标文本并检查输入法恢复，不移除保护。存在小米镜像虚拟显示时已确认文本写入与恢复；真实模型／Service 闭环已有成功证据，但响应协议失败根因未定位，整体稳定性为 PARTIAL，未做共享开关的对照实验。
 
 应用选择只限制 `open_app`，不是完整访问隔离：链接、桌面点击、返回键仍可能进入其他应用，其界面和查询信息也可能上传。避免在密码、支付、聊天隐私等页面运行；自动模式不代表安全保证。
@@ -92,6 +94,8 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 `MODEL_FAILED` 可包含白名单 `modelFailureCategory`、HTTP 失败的 `modelHttpStatus`，以及协议失败的 `modelProtocolReason`；同样的类型化字段进入任务历史。未提供字段代表未知，旧历史仍可读取。只按失败发生点分类，不分析原始消息、返回体或异常文本，也不据此自动重试。
 
+设备决策请求的模型结果事件还可包含 `modelUsage`：服务端输入／输出／思考／总 Token 数，以及已解析片段的思考／正文／空白 UTF-16 字符数和固定结束原因。成功和失败均可记录；缺失 Token 字段为未知，畸形或矛盾用量标记 `usageMalformed` 并清空 Token 数，不影响原响应判定。统计只绑定当前请求的 MODEL RESULT，进入现有脱敏日志和任务历史，不进入任务恢复快照；旧历史缺少此字段仍可读。中断时的字符数可能不完整，不能据一次正常请求的用量解释另一次失败。纯聊天、文件 Agent 和旧单步动作路径不采集这些统计。
+
 ### 独立测试页验收
 
 `execution-fixture` 是仅 Debug 的独立测试 APK，不是产品入口。它通过签名权限保护的 Provider 只导出自己的 View 画面，排除系统、键盘和其他应用；非空内容必须是固定测试文本。生产代码不依赖该模块，RootPilot 仅 Debug Manifest 声明访问权限。
@@ -115,6 +119,34 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 真实断连补验由用户仅关闭 RootPilot 页面结构读取，再单独运行 `realServiceContinuesAfterManuallyDisabledPageStructure`（`productionServiceDisconnectedAcceptance=true`）；要求真实 provider 返回 `not_enabled`，生产 Service 处理不可用回执并完成，零输入。重连必须由用户手动重新启用，再跑不联网三工具采集用例；测试代码不修改系统授权，不用默认 instrumentation 人为杀进程充作断连。
 
 本次测试期间 GKD 与 Cumulus 保持连接；仅用户配合补验时关闭／重开 RootPilot 服务。不代表 GKD 业务、所有共存模式、进程死亡恢复、通知或真人触摸确认通过。
+
+### 系统计算器限定验收
+
+`CalculatorLiveAcceptanceInstrumentedTest` 仅用于小米系统计算器固定算式 `123×45`，不增加生产导航特判。两个开关默认关闭：`inspectCalculatorWithoutActionsOrNetwork` 配合 `calculatorPreflight=true` 只读取前台计算器控件，输出固定安全标签、资源 ID、坐标与截断标记；`realServiceOpensCalculatorAndReadsProduct` 配合 `liveCalculatorAcceptance=true` 才调用已保存的 DeepSeek 配置和真实生产 Service。每次只选择对应方法运行，不给整个测试类打开联网开关。
+
+联网前需另行同意固定测试页、计算器及系统层的全屏上传，确认无敏感内容、计算器当前算式为 0、RootPilot 空闲且无恢复记录。安装测试 APK 后先正常打开 RootPilot，再前台打开签名 fixture，使用 `am instrument --no-restart`。测试临时将启动列表限制为计算器，随后只通过真实悬浮窗监听器批准模型提出的启动及 `1、2、3、×、4、5、=` 七次点击；每次核对当前算式和新鲜控件的资源 ID、标签与命中范围。不会操作清除、历史、菜单或其他应用，也不会补点或自动重跑。
+
+通过要求包含真实执行回执、等号后成功的模型控件树查询及后续请求、显示区域中的 5535 和模型完成报告。结束检查原输入法、任务快照，并恢复原配置及启动列表的原字节；无法确认本次启动／停止和执行退出时保留已知画面与环境，报告 `cleanup_unconfirmed_fixture_retained`，需先处理未退出任务，不能宣称清理成功。确认来源是脚本调用实际按钮监听器，不是真人触摸；控件树有截断标记时不声称整页完整。结果及未完成范围见 `SPEC.md`。
+
+### 独立副屏（实验）
+
+“设置 → 任务偏好”中的独立副屏默认关闭。开启后，从允许启动的应用中选择起始应用，再从任务页开始完整任务。每次任务新建 1080×1920、320 dpi 副屏；启动应用和每次点击都需要确认。任务页显示本次副屏截图预览；同意上传后，仅该执行屏幕的截图会发送至配置的 API。
+
+首版支持启动、点击和等待；不支持文字输入、滑动、系统按键、任务外截图和单步执行。副屏信息工具仅提供屏幕上下文，控件树和 Activity 栈返回不支持。既有应用页面可能迁入副屏，不是应用实例、账号或数据隔离。结束会关闭副屏页面；释放未确认时保留恢复记录并禁止新任务，不自动回退主屏。恢复只保留执行模式和起始应用，不复用旧副屏，也不恢复截图上传同意。
+
+`VirtualDisplayAcceptanceInstrumentedTest` 是默认关闭、不联网的底层验收：单独运行 `createsAndClosesEmptyVirtualDisplay` 配合 `virtualDisplayTransportAcceptance=true` 检查创建／释放；单独运行 `calculatesKnownProductOnVirtualDisplay` 配合 `virtualDisplayAcceptance=true` 才通过新鲜副屏节点操作固定算式 `123×45`。后者需要已连接的 RootPilot 页面结构读取，使用 `am instrument --no-restart`，不会清除历史或修改启动列表。测试通过不代表生产 Service、模型或真人确认闭环已通过；实际证据和未验证项见 `SPEC.md`。
+
+`cancelsOwnedVirtualDisplay`（`virtualDisplayCancellationAcceptance=true`）检查空副屏取消清理；`inspectsVirtualCalculatorWithoutInput`（`virtualDisplayInspection=true`）只读检查指定计算器，不输入、不联网。分段续跑用例只接受先前恰好执行数字 1 且清理成功的测试回执，并重新核对当前行，不能用于任意失败任务恢复或自动重放。
+
+`VirtualDisplayServiceAcceptanceInstrumentedTest#realServiceCalculatesOnOwnedVirtualDisplay` 配合默认关闭的 `liveVirtualCalculatorAcceptance=true`，才使用手机已保存的 DeepSeek 配置运行真实 Service、模型与实际悬浮窗确认监听器。须先同意发送非敏感计算器副屏画面，初始状态仅接受 0 或当前完整 `123×45=5535`；初始条件不重复套用于已执行点击后的中间态。只批准一次启动和七个指定键，不清除历史。结束核对 RUN_END、显示消失、输入法及原配置／启动列表恢复；脚本确认不等于真人触摸。LOW／65536 已取得一次独立单任务七键、当前结果 5535、模型成功结束和清理通过的完整证据（61.774 秒）。该固定用例限定 PASS；此前有输出超限和模型点位被拦截的失败，不能据一次成功认定原因消失，整体稳定性仍为 PARTIAL，详见 `SPEC.md`。
+
+真实 Service 的受控续验入口 `realServiceContinuesVerifiedPrefixWithoutReplayingIt` 默认关闭，需 `liveVirtualContinueVerifiedPrefix=true`、`firstKeyIndex`（已完成前缀长度 1–6），以及按执行顺序逗号分隔的 `priorServiceRunIds` 和 `priorServiceAcceptanceDirectories`。首份回执可证明 1–6 键，数量取自本次元数据并与实际 trace／历史逐项核对；仅旧版缺失数量字段时按一键校验。它只接受本固定算式的已核验执行／清理回执链，并逐键重新核对当前行和模型坐标；缺少回执、前缀不符或链外存在后续输入即拒绝。只执行剩余键，不清除、不补点、不自动续跑，也不是产品任务恢复能力；分段完成不能记为一次完整七键通过。
+
+如果回执链已证明等号执行成功、但测试在结果布局过渡时停止，可单独用 `realServiceObservesVerifiedProductWithoutReplayingEquals` 和 `liveVirtualObserveVerifiedProduct=true` 补做结果观察，并提供同样的完整回执链。它只确认启动计算器，禁止任何点击；使用生产新截图及本地当前行核验后，要求模型只报告结果。普通算式测试的结果读取以生产既有的等待与下一轮截图完成为门槛，不在等号执行回执刚到时读取布局；该观察与原输入任务分开计证。
+
+`VirtualCalculatorModelBudgetProbeInstrumentedTest` 是另行授权、默认关闭的历史 4096 基线诊断。仅 `liveVirtualBudgetComparison=true` 且已核验的首键失败回执、零输入当前值检查及原进程保留截图全部匹配时，才各发一次 HIGH/4096、LOW/4096、HIGH/8192 请求；总计最多三次，不重试、不执行返回动作或工具、不改产品配置。三份请求除思考强度和输出预算外相同；已释放副屏的实时观察不可恢复，使用空观察并明确不属于原网络请求重放。只导出原因码、耗时和解析是否通过，不保存模型原文或凭据，也不证明动作点位正确。该次对照已完成；当前设备动作预算为 65536，原探针的基线守卫会在联网前拒绝，不作为当前版本验收入口。
+
+`VirtualCalculatorUsageProbeInstrumentedTest` 是默认关闭、单次授权最多两请求的 8192 用量诊断；须另行同意截图上传及 API 消耗后使用 `liveVirtualUsageProbe=true`。入口绑定指定失败回执、原进程保留的已核验结果图及其哈希，固定重建最后一步，不读取当前屏幕，也不是原请求精确重放。先测 HIGH，仅输出超限时隔 10 秒测试关闭思考；持久尝试标记禁止重复运行。只输出数值、固定原因码及解析是否通过，缺失用量标为未知；不执行动作／工具、不发送 Service 命令、不改生产默认。统计器合成测试不需要开启联网开关。
 
 ### 无需工作区授权的隔离文件验收
 
