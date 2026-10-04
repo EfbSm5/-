@@ -1,0 +1,995 @@
+package com.example.agent.rootpilot
+
+import android.app.KeyguardManager
+import android.content.Context
+import android.graphics.BitmapFactory
+import android.graphics.Point
+import android.graphics.Rect
+import android.hardware.display.DisplayManager
+import android.os.Bundle
+import android.os.SystemClock
+import android.provider.Settings
+import android.view.Display
+import android.view.Surface
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
+import android.view.inspector.WindowInspector
+import android.widget.Button
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.example.agent.rootpilot.apps.AppLaunchAllowlistStore
+import com.example.agent.rootpilot.deepseek.ModelProtocolReason
+import com.example.agent.rootpilot.history.RunHistoryRecord
+import com.example.agent.rootpilot.history.RunHistoryStatus
+import com.example.agent.rootpilot.information.RootPilotAccessibilityService
+import com.example.agent.rootpilot.log.TraceActionType
+import com.example.agent.rootpilot.log.TraceEvent
+import com.example.agent.rootpilot.log.TraceReason
+import com.example.agent.rootpilot.log.TraceStage
+import com.example.agent.rootpilot.log.TraceStatus
+import com.example.agent.rootpilot.model.ExecutionDisplay
+import com.example.agent.rootpilot.model.RootPilotAction
+import com.example.agent.rootpilot.model.RootPilotConfig
+import com.example.agent.rootpilot.model.RootPilotStatus
+import com.example.agent.rootpilot.model.RootPilotUiState
+import com.example.agent.rootpilot.screen.ScreenshotFrame
+import com.example.agent.rootpilot.virtualdisplay.VirtualDisplayProtocol
+import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.ArrayDeque
+import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import org.junit.Assume.assumeTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/**
+ * Opt-in production Service/model/overlay acceptance. Launch RootPilot normally beforehand and
+ * run instrumentation with --no-restart and liveVirtualCalculatorAcceptance=true.
+ * No UiAutomation, fixture, main-display input, screenshot command, or direct confirmation API
+ * is used. The fixed calculation may append history but never clears it. Only calculator frames
+ * already captured by the production virtual run are saved to a unique local cache directory.
+ */
+@RunWith(AndroidJUnit4::class)
+class VirtualDisplayServiceAcceptanceInstrumentedTest {
+    @Test
+    fun realServiceCalculatesOnOwnedVirtualDisplay() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("liveVirtualCalculatorAcceptance") == "true")
+        runBlocking { withRootPilotAcceptanceScreen { Acceptance(InstrumentationRegistry.getInstrumentation().targetContext).run() } }
+    }
+
+    @Test
+    fun realServiceContinuesVerifiedOneWithoutReplayingIt() {
+        val arguments = InstrumentationRegistry.getArguments()
+        assumeTrue(arguments.getString("liveVirtualContinueVerifiedOne") == "true")
+        val prior = PriorRun(
+            arguments.getString("priorServiceRunId").orEmpty(),
+            arguments.getString("priorServiceAcceptanceDirectory").orEmpty(),
+        )
+        runBlocking { Acceptance(InstrumentationRegistry.getInstrumentation().targetContext, PriorChain(1, listOf(prior))).run() }
+    }
+
+    @Test
+    fun realServiceContinuesVerifiedPrefixWithoutReplayingIt() {
+        val arguments = InstrumentationRegistry.getArguments()
+        assumeTrue(arguments.getString("liveVirtualContinueVerifiedPrefix") == "true")
+        val first = arguments.getString("firstKeyIndex")?.toIntOrNull() ?: fail(Reason.PRIOR_RECEIPT_INVALID)
+        check(first in 1..6, Reason.PRIOR_RECEIPT_INVALID)
+        runBlocking { withRootPilotAcceptanceScreen {
+            Acceptance(InstrumentationRegistry.getInstrumentation().targetContext, priorChain(first)).run()
+        } }
+    }
+
+    @Test
+    fun verifiesSixKeyReceiptAndRejectsOverclaimsWithoutDeviceActions() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("verifyVirtualSixKeyReceipt") == "true")
+        verifyReceiptCases(6)
+    }
+
+    @Test
+    fun verifiesOneKeyReceiptAndRejectsOverclaimsWithoutDeviceActions() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("verifyVirtualOneKeyReceipt") == "true")
+        verifyReceiptCases(1)
+    }
+
+    @Test
+    fun verifiesThreeKeyStoppedReceiptAndRejectsOverclaimsWithoutDeviceActions() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("verifyVirtualThreeKeyStoppedReceipt") == "true")
+        verifyReceiptCases(3)
+    }
+
+    private fun verifyReceiptCases(firstKeyIndex: Int) {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val state = RootPilotService.uiState.value
+        val history = RootPilotService.historyState(context)
+        val beforeHistory = history.value
+        check(!state.running && state.pendingAction == null && beforeHistory.error == null, Reason.SERVICE_BUSY)
+        val chain = priorChain(firstKeyIndex)
+        check(chain.receipts.size == 1, Reason.PRIOR_RECEIPT_INVALID)
+        Acceptance(context, chain).verifyPriorWithoutActions()
+        for (invalid in listOf(chain.copy(firstKeyIndex = firstKeyIndex - 1), chain.copy(firstKeyIndex = firstKeyIndex + 1),
+            chain.copy(receipts = chain.receipts + chain.receipts))) {
+            var rejected = false
+            try { Acceptance(context, invalid).verifyPriorWithoutActions() }
+            catch (error: AcceptanceFailure) { rejected = error.reason == Reason.PRIOR_RECEIPT_INVALID }
+            check(rejected, Reason.PRIOR_RECEIPT_INVALID)
+        }
+        check(RootPilotService.uiState.value === state && history.value == beforeHistory, Reason.CONFIG_CHANGED)
+    }
+
+    @Test
+    fun inspectsRetainedFirstKeyFailureWithoutDeviceActions() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("inspectVirtualFirstKeyFailure") == "true")
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val state = RootPilotService.uiState.value
+        val history = RootPilotService.historyState(context)
+        val before = history.value
+        val id = "7e713634-713e-4bb0-beaf-b2ab9afecdd7"
+        val record = before.records.singleOrNull { it.id == id } ?: fail(Reason.HISTORY_UNAVAILABLE)
+        check(android.os.Process.myPid() == 25205 && !state.running && state.pendingAction == null &&
+            state.status == RootPilotStatus.FAILED && state.step == 1 && state.modelReportedResult &&
+            before.error == null && record == before.records.maxByOrNull { it.startedAtEpochMs } &&
+            !record.eventsTruncated && record.events.last().reason == TraceReason.MODEL_REPORTED_FAILURE,
+            Reason.PRIOR_RECEIPT_INVALID)
+        val liveEnd = Json.parseToJsonElement(state.logs.last()).jsonObject
+        check(liveEnd["runId"]?.jsonPrimitive?.contentOrNull == id &&
+            liveEnd["event"]?.jsonPrimitive?.contentOrNull == "run_end", Reason.RUN_IDENTITY)
+        val receipts = record.events.filter { it.stage == TraceStage.EXECUTION && it.event == TraceEvent.RESULT }
+        check(receipts.map { it.actionType } == listOf(TraceActionType.OPEN_APP, TraceActionType.TAP) &&
+            receipts.all { it.status == TraceStatus.SUCCESS } &&
+            record.events.any { it.step == 1 && it.stage == TraceStage.SCREENSHOT &&
+                it.event == TraceEvent.RESULT && it.status == TraceStatus.SUCCESS }, Reason.EXECUTION_COUNT)
+        val frame = state.frame ?: fail(Reason.FRAME_UNAVAILABLE)
+        check(frame.width == 720 && frame.height == 1280 && frame.physicalWidth == WIDTH && frame.physicalHeight == HEIGHT,
+            Reason.FRAME_INVALID)
+        val directory = File(context.cacheDir, "virtual-failure-observation-$id")
+        check(directory.mkdir(), Reason.ARTIFACT_WRITE)
+        directory.resolve("retained.jpg").writeBytes(frame.bytes)
+        val message = state.errorMessage.orEmpty()
+        val report = buildJsonObject {
+            put("runId", id); put("modelReportedFailure", true)
+            put("mentionsInitialCondition", message.contains("初始") || message.contains("initial", ignoreCase = true))
+            put("mentionsZero", message.contains("0")); put("mentionsProduct", message.contains("5535"))
+            put("retainedFrameOnly", true); put("modelRequests", 0); put("deviceActions", 0)
+        }.toString()
+        directory.resolve("metadata.json").writeText(report)
+        InstrumentationRegistry.getInstrumentation().sendStatus(0, Bundle().apply {
+            putString("artifactDirectoryName", directory.name); putString("retainedFailureObservation", report)
+        })
+        check(RootPilotService.uiState.value === state && history.value == before, Reason.CONFIG_CHANGED)
+    }
+
+    @Test
+    fun realServiceObservesVerifiedProductWithoutReplayingEquals() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("liveVirtualObserveVerifiedProduct") == "true")
+        runBlocking { Acceptance(InstrumentationRegistry.getInstrumentation().targetContext, priorChain(7)).run() }
+    }
+
+    private fun priorChain(first: Int): PriorChain {
+        val arguments = InstrumentationRegistry.getArguments()
+        val ids = arguments.getString("priorServiceRunIds").orEmpty().split(',')
+        val directories = arguments.getString("priorServiceAcceptanceDirectories").orEmpty().split(',')
+        check(ids.size == directories.size && ids.size in 1..7, Reason.PRIOR_RECEIPT_INVALID)
+        return PriorChain(first, ids.zip(directories).map { (id, directory) -> PriorRun(id, directory) })
+    }
+
+    private data class PriorRun(val id: String, val directory: String)
+    private data class PriorChain(val firstKeyIndex: Int, val receipts: List<PriorRun>)
+
+    private class Acceptance(private val context: Context, private val prior: PriorChain? = null) {
+        private val firstKeyIndex = prior?.firstKeyIndex ?: 0
+        private val remainingKeys = KEYS.size - firstKeyIndex
+        private val manager = context.getSystemService(DisplayManager::class.java) ?: fail(Reason.DISPLAY_IDENTITY)
+        private val history = RootPilotService.historyState(context)
+        private val selection = context.noBackupFilesDir.resolve("rootpilot_app_launch_allowlist.json")
+        private val originalState = RootPilotService.uiState.value
+        private val originalConfig = originalState.config
+        private val previousIds = history.value.records.map { it.id }.toSet()
+        private val evidence = Evidence(firstKeyIndex, prior?.receipts?.lastOrNull()?.id.orEmpty())
+        private var originalSelection: ByteArray? = null
+        private var installedSelection: ByteArray? = null
+        private var originalIme: String? = null
+        private var configChanged = false
+        private var selectionAttempted = false
+        private var startSent = false
+        private var requestedAt = Long.MAX_VALUE
+        private var testConfig: RootPilotConfig? = null
+        private var owned: OwnedDisplay? = null
+        private var approvedAction: RootPilotAction? = null
+        private var approvedStep = -1
+        private val resultStep: Int get() = if (remainingKeys == 0) 0 else approvedStep + 1
+        private var beforeEqualsFrame: ScreenshotFrame? = null
+        private var failure: Reason? = null
+
+        suspend fun run() {
+            try {
+                withTimeout(RUN_TIMEOUT_MS) {
+                    preflight()
+                    execute()
+                }
+            } catch (error: Throwable) {
+                failure = reason(error)
+            } finally {
+                withContext(NonCancellable) {
+                    cleanup()
+                    evidence.failure = failure?.name ?: "none"
+                    evidence.passed = failure == null && evidence.bodyComplete && evidence.cleanupConfirmed &&
+                        evidence.configRestored && evidence.allowlistRestored
+                    try { evidence.publish() } catch (_: Throwable) {
+                        if (failure == null) failure = Reason.ARTIFACT_WRITE
+                    }
+                }
+            }
+            failure?.let { fail(it) }
+            check(evidence.passed, Reason.ACCEPTANCE_INCOMPLETE)
+        }
+
+        private fun preflight() {
+            check(context.packageName == "com.example.agent", Reason.TARGET_PACKAGE)
+            check(!originalState.running && originalState.pendingAction == null && originalState.status in IDLE_STATES,
+                Reason.SERVICE_BUSY)
+            check(!context.filesDir.resolve(RootPilotRunStore.FILE_NAME).exists(), Reason.RECOVERY_PENDING)
+            check(!context.noBackupFilesDir.resolve("rootpilot_original_ime").exists(), Reason.IME_RECOVERY_PENDING)
+            originalIme = currentIme()
+            check(!originalIme.isNullOrBlank(), Reason.IME_UNAVAILABLE)
+            check(context.getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == false, Reason.DEVICE_LOCKED)
+            check(Settings.canDrawOverlays(context), Reason.OVERLAY_PERMISSION)
+            check(RootPilotAccessibilityService.connectedService != null, Reason.ACCESSIBILITY_UNAVAILABLE)
+            check(privateDisplays().isEmpty(), Reason.EXISTING_PRIVATE_DISPLAY)
+            check(history.value.error == null, Reason.HISTORY_UNAVAILABLE)
+            if (prior != null) verifyPriorPrefix(prior)
+            val component = context.packageManager.getLaunchIntentForPackage(CALCULATOR)?.component
+            check(component != null && component.packageName == CALCULATOR &&
+                component.className == "com.miui.calculator.cal.CalculatorActivity", Reason.CALCULATOR_IDENTITY)
+            val saved = try { RootPilotApiConfigStore.create(context).read() }
+            catch (_: Exception) { fail(Reason.SAVED_CONFIG_UNAVAILABLE) }
+            check(saved != null && saved.apiKey.isNotBlank() && saved.model.isNotBlank(), Reason.SAVED_CONFIG_UNAVAILABLE)
+            check(saved!!.baseUrl.trimEnd('/') == "https://api.deepseek.com", Reason.DEEPSEEK_ENDPOINT)
+            // A null API configuration can only restore the API defaults exactly.
+            check(originalState.apiConfigured || originalConfig.apiKey.isEmpty() &&
+                originalConfig.baseUrl == RootPilotApiConfig().baseUrl &&
+                originalConfig.model == RootPilotApiConfig().model, Reason.ORIGINAL_CONFIG_UNRESTORABLE)
+            evidence.directory = File(context.cacheDir, "virtual-service-acceptance-${UUID.randomUUID()}")
+                .also { check(it.mkdir(), Reason.ARTIFACT_WRITE) }
+            originalSelection = if (selection.exists()) selection.readBytes() else null
+            selectionAttempted = true
+            AppLaunchAllowlistStore.create(context).save(setOf(CALCULATOR))
+            installedSelection = selection.readBytes()
+            configChanged = true
+            RootPilotService.updateApiConfig(saved)
+            testConfig = saved.applyTo(RootPilotConfig(
+                task = if (prior == null) TASK else continuationTask(firstKeyIndex),
+                manualConfirmation = true,
+                allowScreenUpload = true,
+                executionDisplay = ExecutionDisplay.VIRTUAL,
+                virtualDisplayStartPackage = CALCULATOR,
+            ))
+        }
+
+        private fun priorMetadata(prior: PriorRun): JsonObject {
+            check(UUID_PATTERN.matches(prior.id) &&
+                prior.directory.matches(Regex("virtual-service-acceptance-$UUID_PATTERN")), Reason.PRIOR_RECEIPT_INVALID)
+            val file = context.cacheDir.resolve(prior.directory).resolve("metadata.json")
+            check(file.isFile && file.length() in 1..16_384, Reason.PRIOR_RECEIPT_INVALID)
+            val metadata = Json.parseToJsonElement(file.readText()).jsonObject
+            fun text(name: String) = metadata[name]?.jsonPrimitive?.contentOrNull
+            fun flag(name: String) = metadata[name]?.jsonPrimitive?.booleanOrNull == true
+            check(text("runId") == prior.id && text("executionSource") == "production_service" &&
+                text("confirmationSource") == "script_local_view_click" && text("cleanupReason") == "none" &&
+                text("failure") in setOf("TERMINAL_NOT_COMPLETED", "TAP_NOT_ON_EXPECTED_KEY", "CURRENT_ROW_UNAVAILABLE") && !flag("passed") &&
+                !flag("sevenKeysApproved") && !flag("result5535Observed") &&
+                listOf("sessionIdentityVerified", "bootstrapOpenApproved", "initialExpressionKnown",
+                    "initialVirtualImageSaved", "runEnd", "displayGone", "cleanupConfirmed", "imeUnchanged",
+                    "configRestored", "allowlistBytesRestored").all(::flag), Reason.PRIOR_RECEIPT_INVALID)
+            return metadata
+        }
+
+        private fun priorRecord(prior: PriorRun): RunHistoryRecord =
+            (history.value.records.singleOrNull { it.id == prior.id } ?: fail(Reason.PRIOR_RECEIPT_INVALID)).also {
+                check(it.status in setOf(RunHistoryStatus.FAILED, RunHistoryStatus.STOPPED) && !it.eventsTruncated &&
+                    it.events.isNotEmpty() && it.events.all { event -> event.runId == prior.id }, Reason.PRIOR_RECEIPT_INVALID)
+            }
+
+        private fun verifyExecutedPrefix(previous: RunHistoryRecord, taps: Int, equalsExecuted: Boolean) {
+            check(taps in 1..6, Reason.PRIOR_RECEIPT_INVALID)
+            val executions = previous.events.filter { it.stage == TraceStage.EXECUTION }
+            val expected = listOf(TraceActionType.OPEN_APP to 0) + (0 until taps).map { TraceActionType.TAP to it }
+            check(executions.size == expected.size * 2, Reason.PRIOR_RECEIPT_INVALID)
+            executions.chunked(2).zip(expected).forEach { (pair, key) ->
+                check(pair.all { it.actionType == key.first && it.step == key.second } &&
+                    pair.map { it.event } == listOf(TraceEvent.START, TraceEvent.RESULT) &&
+                    pair.map { it.status } == listOf(TraceStatus.STARTED, TraceStatus.SUCCESS), Reason.PRIOR_RECEIPT_INVALID)
+            }
+            check(previous.events.filter { it.event == TraceEvent.CONFIRMED }.map { it.actionType to it.step } == expected &&
+                previous.events.none { it.event in FORBIDDEN_TOOLS || it.event == TraceEvent.TODO_SAVED },
+                Reason.PRIOR_RECEIPT_INVALID)
+            val end = previous.events.last()
+            check(end.event == TraceEvent.RUN_END && end.status in setOf(TraceStatus.FAILED, TraceStatus.CANCELLED) &&
+                end.step == (if (equalsExecuted) taps - 1 else taps), Reason.PRIOR_RECEIPT_INVALID)
+            if (equalsExecuted) check(end.stage == TraceStage.SETTLE && end.status == TraceStatus.CANCELLED &&
+                previous.events.any { it.event == TraceEvent.STOP_REQUESTED && it.step == taps - 1 },
+                Reason.PRIOR_RECEIPT_INVALID)
+        }
+
+        private fun verifyPriorPrefix(chain: PriorChain) {
+            check(chain.firstKeyIndex in 1..7 && chain.receipts.size in 1..7 &&
+                chain.receipts.map { it.id }.distinct().size == chain.receipts.size, Reason.PRIOR_RECEIPT_INVALID)
+            var prefixSize = 0
+            var previous: RunHistoryRecord? = null
+            chain.receipts.forEachIndexed { index, receipt ->
+                val metadata = priorMetadata(receipt)
+                val record = priorRecord(receipt)
+                val taps: Int
+                if (index == 0) {
+                    check(metadata["firstKeyIndex"]?.jsonPrimitive?.intOrNull.let { it == null || it == 0 },
+                        Reason.PRIOR_RECEIPT_INVALID)
+                    val end = record.events.last()
+                    val modelFailed = metadata["failure"]?.jsonPrimitive?.contentOrNull == "TERMINAL_NOT_COMPLETED" &&
+                        record.status == RunHistoryStatus.FAILED &&
+                        end.let {
+                            end.modelFailure?.protocolReason == ModelProtocolReason.OUTPUT_LIMIT ||
+                                end.reason == TraceReason.MODEL_REPORTED_FAILURE && end.stage == TraceStage.PARSE &&
+                                end.actionType == TraceActionType.FINISH
+                        }
+                    val rejectedBeforeConfirmation =
+                        metadata["failure"]?.jsonPrimitive?.contentOrNull == "TAP_NOT_ON_EXPECTED_KEY" &&
+                            metadata["stopRequested"]?.jsonPrimitive?.booleanOrNull == true &&
+                            record.status == RunHistoryStatus.STOPPED && end.stage == TraceStage.APPROVAL &&
+                            end.status == TraceStatus.CANCELLED && end.reason == TraceReason.CANCELLED &&
+                            end.actionType == TraceActionType.TAP && record.events.takeLast(3).let { tail ->
+                                tail.map { it.event } == listOf(TraceEvent.WAITING, TraceEvent.STOP_REQUESTED, TraceEvent.RUN_END) &&
+                                    tail.all { it.step == end.step && it.actionType == TraceActionType.TAP }
+                            }
+                    check(modelFailed || rejectedBeforeConfirmation, Reason.PRIOR_RECEIPT_INVALID)
+                    taps = if ("currentRunApprovedKeyCount" in metadata)
+                        metadata["currentRunApprovedKeyCount"]?.jsonPrimitive?.intOrNull
+                            ?: fail(Reason.PRIOR_RECEIPT_INVALID)
+                    else 1
+                } else {
+                    check(metadata["firstKeyIndex"]?.jsonPrimitive?.intOrNull == prefixSize &&
+                        metadata["priorRunId"]?.jsonPrimitive?.contentOrNull == previous?.id &&
+                        record.startedAtEpochMs > previous!!.startedAtEpochMs, Reason.PRIOR_RECEIPT_INVALID)
+                    taps = metadata["currentRunApprovedKeyCount"]?.jsonPrimitive?.intOrNull
+                        ?: fail(Reason.PRIOR_RECEIPT_INVALID)
+                }
+                val equalsExecuted = prefixSize + taps == 7
+                if (equalsExecuted) check(index == chain.receipts.lastIndex &&
+                    metadata["failure"]?.jsonPrimitive?.contentOrNull == "CURRENT_ROW_UNAVAILABLE" &&
+                    metadata["remainingKeysApproved"]?.jsonPrimitive?.booleanOrNull == true &&
+                    metadata["stopRequested"]?.jsonPrimitive?.booleanOrNull == true, Reason.PRIOR_RECEIPT_INVALID)
+                else check(metadata["failure"]?.jsonPrimitive?.contentOrNull != "CURRENT_ROW_UNAVAILABLE",
+                    Reason.PRIOR_RECEIPT_INVALID)
+                verifyExecutedPrefix(record, taps, equalsExecuted)
+                prefixSize += taps
+                check(prefixSize <= 7, Reason.PRIOR_RECEIPT_INVALID)
+                previous = record
+            }
+            check(prefixSize == chain.firstKeyIndex, Reason.PRIOR_RECEIPT_INVALID)
+            val first = priorRecord(chain.receipts.first())
+            val verifiedIds = chain.receipts.map { it.id }.toSet()
+            // All other later runs must be free of input, including interrupted attempts.
+            check(history.value.records.filter { it.id !in verifiedIds && it.startedAtEpochMs >= first.startedAtEpochMs }
+                .all { later -> !later.eventsTruncated && later.status != RunHistoryStatus.RUNNING &&
+                    later.events.none { it.event == TraceEvent.TODO_SAVED ||
+                        it.stage == TraceStage.EXECUTION && it.actionType != TraceActionType.OPEN_APP } },
+                Reason.PRIOR_RECEIPT_SUPERSEDED)
+        }
+
+        fun verifyPriorWithoutActions() {
+            verifyPriorPrefix(prior ?: fail(Reason.PRIOR_RECEIPT_INVALID))
+        }
+
+        private suspend fun execute() {
+            evidence.stage = "start"
+            requestedAt = System.currentTimeMillis()
+            // A dispatch exception does not prove the Service failed to receive the command.
+            startSent = true
+            RootPilotService.send(context, RootPilotService.ACTION_AUTO_EXECUTE, testConfig)
+            withTimeout(10_000) {
+                while (bindRecord() == null) delay(POLL_MS)
+            }
+            evidence.stage = "confirm"
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val state = RootPilotService.uiState.value
+                check(state.config == testConfig, Reason.CONFIG_CHANGED)
+                val events = liveEvents()
+                checkNoUnsupportedTools(events)
+                // Observe after the production settle/capture cycle, not during the equals animation.
+                if (evidence.opened && evidence.approvedKeys == remainingKeys && !evidence.result5535 &&
+                    state.step >= resultStep && state.frame != null &&
+                    events.any { it.step == resultStep && it.stage == "screenshot" &&
+                        it.event == "result" && it.status == "success" } &&
+                    (remainingKeys == 0 || events.any { it.executionSuccess("tap") && it.step == approvedStep })) {
+                    observeResult()
+                }
+                if (evidence.result5535 && !evidence.resultImage) saveResultFrame()
+                if (state.status == RootPilotStatus.WAITING_CONFIRMATION &&
+                    (state.pendingAction !== approvedAction || state.step != approvedStep)) {
+                    approve(state, events)
+                }
+                if (!state.running && state.status in TERMINAL) break
+                delay(POLL_MS)
+            }
+            val terminal = RootPilotService.uiState.value
+            check(terminal.status == RootPilotStatus.COMPLETED, Reason.TERMINAL_NOT_COMPLETED)
+            check(evidence.opened && evidence.approvedKeys == remainingKeys, Reason.APPROVAL_COUNT)
+            check(terminal.pendingAction == null && terminal.savedTodos.isEmpty(), Reason.UNEXPECTED_SIDE_EFFECT)
+            check(evidence.result5535 && evidence.resultImage, Reason.RESULT_NOT_OBSERVED)
+            evidence.modelReported5535 = terminal.modelReportedResult &&
+                normalize(terminal.errorMessage.orEmpty()).contains("5535")
+            check(evidence.modelReported5535, Reason.MODEL_RESULT_MISMATCH)
+            withTimeout(5_000) {
+                while (record()?.status == RunHistoryStatus.RUNNING ||
+                    record()?.events?.none { it.event == TraceEvent.RUN_END } != false) delay(POLL_MS)
+            }
+            val completed = record() ?: fail(Reason.HISTORY_UNAVAILABLE)
+            check(completed.status == RunHistoryStatus.COMPLETED && !completed.eventsTruncated &&
+                history.value.error == null, Reason.HISTORY_INCOMPLETE)
+            val events = completed.events
+            check(events.all { it.runId == evidence.runId }, Reason.RUN_IDENTITY)
+            check(events.none { it.event in FORBIDDEN_TOOLS }, Reason.UNSUPPORTED_TOOL)
+            val starts = events.filter { it.stage == TraceStage.EXECUTION && it.event == TraceEvent.START }
+            val receipts = events.filter { it.stage == TraceStage.EXECUTION && it.event == TraceEvent.RESULT &&
+                it.status == TraceStatus.SUCCESS }
+            check(starts.size == remainingKeys + 1 && receipts.size == remainingKeys + 1 && receipts.first().actionType == TraceActionType.OPEN_APP &&
+                receipts.drop(1).all { it.actionType == TraceActionType.TAP }, Reason.EXECUTION_COUNT)
+            check(events.count { it.event == TraceEvent.CONFIRMED } == remainingKeys + 1, Reason.APPROVAL_COUNT)
+            check(events.any { it.step >= resultStep && it.stage == TraceStage.MODEL &&
+                it.event == TraceEvent.START }, Reason.FINAL_MODEL_REQUEST_MISSING)
+            evidence.executionsMatched = true
+            evidence.bodyComplete = true
+        }
+
+        private suspend fun approve(expected: RootPilotUiState, events: List<LiveEvent>) {
+            check(expected.running, Reason.SERVICE_BUSY)
+            val action = expected.pendingAction ?: fail(Reason.ACTION_OUTSIDE_SCOPE)
+            if (owned == null) owned = bindDisplay()
+            val display = owned ?: fail(Reason.DISPLAY_IDENTITY)
+            validateDisplay(display)
+            when (action) {
+                is RootPilotAction.OpenApp -> {
+                    check(!evidence.opened && evidence.approvedKeys == 0 && expected.step == 0 &&
+                        action.packageName == CALCULATOR, Reason.ACTION_OUTSIDE_SCOPE)
+                    check(expected.frame == null && events.none { it.stage == "model" || it.stage == "screenshot" },
+                        Reason.BOOTSTRAP_ORDER)
+                }
+                is RootPilotAction.Tap -> {
+                    check(evidence.opened && evidence.approvedKeys < remainingKeys, Reason.ACTION_OUTSIDE_SCOPE)
+                    val successful = events.count { it.executionSuccess("tap") }
+                    check(successful == evidence.approvedKeys &&
+                        events.count { it.executionSuccess("open_app") } == 1, Reason.EXECUTION_ORDER)
+                    val frame = expected.frame ?: fail(Reason.FRAME_UNAVAILABLE)
+                    checkFrame(frame)
+                    val index = firstKeyIndex + evidence.approvedKeys
+                    val sample = collect(display, KEYS[index])
+                    check(if (index == 0) sample.knownInitial() else sample.expression == KEYS[index].before,
+                        Reason.EXPRESSION_MISMATCH)
+                    if (index == firstKeyIndex) {
+                        evidence.initialExpressionKnown = true
+                        if (!evidence.initialImage) {
+                            saveFrame(frame, "initial.jpg")
+                            evidence.initialImage = true
+                        }
+                    }
+                    check(action.x in 0..1000 && action.y in 0..1000, Reason.TAP_COORDINATES)
+                    val x = action.x * (WIDTH - 1) / 1000
+                    val y = action.y * (HEIGHT - 1) / 1000
+                    check(sample.keyBounds?.contains(x, y) == true, Reason.TAP_NOT_ON_EXPECTED_KEY)
+                    check(SystemClock.elapsedRealtime() - sample.finishedAt <= 1_000, Reason.STALE_TARGET)
+                }
+                else -> fail(Reason.ACTION_OUTSIDE_SCOPE)
+            }
+            if (confirmOverlay(expected, display)) {
+                approvedAction = action
+                approvedStep = expected.step
+                if (action is RootPilotAction.OpenApp) evidence.opened = true
+                else {
+                    evidence.approvedKeys++
+                    if (evidence.approvedKeys == remainingKeys) beforeEqualsFrame = expected.frame
+                }
+            }
+        }
+
+        private suspend fun observeResult() {
+            evidence.stage = "read_result"
+            val display = owned ?: fail(Reason.DISPLAY_IDENTITY)
+            // No compensating tap: up to five observations of the same current row only.
+            repeat(5) { attempt ->
+                ensureResultWindow()
+                val sample = collect(display, null)
+                ensureResultWindow()
+                if (sample.knownProduct()) {
+                    if (remainingKeys == 0) {
+                        evidence.initialExpressionKnown = true
+                        saveFrame(RootPilotService.uiState.value.frame ?: fail(Reason.FRAME_UNAVAILABLE), "initial.jpg")
+                        evidence.initialImage = true
+                    }
+                    evidence.result5535 = true
+                    evidence.resultDuringModelRequest = liveEvents().any {
+                        it.step >= resultStep && it.stage == "model" && it.event == "start"
+                    }
+                    evidence.resultBeforeNextModelResponse = true
+                    return
+                }
+                if (attempt < 4) delay(500)
+            }
+            fail(Reason.RESULT_NOT_OBSERVED)
+        }
+
+        private fun ensureResultWindow() {
+            validateDisplay(owned ?: fail(Reason.DISPLAY_IDENTITY))
+            val state = RootPilotService.uiState.value
+            check(state.running && state.config == testConfig, Reason.RESULT_WINDOW_MISSED)
+            check(liveEvents().none {
+                it.step >= resultStep && it.stage == "model" && it.event == "result"
+            }, Reason.RESULT_WINDOW_MISSED)
+        }
+
+        private fun saveResultFrame() {
+            val state = RootPilotService.uiState.value
+            val frame = state.frame ?: return
+            if (frame === beforeEqualsFrame || state.step < resultStep) return
+            val events = liveEvents()
+            if (events.none { it.step == state.step && it.stage == "screenshot" &&
+                    it.event == "result" && it.status == "success" }) return
+            validateDisplay(owned ?: fail(Reason.DISPLAY_IDENTITY))
+            check(state.config == testConfig && state.running, Reason.RESULT_WINDOW_MISSED)
+            saveFrame(frame, "result.jpg")
+            evidence.resultImage = true
+        }
+
+        private fun confirmOverlay(expected: RootPilotUiState, display: OwnedDisplay): Boolean {
+            var clicked = false
+            var rejected: Throwable? = null
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                try {
+                    val current = RootPilotService.uiState.value
+                    if (!current.running || current.status != RootPilotStatus.WAITING_CONFIRMATION ||
+                        current.pendingAction !== expected.pendingAction || current.step != expected.step ||
+                        current.frame !== expected.frame) return@runOnMainSync
+                    check(current.config == testConfig, Reason.CONFIG_CHANGED)
+                    validateDisplay(display)
+                    checkNoUnsupportedTools(liveEvents())
+                    val panel = WindowInspector.getGlobalWindowViews().singleOrNull {
+                        it.isAttachedToWindow &&
+                            (it.layoutParams as? WindowManager.LayoutParams)?.title == "RootPilotOverlay"
+                    } ?: return@runOnMainSync
+                    check((panel.layoutParams as WindowManager.LayoutParams).flags and
+                        WindowManager.LayoutParams.FLAG_SECURE != 0, Reason.OVERLAY_IDENTITY)
+                    val button = views(panel).filterIsInstance<Button>()
+                        .filter { it.text.toString() == "确认" }.singleOrNull() ?: return@runOnMainSync
+                    if (button.isEnabled && button.isShown) clicked = button.performClick()
+                } catch (error: Throwable) { rejected = error }
+            }
+            rejected?.let { throw it }
+            return clicked
+        }
+
+        private fun bindRecord(): RunHistoryRecord? {
+            val candidates = history.value.records.filter {
+                it.id !in previousIds && it.startedAtEpochMs >= requestedAt
+            }
+            check(candidates.size <= 1, Reason.RUN_IDENTITY)
+            val fresh = candidates.singleOrNull() ?: return null
+            check(UUID.fromString(fresh.id).toString() == fresh.id, Reason.RUN_IDENTITY)
+            if (evidence.runId.isEmpty()) evidence.runId = fresh.id
+            check(fresh.id == evidence.runId, Reason.RUN_IDENTITY)
+            return fresh
+        }
+
+        private fun record(): RunHistoryRecord? = if (evidence.runId.isEmpty()) bindRecord()
+            else history.value.records.singleOrNull { it.id == evidence.runId }
+
+        private fun liveEvents(): List<LiveEvent> = RootPilotService.uiState.value.logs.mapNotNull { line ->
+            val value = try { Json.parseToJsonElement(line).jsonObject } catch (_: Exception) { return@mapNotNull null }
+            if (value["runId"]?.jsonPrimitive?.contentOrNull != evidence.runId) return@mapNotNull null
+            fun field(name: String) = value[name]?.jsonPrimitive?.contentOrNull.orEmpty()
+            LiveEvent(value["step"]?.jsonPrimitive?.intOrNull ?: -1,
+                field("stage"), field("event"), field("status"), field("actionType"))
+        }
+
+        private fun privateDisplays(): List<Display> = manager.displays.filter {
+            it.name.startsWith(VirtualDisplayProtocol.DISPLAY_PREFIX)
+        }
+
+        private fun bindDisplay(): OwnedDisplay {
+            val display = privateDisplays().singleOrNull() ?: fail(Reason.DISPLAY_IDENTITY)
+            val session = display.name.removePrefix(VirtualDisplayProtocol.DISPLAY_PREFIX)
+            check(UUID.fromString(session).toString() == session, Reason.DISPLAY_IDENTITY)
+            return OwnedDisplay(display.displayId, display.name, session).also {
+                validateDisplay(it)
+                evidence.sessionValid = true
+            }
+        }
+
+        private fun validateDisplay(expected: OwnedDisplay) {
+            val display = privateDisplays().singleOrNull() ?: fail(Reason.DISPLAY_IDENTITY)
+            check(display.displayId == expected.id && expected.id > 0 && display.name == expected.name &&
+                display.name == VirtualDisplayProtocol.DISPLAY_PREFIX + expected.session &&
+                display.isValid && display.rotation == Surface.ROTATION_0,
+                Reason.DISPLAY_IDENTITY)
+            val size = Point()
+            display.getRealSize(size)
+            check(size.x == WIDTH && size.y == HEIGHT, Reason.DISPLAY_GEOMETRY)
+        }
+
+        private fun checkFrame(frame: ScreenshotFrame) {
+            check(frame.physicalWidth == WIDTH && frame.physicalHeight == HEIGHT &&
+                frame.bytes.size in 8..(16 * 1024 * 1024), Reason.FRAME_INVALID)
+        }
+
+        private fun saveFrame(frame: ScreenshotFrame, filename: String) {
+            checkFrame(frame)
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(frame.bytes, 0, frame.bytes.size, options)
+            check(options.outMimeType == "image/jpeg" && options.outWidth == frame.width &&
+                options.outHeight == frame.height && frame.width > 0 && frame.height > 0, Reason.FRAME_INVALID)
+            (evidence.directory ?: fail(Reason.ARTIFACT_WRITE)).resolve(filename).writeBytes(frame.bytes)
+        }
+
+        private suspend fun collect(expected: OwnedDisplay, key: KeySpec?): Sample = withContext(Dispatchers.IO) {
+            validateDisplay(expected)
+            val started = SystemClock.elapsedRealtime()
+            val service = RootPilotAccessibilityService.connectedService ?: fail(Reason.ACCESSIBILITY_UNAVAILABLE)
+            fun window(): AccessibilityWindowInfo {
+                val windows = service.windowsOnAllDisplays[expected.id] ?: fail(Reason.WINDOW_UNAVAILABLE)
+                check(windows.size <= 16, Reason.TREE_LIMIT)
+                return windows.filter { it.displayId == expected.id && it.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                    it.isFocused }.singleOrNull() ?: fail(Reason.WINDOW_UNAVAILABLE)
+            }
+            val selected = window()
+            val root = selected.root ?: fail(Reason.WINDOW_UNAVAILABLE)
+            check(root.packageName?.toString() == CALCULATOR && root.windowId == selected.id &&
+                root.isVisibleToUser, Reason.WINDOW_IDENTITY)
+            fun safe(node: AccessibilityNodeInfo) {
+                checkQueryDeadline(started)
+                check(node.windowId == selected.id && node.packageName?.toString() == CALCULATOR, Reason.WINDOW_IDENTITY)
+                check(!node.isPassword && !node.isAccessibilityDataSensitive, Reason.SENSITIVE_NODE)
+            }
+            fun unique(id: String): AccessibilityNodeInfo {
+                val nodes = root.findAccessibilityNodeInfosByViewId("$CALCULATOR:id/$id")
+                check(nodes.size <= 128, Reason.TREE_LIMIT)
+                val visible = nodes.filter { safe(it); it.isVisibleToUser }
+                check(visible.size == 1, Reason.TARGET_UNAVAILABLE)
+                return visible.single().also {
+                    check(it.refresh() && it.isVisibleToUser, Reason.TARGET_UNAVAILABLE)
+                    safe(it)
+                }
+            }
+            data class ExpressionTarget(val node: AccessibilityNodeInfo, val row: AccessibilityNodeInfo, val viewport: Rect)
+            val expressions = root.findAccessibilityNodeInfosByViewId("$CALCULATOR:id/expression")
+            check(expressions.size <= 128, Reason.TREE_LIMIT)
+            val targets = expressions.mapNotNull { expression ->
+                safe(expression)
+                if (!expression.isVisibleToUser) return@mapNotNull null
+                check(expression.refresh(), Reason.TARGET_UNAVAILABLE)
+                safe(expression)
+                var parent = expression.parent
+                var row: AccessibilityNodeInfo? = null
+                var viewport: Rect? = null
+                repeat(32) {
+                    val node = parent ?: return@repeat
+                    safe(node)
+                    check(node.isVisibleToUser, Reason.TARGET_UNAVAILABLE)
+                    if (node.viewIdResourceName == "$CALCULATOR:id/history_item" && row == null) row = node
+                    if (node.viewIdResourceName == "$CALCULATOR:id/listView") {
+                        viewport = bounds(node)
+                        parent = null
+                    } else parent = node.parent
+                }
+                val rowNode = row ?: fail(Reason.CURRENT_ROW_UNAVAILABLE)
+                val displayBounds = viewport ?: fail(Reason.CURRENT_ROW_UNAVAILABLE)
+                val rectangle = bounds(expression)
+                if (!inside(rectangle) || !displayBounds.contains(rectangle)) return@mapNotNull null
+                check(bounds(rowNode).contains(rectangle), Reason.CURRENT_ROW_UNAVAILABLE)
+                ExpressionTarget(expression, rowNode, displayBounds)
+            }
+            check(targets.isNotEmpty(), Reason.CURRENT_ROW_UNAVAILABLE)
+            // This fixed calculator places history above the current row. Select only a
+            // unique lowest row with no overlap, never a historical value matching the task.
+            val bottom = targets.maxOf { bounds(it.node).bottom }
+            val lowest = targets.filter { bounds(it.node).bottom == bottom }
+            check(lowest.map { it.row }.distinct().size == 1, Reason.CURRENT_ROW_AMBIGUOUS)
+            val current = lowest.first()
+            val currentTop = bounds(current.node).top
+            check(targets.all { it in lowest || bounds(it.node).bottom <= currentTop }, Reason.CURRENT_ROW_AMBIGUOUS)
+            val expression = current.node
+            val rowNode = current.row
+            val viewport = current.viewport
+            val expressionLabels = lowest.flatMap { labels(it.node).map(::expressionValue) }
+                .filter { it != Expression.OTHER }.distinct()
+            check(expressionLabels.size == 1, Reason.EXPRESSION_MISMATCH)
+            val rowBounds = bounds(rowNode)
+            val expressionBounds = bounds(expression)
+            check(inside(expressionBounds) && rowBounds.contains(expressionBounds) &&
+                viewport.contains(expressionBounds), Reason.CURRENT_ROW_UNAVAILABLE)
+            var product = false
+            var complete = false
+            val pending = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+            pending.add(rowNode to 0)
+            var visited = 0
+            while (pending.isNotEmpty()) {
+                currentCoroutineContext().ensureActive()
+                val (node, depth) = pending.removeLast()
+                safe(node)
+                check(++visited <= 128 && depth <= 32, Reason.TREE_LIMIT)
+                if (!node.isVisibleToUser) continue
+                val rectangle = bounds(node)
+                if (inside(rectangle) && rowBounds.contains(rectangle) && viewport.contains(rectangle)) {
+                    val values = labels(node).map(::expressionValue)
+                    product = product || Expression.PRODUCT in values || Expression.EQUATION in values
+                    complete = complete || Expression.COMPLETE in values || Expression.EQUATION in values
+                }
+                check(node.childCount <= 128 - visited - pending.size, Reason.TREE_LIMIT)
+                repeat(node.childCount) { index ->
+                    pending.add((node.getChild(index) ?: fail(Reason.TARGET_UNAVAILABLE)) to depth + 1)
+                }
+            }
+            val keyBounds = key?.let {
+                val node = unique(it.id)
+                check(node.isEnabled && node.isClickable && labels(node).any { label -> label in it.labels },
+                    Reason.KEY_UNAVAILABLE)
+                bounds(node).also { rectangle -> check(inside(rectangle), Reason.KEY_UNAVAILABLE) }
+            }
+            safe(expression)
+            check(expression.refresh() && labels(expression).map(::expressionValue)
+                .filter { it != Expression.OTHER }.distinct() == expressionLabels, Reason.STALE_TARGET)
+            validateDisplay(expected)
+            check(RootPilotAccessibilityService.connectedService === service && window().id == selected.id,
+                Reason.WINDOW_IDENTITY)
+            Sample(expressionLabels.single(), product, complete, keyBounds, SystemClock.elapsedRealtime())
+        }
+
+        private suspend fun cleanup() {
+            evidence.stage = "cleanup"
+            var settled = !startSent
+            if (startSent) {
+                try {
+                    val ended = record()?.events?.any { it.event == TraceEvent.RUN_END } == true
+                    val stopSent = !ended || RootPilotService.uiState.value.running
+                    evidence.stopRequested = stopSent
+                    if (stopSent) RootPilotService.send(context, RootPilotService.ACTION_STOP)
+                    withTimeout(20_000) {
+                        while (true) {
+                            val events = record()?.events.orEmpty()
+                            val state = RootPilotService.uiState.value
+                            val stopHandled = !stopSent || state.status == RootPilotStatus.STOPPED ||
+                                events.any { it.event == TraceEvent.STOP_REQUESTED }
+                            val displayGone = privateDisplays().isEmpty() &&
+                                (owned?.let { manager.getDisplay(it.id) == null } ?: true)
+                            if (events.any { it.event == TraceEvent.RUN_END } && !state.running && stopHandled && displayGone) {
+                                settled = true
+                                evidence.runEnd = true
+                                evidence.displayGone = true
+                                break
+                            }
+                            delay(POLL_MS)
+                        }
+                    }
+                } catch (_: Throwable) {
+                    evidence.cleanupReason = Reason.CLEANUP_UNCONFIRMED.name
+                    if (failure == null) failure = Reason.CLEANUP_UNCONFIRMED
+                }
+            }
+            evidence.cleanupConfirmed = settled
+            // A missing STOP/release receipt deliberately retains the active test environment.
+            if (!settled) return
+            try {
+                check(currentIme() == originalIme && !context.noBackupFilesDir.resolve("rootpilot_original_ime").exists(),
+                    Reason.IME_CHANGED)
+                check(!context.filesDir.resolve(RootPilotRunStore.FILE_NAME).exists(), Reason.RECOVERY_PENDING)
+                evidence.imeUnchanged = true
+                if (selectionAttempted) {
+                    val installed = installedSelection ?: fail(Reason.ALLOWLIST_RESTORE_UNCERTAIN)
+                    check(selection.exists() && selection.readBytes().contentEquals(installed), Reason.ALLOWLIST_CHANGED)
+                    val original = originalSelection
+                    if (original == null) check(selection.delete(), Reason.ALLOWLIST_RESTORE_FAILED)
+                    else {
+                        val temporary = Files.createTempFile(selection.parentFile!!.toPath(), "virtual-calc-restore-", ".tmp")
+                        try {
+                            temporary.toFile().outputStream().use { output -> output.write(original); output.fd.sync() }
+                            Files.move(temporary, selection.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                        } finally { Files.deleteIfExists(temporary) }
+                        check(selection.readBytes().contentEquals(original), Reason.ALLOWLIST_RESTORE_FAILED)
+                    }
+                }
+                evidence.allowlistRestored = true
+                if (configChanged) {
+                    check(!RootPilotService.uiState.value.running, Reason.SERVICE_BUSY)
+                    RootPilotService.updateConfig(originalConfig)
+                    RootPilotService.updateApiConfig(if (originalState.apiConfigured)
+                        RootPilotApiConfig(originalConfig.apiKey, originalConfig.baseUrl, originalConfig.model) else null)
+                }
+                check(RootPilotService.uiState.value.config == originalConfig &&
+                    RootPilotService.uiState.value.apiConfigured == originalState.apiConfigured, Reason.CONFIG_RESTORE_FAILED)
+                evidence.configRestored = true
+            } catch (error: Throwable) {
+                evidence.cleanupReason = reason(error).name
+                if (failure == null) failure = reason(error)
+            }
+        }
+
+        private fun currentIme(): String? = Settings.Secure.getString(context.contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
+    }
+
+    private data class OwnedDisplay(val id: Int, val name: String, val session: String)
+    private data class LiveEvent(val step: Int, val stage: String, val event: String, val status: String, val action: String) {
+        fun executionSuccess(type: String) = stage == "execution" && event == "result" && status == "success" && action == type
+    }
+    private enum class Expression { ZERO, ONE, TWELVE, HUNDRED_TWENTY_THREE, MULTIPLY, MULTIPLY_FOUR, COMPLETE, PRODUCT, EQUATION, OTHER }
+    private data class KeySpec(val id: String, val labels: Set<String>, val before: Expression)
+    private data class Sample(val expression: Expression, val product: Boolean, val complete: Boolean,
+        val keyBounds: Rect?, val finishedAt: Long) {
+        fun knownInitial() = expression == Expression.ZERO || knownProduct()
+        fun knownProduct() = product && complete && expression in setOf(Expression.COMPLETE, Expression.PRODUCT, Expression.EQUATION)
+    }
+
+    private class Evidence(private val firstKeyIndex: Int, private val priorRunId: String) {
+        var directory: File? = null
+        var runId = ""
+        var stage = "preflight"
+        var failure = "none"
+        var cleanupReason = "none"
+        var passed = false
+        var bodyComplete = false
+        var opened = false
+        var approvedKeys = 0
+        var sessionValid = false
+        var initialExpressionKnown = false
+        var initialImage = false
+        var resultImage = false
+        var result5535 = false
+        var modelReported5535 = false
+        var resultDuringModelRequest = false
+        var resultBeforeNextModelResponse = false
+        var executionsMatched = false
+        var stopRequested = false
+        var cleanupConfirmed = false
+        var runEnd = false
+        var displayGone = false
+        var imeUnchanged = false
+        var configRestored = false
+        var allowlistRestored = false
+
+        fun publish() {
+            val metadata = buildJsonObject {
+                put("runId", runId); put("stage", stage); put("failure", failure); put("cleanupReason", cleanupReason)
+                put("passed", passed); put("bodyComplete", bodyComplete)
+                put("executionSource", "production_service")
+                put("confirmationSource", "script_local_view_click")
+                put("physicalHumanConfirmation", false)
+                put("firstKeyIndex", firstKeyIndex); put("priorRunId", priorRunId)
+                put("currentRunApprovedKeyCount", approvedKeys)
+                put("remainingKeysApproved", approvedKeys == KEYS.size - firstKeyIndex)
+                put("sessionIdentityVerified", sessionValid); put("bootstrapOpenApproved", opened)
+                put("sevenKeysApproved", approvedKeys == 7); put("initialExpressionKnown", initialExpressionKnown)
+                put("initialVirtualImageSaved", initialImage); put("resultVirtualImageSaved", resultImage)
+                put("result5535Observed", result5535); put("modelReported5535", modelReported5535)
+                put("resultDuringNextModelRequest", resultDuringModelRequest)
+                put("resultBeforeNextModelResponse", resultBeforeNextModelResponse)
+                put("exactExecutionReceipts", executionsMatched); put("stopRequested", stopRequested)
+                put("runEnd", runEnd); put("displayGone", displayGone); put("cleanupConfirmed", cleanupConfirmed)
+                put("imeUnchanged", imeUnchanged); put("configRestored", configRestored)
+                put("allowlistBytesRestored", allowlistRestored)
+            }.toString()
+            directory?.resolve("metadata.json")?.writeText(metadata)
+            InstrumentationRegistry.getInstrumentation().sendStatus(0, Bundle().apply {
+                putString("virtualDisplayServiceAcceptance", metadata)
+                putString("artifactDirectoryName", directory?.name.orEmpty())
+            })
+        }
+    }
+
+    private class AcceptanceFailure(val reason: Reason) : AssertionError(reason.name)
+    private enum class Reason {
+        TARGET_PACKAGE, SERVICE_BUSY, RECOVERY_PENDING, IME_RECOVERY_PENDING, IME_UNAVAILABLE, DEVICE_LOCKED,
+        OVERLAY_PERMISSION, ACCESSIBILITY_UNAVAILABLE, EXISTING_PRIVATE_DISPLAY, HISTORY_UNAVAILABLE,
+        CALCULATOR_IDENTITY, SAVED_CONFIG_UNAVAILABLE, DEEPSEEK_ENDPOINT, ORIGINAL_CONFIG_UNRESTORABLE,
+        ARTIFACT_WRITE, CONFIG_CHANGED, RUN_IDENTITY, DISPLAY_IDENTITY, DISPLAY_GEOMETRY, BOOTSTRAP_ORDER,
+        ACTION_OUTSIDE_SCOPE, EXECUTION_ORDER, FRAME_UNAVAILABLE, FRAME_INVALID, EXPRESSION_MISMATCH,
+        TAP_COORDINATES, TAP_NOT_ON_EXPECTED_KEY, STALE_TARGET, OVERLAY_IDENTITY, UNSUPPORTED_TOOL,
+        WINDOW_UNAVAILABLE, WINDOW_IDENTITY, SENSITIVE_NODE, TREE_LIMIT, TREE_TIMEOUT, TARGET_UNAVAILABLE,
+        CURRENT_ROW_UNAVAILABLE, CURRENT_ROW_AMBIGUOUS, KEY_UNAVAILABLE, LABEL_LIMIT, RESULT_WINDOW_MISSED, RESULT_NOT_OBSERVED,
+        TERMINAL_NOT_COMPLETED, APPROVAL_COUNT, UNEXPECTED_SIDE_EFFECT, MODEL_RESULT_MISMATCH,
+        HISTORY_INCOMPLETE, EXECUTION_COUNT, FINAL_MODEL_REQUEST_MISSING, CLEANUP_UNCONFIRMED, IME_CHANGED,
+        ALLOWLIST_RESTORE_UNCERTAIN, ALLOWLIST_CHANGED, ALLOWLIST_RESTORE_FAILED, CONFIG_RESTORE_FAILED,
+        ACCEPTANCE_INCOMPLETE, PRIOR_RECEIPT_INVALID, PRIOR_RECEIPT_SUPERSEDED, TIMEOUT, CANCELLED, UNEXPECTED,
+    }
+
+    private companion object {
+        const val CALCULATOR = "com.miui.calculator"
+        const val WIDTH = VirtualDisplayProtocol.WIDTH
+        const val HEIGHT = VirtualDisplayProtocol.HEIGHT
+        const val RUN_TIMEOUT_MS = 240_000L
+        const val POLL_MS = 25L
+        val UUID_PATTERN = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+        const val TASK = "请只在本次独立副屏中的系统计算器完成固定计算。启动由启动确认完成，不要再次打开应用。根据每轮最新副屏截图与最近成功动作判断下一键。初始条件只在本任务尚未执行任何点击时检查：当前行只能为0或同一行完整的123×45=5535，否则失败结束。开始点击后，1、12、123、123×、123×4、123×45都是正常中间态，不得再套用初始条件拒绝，也不要重放已经成功的按键。依次且仅点击1、2、3、×、4、5、=，每键一次，不清除历史，不输入文本，不使用系统按键、滑动、等待动作或其他功能。禁止调用get_ui_tree和get_activity_stack，副屏不支持这些工具。最后一次等号后，必须根据新截图视觉读取当前123×45的结果，只有看到5535才报告读到5535并成功finish；否则失败finish。"
+        fun continuationTask(first: Int): String {
+            check(first in 1..7, Reason.PRIOR_RECEIPT_INVALID)
+            if (first == 7) return "副屏计算器已打开，之前的任务已经逐键完成123×45及等号。现在只读取当前行算式和结果，不是上方历史。禁止点击、重新打开应用、信息工具或其他动作。当前行确为123×45且结果为5535时，返回成功finish并报告5535；否则失败finish。不要重算，不要再按等号。只返回一个finish动作JSON。"
+            val prefix = listOf("", "1", "12", "123", "123×", "123×4", "123×45")[first]
+            val remaining = listOf("1", "2", "3", "×", "4", "5", "=").drop(first).joinToString("、")
+            return "副屏计算器已打开。之前的任务已输入$prefix，本任务仅继续点击$remaining，每键一次，不重放已有输入，不清除。根据每轮最新截图与最近动作判断下一键，不把初始值当成每轮的值。不要重新打开应用、调用信息工具或执行其他操作。等号后读取当前行结果（不是上方历史）；看到5535才成功finish并报告5535，否则失败finish。每轮只输出一个动作JSON。"
+        }
+        val IDLE_STATES = setOf(RootPilotStatus.IDLE, RootPilotStatus.STOPPED, RootPilotStatus.COMPLETED, RootPilotStatus.FAILED)
+        val TERMINAL = setOf(RootPilotStatus.STOPPED, RootPilotStatus.COMPLETED, RootPilotStatus.FAILED, RootPilotStatus.RECOVERY_REQUIRED)
+        val FORBIDDEN_TOOLS = setOf(TraceEvent.READ_UI_TREE, TraceEvent.READ_ACTIVITY_STACK)
+        val KEYS = listOf(
+            KeySpec("digit_1", setOf("1"), Expression.ZERO),
+            KeySpec("digit_2", setOf("2"), Expression.ONE),
+            KeySpec("digit_3", setOf("3"), Expression.TWELVE),
+            KeySpec("op_mul", setOf("×", "乘", "乘号"), Expression.HUNDRED_TWENTY_THREE),
+            KeySpec("digit_4", setOf("4"), Expression.MULTIPLY),
+            KeySpec("digit_5", setOf("5"), Expression.MULTIPLY_FOUR),
+            KeySpec("btn_equal_s", setOf("=", "等于"), Expression.COMPLETE),
+        )
+        fun normalize(value: String) = value.filterNot { it.isWhitespace() || it == ',' }
+        fun expressionValue(value: String): Expression = when (normalize(value).removePrefix("=")) {
+            "0" -> Expression.ZERO
+            "1" -> Expression.ONE
+            "12" -> Expression.TWELVE
+            "123" -> Expression.HUNDRED_TWENTY_THREE
+            "123×" -> Expression.MULTIPLY
+            "123×4" -> Expression.MULTIPLY_FOUR
+            "123×45" -> Expression.COMPLETE
+            "5535" -> Expression.PRODUCT
+            "123×45=5535" -> Expression.EQUATION
+            else -> Expression.OTHER
+        }
+        fun labels(node: AccessibilityNodeInfo) = listOfNotNull(node.text, node.contentDescription).map {
+            check(it.length <= 128, Reason.LABEL_LIMIT)
+            it.toString().trim()
+        }
+        fun bounds(node: AccessibilityNodeInfo) = Rect().also(node::getBoundsInScreen)
+        fun inside(rect: Rect) = !rect.isEmpty && rect.left >= 0 && rect.top >= 0 && rect.right <= WIDTH && rect.bottom <= HEIGHT
+        fun checkQueryDeadline(started: Long) {
+            check(SystemClock.elapsedRealtime() - started < 3_000, Reason.TREE_TIMEOUT)
+        }
+        fun checkNoUnsupportedTools(events: List<LiveEvent>) {
+            check(events.none { it.event == "read_ui_tree" || it.event == "read_activity_stack" }, Reason.UNSUPPORTED_TOOL)
+        }
+        fun views(root: View): List<View> {
+            val pending = ArrayDeque<View>()
+            val found = mutableListOf<View>()
+            pending.add(root)
+            while (pending.isNotEmpty()) {
+                check(found.size + pending.size <= 128, Reason.OVERLAY_IDENTITY)
+                val view = pending.removeFirst()
+                found.add(view)
+                if (view is ViewGroup) repeat(view.childCount) { pending.add(view.getChildAt(it)) }
+            }
+            return found
+        }
+        fun check(value: Boolean, reason: Reason) { if (!value) fail(reason) }
+        fun fail(reason: Reason): Nothing = throw AcceptanceFailure(reason)
+        fun reason(error: Throwable): Reason = when (error) {
+            is AcceptanceFailure -> error.reason
+            is TimeoutCancellationException -> Reason.TIMEOUT
+            is CancellationException -> Reason.CANCELLED
+            else -> Reason.UNEXPECTED
+        }
+    }
+}
