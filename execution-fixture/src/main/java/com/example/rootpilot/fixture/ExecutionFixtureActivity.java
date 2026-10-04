@@ -6,6 +6,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.os.Bundle;
+import android.os.Process;
 import android.text.InputType;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
@@ -14,12 +15,14 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import java.io.ByteArrayOutputStream;
+import java.util.UUID;
 
 /** A separate input target with no network, storage, or user supplied page content. */
 public final class ExecutionFixtureActivity extends Activity {
     static final String EXPECTED = "执行模式验收通过";
     // Accessed only on the main thread; cleared when this instance is destroyed.
     static ExecutionFixtureActivity current;
+    private final String instanceId = UUID.randomUUID().toString();
     private LinearLayout page;
     private EditText editor;
     private boolean resumed;
@@ -79,6 +82,8 @@ public final class ExecutionFixtureActivity extends Activity {
 
     Bundle snapshot(boolean includeImage) {
         Bundle result = new Bundle();
+        result.putString("instanceId", instanceId);
+        result.putInt("processId", Process.myPid());
         boolean ready = resumed && hasWindowFocus() && page.isShown()
                 && page.getWidth() > 0 && page.getHeight() > 0 && editor.isFocused();
         result.putBoolean("ready", ready);
