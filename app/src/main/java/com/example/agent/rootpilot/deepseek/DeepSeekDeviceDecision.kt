@@ -21,7 +21,7 @@ internal fun buildDeviceDecisionRequest(
         ToolChatTurn("user", userPrompt),
     ) + toolHistory
     val validated = Json.parseToJsonElement(buildToolChatRequest(
-        request.config, turns, DeviceInfoTool.definitions, ThinkingEffort.HIGH,
+        request.config, turns, DeviceInfoTool.definitions, ThinkingEffort.LOW,
     )) as JsonObject
     val messages = (validated.getValue("messages") as JsonArray).toMutableList()
     messages[1] = buildJsonObject {
@@ -43,7 +43,7 @@ internal fun buildDeviceDecisionRequest(
     return buildJsonObject {
         validated.forEach { (key, value) -> if (key != "messages" && key != "max_tokens") put(key, value) }
         put("messages", JsonArray(messages))
-        put("max_tokens", 4_096)
+        put("max_tokens", 65_536)
         put("tool_choice", if (allowTools) "auto" else "none")
         put("parallel_tool_calls", false)
         putJsonObject("response_format") { put("type", "json_object") }

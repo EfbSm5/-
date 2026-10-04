@@ -34,15 +34,22 @@ data class ChatToolCall(val id: String, val name: String, val arguments: String)
 }
 
 sealed interface ToolChatResult {
+    val usage: ModelUsage?
+
     data class Success(
         val content: String,
         val reasoning: String,
         val toolCalls: List<ChatToolCall>,
+        override val usage: ModelUsage? = null,
     ) : ToolChatResult {
         override fun toString() = "ToolChatResult.Success(contentLength=${content.length}, reasoningLength=${reasoning.length}, toolCallCount=${toolCalls.size})"
     }
 
-    data class Failure(val message: String, val diagnostic: ModelFailure = ModelFailure()) : ToolChatResult {
+    data class Failure(
+        val message: String,
+        val diagnostic: ModelFailure = ModelFailure(),
+        override val usage: ModelUsage? = null,
+    ) : ToolChatResult {
         override fun toString() = "ToolChatResult.Failure(diagnostic=$diagnostic)"
     }
 }

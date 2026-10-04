@@ -5,6 +5,13 @@ import com.example.agent.agent.planning.TodoRepository
 import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.DeepSeekClient
 import com.example.agent.rootpilot.deepseek.DeepSeekVisionRequest
+import com.example.agent.rootpilot.deepseek.ModelUsage
+import com.example.agent.rootpilot.deepseek.ModelFailure
+import com.example.agent.rootpilot.deepseek.ModelFailureCategory
+import com.example.agent.rootpilot.deepseek.ModelProtocolReason
+import com.example.agent.rootpilot.deepseek.ModelStreamSnapshot
+import com.example.agent.rootpilot.deepseek.ToolChatResult
+import com.example.agent.rootpilot.deepseek.ToolChatTurn
 import com.example.agent.rootpilot.log.*
 import com.example.agent.rootpilot.model.ExecutableRootAction
 import com.example.agent.rootpilot.model.RootPilotConfig
@@ -30,6 +37,30 @@ import org.junit.Test
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class AgentLoopTraceTest {
+    @Test fun modelUsageReachesTraceOnSuccessAndFailureWithoutExecutingFailedAction() = runTest {
+        val usage = ModelUsage(promptTokens = 12, completionTokens = 8192, reasoningTokens = 8192)
+        for (failed in listOf(false, true)) {
+            val result = if (failed) ToolChatResult.Failure(secret,
+                ModelFailure(ModelFailureCategory.RESPONSE_PROTOCOL, protocolReason = ModelProtocolReason.OUTPUT_LIMIT), usage)
+                else ToolChatResult.Success(finish, secret, emptyList(), usage)
+            val client = object : DeepSeekClient {
+                override suspend fun requestAction(request: DeepSeekVisionRequest): DeepSeekActionResult = error("unused")
+                override suspend fun requestDecision(request: DeepSeekVisionRequest, toolHistory: List<ToolChatTurn>,
+                    allowTools: Boolean, onUpdate: suspend (ModelStreamSnapshot) -> Unit): ToolChatResult = result
+            }
+            val rows = mutableListOf<RunTraceEvent>()
+            val lines = mutableListOf<String>()
+            val root = Root()
+            loop(client, root).run(request, RunTrace(observer = { rows += it }, sink = { lines += it })) {}
+            val model = rows.single { it.stage == TraceStage.MODEL && it.event == TraceEvent.RESULT }
+            assertEquals(usage, model.modelUsage)
+            assertEquals(if (failed) TraceStatus.FAILED else TraceStatus.SUCCESS, model.status)
+            assertTrue(root.actions.isEmpty())
+            assertTrue(rows.filter { it !== model }.all { it.modelUsage == null })
+            assertFalse(lines.joinToString().contains(secret))
+        }
+    }
+
     private val secret = "SENTINEL_PRIVATE_PAYLOAD"
     private val finish = """{"action":"finish","success":true,"message":"$secret"}"""
     private val todo = """{"action":"create_todo","title":"$secret","reason":"$secret"}"""

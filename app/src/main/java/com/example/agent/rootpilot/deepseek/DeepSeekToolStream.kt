@@ -21,6 +21,7 @@ private class PendingTool(val id: String, val name: String, val arguments: Strin
 /** Draft snapshots never carry tools. Only a matching finish and DONE release complete calls. */
 internal suspend fun readDeepSeekToolStream(
     source: BufferedSource,
+    usage: ModelUsageCollector? = null,
     onUpdate: suspend (ModelStreamSnapshot) -> Unit,
 ): ToolChatResult.Success {
     val reasoning = StringBuilder()
@@ -104,6 +105,7 @@ internal suspend fun readDeepSeekToolStream(
         }
         val root = parse(event) as? JsonObject ?: invalid()
         if ("error" in root) invalid(ModelProtocolReason.SERVER_ERROR_CHUNK)
+        usage?.observeUsage(root["usage"])
         val choices = root["choices"] as? JsonArray ?: invalid()
         if (choices.isEmpty()) {
             if (root["usage"] !is JsonObject) invalid()
@@ -118,6 +120,7 @@ internal suspend fun readDeepSeekToolStream(
         if (delta.text("role")?.let { it != "assistant" } == true) invalid()
         val thought = delta.text("reasoning_content").orEmpty()
         val answer = delta.text("content").orEmpty()
+        usage?.observeText(thought, answer)
         if (reasoning.length.toLong() + content.length + thought.length + answer.length > MAX_STREAM_TEXT_CHARS) invalid(ModelProtocolReason.STREAM_LIMIT)
         if ("tool_calls" in delta) {
             if (delta["tool_calls"] == JsonNull) invalid(ModelProtocolReason.NULL_TOOL_CALLS)
@@ -149,6 +152,7 @@ internal suspend fun readDeepSeekToolStream(
             }
         }
         val end = choice.text("finish_reason")
+        usage?.observeFinish(end)
         if (end != null) {
             if (end == "length") invalid(ModelProtocolReason.OUTPUT_LIMIT)
             if (end !in setOf("stop", "tool_calls")) invalid(ModelProtocolReason.UNSUPPORTED_FINISH)

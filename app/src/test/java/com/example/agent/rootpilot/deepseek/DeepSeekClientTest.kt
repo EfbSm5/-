@@ -228,7 +228,8 @@ class DeepSeekClientTest {
                     "enabled",
                     payload.getValue("thinking").jsonObject.getValue("type").jsonPrimitive.content,
                 )
-                assertEquals(4_096, payload.getValue("max_tokens").jsonPrimitive.int)
+                assertEquals(65_536, payload.getValue("max_tokens").jsonPrimitive.int)
+                assertEquals("low", payload.getValue("reasoning_effort").jsonPrimitive.content)
                 val messages = payload.getValue("messages").jsonArray
                 val prompt = messages[0].jsonObject.getValue("content").jsonPrimitive.content
                 assertTrue(prompt.contains("normalized to the FULL screenshot"))

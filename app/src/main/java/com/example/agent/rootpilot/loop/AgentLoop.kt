@@ -234,14 +234,14 @@ class AgentLoop(
                 )
                 val decision = when (modelResult) {
                     is ToolChatResult.Failure -> {
-                        trace.fail(TraceReason.MODEL_FAILED, modelResult.diagnostic)
+                        trace.fail(TraceReason.MODEL_FAILED, modelResult.diagnostic, modelResult.usage)
                         onEvent(AgentLoopEvent.Failed(modelResult.message))
                         return
                     }
 
                     is ToolChatResult.Success -> modelResult
                 }
-                trace.record(TraceEvent.RESULT, TraceStatus.SUCCESS)
+                trace.record(TraceEvent.RESULT, TraceStatus.SUCCESS, modelUsage = decision.usage)
                 if (decision.toolCalls.isNotEmpty()) {
                     trace.stage = TraceStage.INFORMATION
                     if (stepInformationQueries >= MAX_INFORMATION_QUERIES_PER_STEP ||

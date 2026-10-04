@@ -118,9 +118,13 @@ class HttpDeepSeekClient(
         } catch (_: IllegalArgumentException) {
             return ToolChatResult.Failure("手机工具消息格式无效或超出限制", ModelFailure(ModelFailureCategory.REQUEST_CONTRACT))
         }
-        return request(request.config, body, ToolChatResult::Failure) { response ->
+        var usage: ModelUsageCollector? = null
+        return request(request.config, body, { message, diagnostic ->
+            ToolChatResult.Failure(message, diagnostic, usage?.snapshot())
+        }) { response ->
             val source = response?.source() ?: throw SerializationException("Missing stream")
-            readDeepSeekToolStream(source, onUpdate)
+            val collector = ModelUsageCollector().also { usage = it }
+            readDeepSeekToolStream(source, collector, onUpdate).copy(usage = collector.snapshot())
         }
     }
 
@@ -181,9 +185,9 @@ class HttpDeepSeekClient(
         } catch (_: IllegalArgumentException) {
             return ToolChatResult.Failure("工具聊天消息格式无效或超出限制", ModelFailure(ModelFailureCategory.REQUEST_CONTRACT))
         }
-        return request(config, body, ToolChatResult::Failure) { response ->
+        return request(config, body, { message, diagnostic -> ToolChatResult.Failure(message, diagnostic) }) { response ->
             val source = response?.source() ?: throw SerializationException("Missing stream")
-            readDeepSeekToolStream(source, onUpdate)
+            readDeepSeekToolStream(source, onUpdate = onUpdate)
         }
     }
 
@@ -294,6 +298,7 @@ class HttpDeepSeekClient(
         putJsonObject("thinking") {
             put("type", "enabled")
         }
+        put("reasoning_effort", ThinkingEffort.LOW.wireValue)
         putJsonObject("response_format") {
             put("type", "json_object")
         }
@@ -411,7 +416,7 @@ class HttpDeepSeekClient(
             .followRedirects(false)
             .followSslRedirects(false)
             .build()
-        const val MAX_OUTPUT_TOKENS = 4_096
+        const val MAX_OUTPUT_TOKENS = 65_536
         const val MAX_HISTORY_ITEMS = 6
         val HTTP_SUCCESS_RANGE = 200..299
         val JSON = Json {

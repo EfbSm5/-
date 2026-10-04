@@ -2,6 +2,9 @@ package com.example.agent.rootpilot.history
 
 import com.example.agent.rootpilot.log.*
 import com.example.agent.rootpilot.model.RootPilotAction
+import com.example.agent.rootpilot.deepseek.ModelUsage
+import com.example.agent.rootpilot.deepseek.ModelFinishReason
+import kotlinx.serialization.json.*
 import java.util.UUID
 import org.junit.Assert.*
 import org.junit.Rule
@@ -10,6 +13,24 @@ import org.junit.rules.TemporaryFolder
 
 class RunHistoryStoreTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test fun usageRoundTripsOnDiskAndLegacyEventsRemainReadable() {
+        val file = temporary.root.resolve("runs.json")
+        val store = RunHistoryStore(file)
+        val id = UUID.randomUUID().toString()
+        val usage = ModelUsage(completionTokens = 8192, reasoningTokens = 8192, finishReason = ModelFinishReason.LENGTH)
+        val event = RunTraceEvent(id, 1, 10, TraceActionType.NONE, TraceStage.MODEL,
+            TraceEvent.RESULT, TraceStatus.FAILED, TraceReason.MODEL_FAILED, modelUsage = usage)
+        val record = RunHistoryRecord(id, 1, events = listOf(event))
+        store.write(listOf(record))
+        assertEquals(listOf(record), store.read())
+        val doc = Json.parseToJsonElement(file.readText()).jsonObject
+        val stored = doc["records"]!!.jsonArray.single().jsonObject
+        val legacyEvent = stored["events"]!!.jsonArray.single().jsonObject.filterKeys { it != "modelUsage" }
+        file.writeText(JsonObject(doc + ("records" to JsonArray(listOf(JsonObject(stored +
+            ("events" to JsonArray(listOf(JsonObject(legacyEvent))))))))).toString())
+        assertNull(store.read().single().events.single().modelUsage)
+    }
 
     @Test fun typedActionHistoryRoundTripsWithoutSensitivePayloads() {
         val file = temporary.root.resolve("history/runs.json")

@@ -38,6 +38,15 @@ class DeepSeekDeviceDecisionTest {
         assertTrue(instructions.contains("no click_node or set_text"))
     }
 
+    @Test fun deviceBudgetAndThinkingAreUnchangedByToolAvailability() {
+        for (allow in listOf(true, false)) {
+            val body = build(allow = allow)
+            assertEquals(JsonPrimitive(65_536), body["max_tokens"])
+            assertEquals(JsonPrimitive("enabled"), body["thinking"]!!.jsonObject["type"])
+            assertEquals(JsonPrimitive("low"), body["reasoning_effort"])
+        }
+    }
+
     @Test fun unresolvedCallAndOversizedImageFailBeforeTransport() {
         assertThrows(IllegalArgumentException::class.java) { build(listOf(ToolChatTurn("tool", "secret", toolCallId = "missing"))) }
         val oversized = request().copy(frame = request().frame.copy(dataUrl = "x".repeat(MAX_TOOL_REQUEST_BYTES)))

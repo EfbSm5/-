@@ -50,6 +50,48 @@ class ModelFailureTest {
     private fun chunk(delta: String, finish: String? = null) =
         "data: {\"choices\":[{\"index\":0,\"delta\":$delta,\"finish_reason\":${finish?.let { "\"$it\"" } ?: "null"}}]}\n\n"
 
+    @Test fun completeActionWithLengthIsRejectedWithOrWithoutUsage() = runBlocking {
+        val action = """{"action":"finish","success":true,"message":"fixture"}"""
+        val prefix = chunk("{\"content\":${Json.encodeToString(action)}}")
+        for (terminal in listOf(chunk("{}", "length"), terminalWithUsage("length"))) {
+            assertProtocolReason(prefix + terminal + "data: [DONE]\n\n", ModelProtocolReason.OUTPUT_LIMIT)
+        }
+    }
+
+    @Test fun localTextEventAndWireLimitsHaveDistinctReason() = runBlocking {
+        val accumulatedText = chunk("{\"reasoning_content\":${Json.encodeToString("x".repeat(60_000))}}").repeat(5)
+        val oversizedEvent = "data: " + "x".repeat(262_145)
+        val oversizedWire = (":" + "你".repeat(10_000) + "\r\n\r\n").repeat(140)
+        for (stream in listOf(accumulatedText, oversizedEvent, oversizedWire)) {
+            assertProtocolReason(stream, ModelProtocolReason.STREAM_LIMIT)
+        }
+    }
+
+    @Test fun usageOnFinalStopChunkDoesNotRejectCompleteAction() = runBlocking {
+        val action = """{"action":"finish","success":true,"message":"fixture"}"""
+        val reasoning = "synthetic reasoning ".repeat(600)
+        val stream = chunk("{\"reasoning_content\":${Json.encodeToString(reasoning)}}") +
+            chunk("{\"content\":${Json.encodeToString(action)}}") + terminalWithUsage("stop") + "data: [DONE]\n\n"
+        val result = readDeepSeekToolStream(Buffer().writeUtf8(stream)) {}
+        assertEquals(action, result.content)
+        assertEquals(reasoning, result.reasoning)
+        assertTrue(result.toolCalls.isEmpty())
+    }
+
+    private suspend fun assertProtocolReason(stream: String, expected: ModelProtocolReason) {
+        try {
+            readDeepSeekToolStream(Buffer().writeUtf8(stream)) {}
+            fail("expected_protocol_rejection")
+        } catch (error: ModelProtocolException) {
+            assertEquals(expected, error.reason)
+        }
+    }
+
+    private fun terminalWithUsage(finish: String) =
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"$finish\"}]," +
+            "\"usage\":{\"prompt_tokens\":128,\"completion_tokens\":4096,\"total_tokens\":4224," +
+            "\"completion_tokens_details\":{\"reasoning_tokens\":4000}}}\n\n"
+
     @Test(timeout = 10_000) fun responseProtocolFailureIsTypedAndRedacted() = runBlocking {
         val result = response("SECRET_INVALID_JSON")
         assertEquals(ModelFailureCategory.RESPONSE_PROTOCOL, result.diagnostic.category)

@@ -194,7 +194,7 @@ class DeepSeekStreamTest {
             val request = DeepSeekVisionRequest(server.config, ScreenshotFrame(byteArrayOf(1), 1, 1, "data:image/jpeg;base64,test"), emptyList(), 1)
             assertEquals(DeepSeekActionResult.Success("{}"), HttpDeepSeekClient(requestTimeoutMillis = 1500).requestAction(request) {})
             val payload = Json.parseToJsonElement(server.body.get()).jsonObject
-            assertEquals("4096", payload["max_tokens"].toString())
+            assertEquals("65536", payload["max_tokens"].toString())
             assertEquals("\"json_object\"", payload["response_format"]!!.jsonObject["type"].toString())
             assertTrue(server.body.get().contains("normalized to the FULL screenshot"))
             server.assertReleased()

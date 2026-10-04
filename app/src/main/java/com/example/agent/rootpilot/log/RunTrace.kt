@@ -3,9 +3,12 @@ package com.example.agent.rootpilot.log
 import com.example.agent.rootpilot.model.ExecutableRootAction
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.deepseek.ModelFailure
+import com.example.agent.rootpilot.deepseek.ModelUsage
 import java.util.UUID
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 
 fun interface TraceClock {
@@ -41,6 +44,7 @@ data class RunTraceEvent(
     val status: TraceStatus,
     val reason: TraceReason,
     val modelFailure: ModelFailure? = null,
+    val modelUsage: ModelUsage? = null,
 )
 
 /** A single invocation owns this trace. Only allowlisted fields can reach either sink. */
@@ -76,11 +80,11 @@ class RunTrace(
         }
     }
 
-    fun fail(code: TraceReason, diagnostic: ModelFailure? = null) {
+    fun fail(code: TraceReason, diagnostic: ModelFailure? = null, usage: ModelUsage? = null) {
         outcome = TraceStatus.FAILED
         reason = code
         modelFailure = diagnostic.takeIf { code == TraceReason.MODEL_FAILED }
-        record(TraceEvent.RESULT, TraceStatus.FAILED, code)
+        record(TraceEvent.RESULT, TraceStatus.FAILED, code, modelUsage = usage)
     }
 
     fun approval(approved: Boolean) {
@@ -100,9 +104,11 @@ class RunTrace(
         action: RootPilotAction? = null,
         executable: ExecutableRootAction? = null,
         stage: TraceStage = this.stage,
+        modelUsage: ModelUsage? = null,
     ) {
         val diagnostic = modelFailure.takeIf { reasonCode == TraceReason.MODEL_FAILED }
-        val typed = RunTraceEvent(runId, step, elapsedMs, actionType, stage, event, status, reasonCode, diagnostic)
+        val usage = modelUsage.takeIf { stage == TraceStage.MODEL && event == TraceEvent.RESULT }
+        val typed = RunTraceEvent(runId, step, elapsedMs, actionType, stage, event, status, reasonCode, diagnostic, usage)
         try { observer(typed) } catch (_: Exception) { }
         val line = buildJsonObject {
             put("runId", runId)
@@ -119,6 +125,7 @@ class RunTrace(
                 it.httpStatus?.let { code -> put("modelHttpStatus", code) }
                 it.protocolReason?.let { code -> put("modelProtocolReason", code.name.lowercase()) }
             }
+            usage?.let { put("modelUsage", JSON.encodeToJsonElement(it)) }
             if (action is RootPilotAction.Tap && executable is ExecutableRootAction.Tap) {
                 put("normalizedX", action.x)
                 put("normalizedY", action.y)
@@ -132,5 +139,6 @@ class RunTrace(
 
     companion object {
         const val TAG = "RootPilotTrace"
+        private val JSON = Json { encodeDefaults = true }
     }
 }
