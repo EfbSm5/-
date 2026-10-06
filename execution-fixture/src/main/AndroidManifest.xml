@@ -9,7 +9,12 @@
             android:windowSoftInputMode="stateAlwaysHidden|adjustResize" />
         <activity android:name=".VirtualCapabilityActivity" android:exported="true"
             android:permission="com.example.rootpilot.fixture.ACCESS"
-            android:windowSoftInputMode="stateAlwaysHidden|adjustResize" />
+            android:windowSoftInputMode="stateAlwaysHidden|adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
         <provider android:name=".FixtureProvider"
             android:authorities="com.example.rootpilot.fixture.state"
             android:permission="com.example.rootpilot.fixture.ACCESS"

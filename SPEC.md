@@ -1,6 +1,6 @@
 # RootPilot 当前状态
 
-更新日期：2026-10-06。已推送副屏只读控件树修复 `a2bb306`；本轮接入显示定向滑动及 BACK／ENTER，验收状态见下。设备动作仍为 LOW／65536。独立副屏固定计算器已有真实 Service 单任务完整七键限定 PASS；此前协议失败和坐标拦截仍保留，整体规划稳定性及更广验收仍为 PARTIAL；提交与推送状态以 Git 为准。
+更新日期：2026-10-07。副屏只读控件树 `a2bb306`、滑动及 BACK／ENTER `5d8d4e9` 已推送；新动作真实 Service 闭环及 Swipe／BACK／ENTER 三项待确认停止限定 PASS。设备动作仍为 LOW／65536。此前协议失败和坐标拦截仍保留，整体规划稳定性及更广验收仍为 PARTIAL；提交与推送状态以 Git 为准。
 
 本文件只保存最新状态，直接更新对应条目，不追加开发过程、历次测试数字或补验流水。使用与构建说明见 [README.md](README.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
@@ -100,14 +100,19 @@ RootPilot 是已 Root 的 Android 手机上的实验性 Agent：根据截图、�
 - 当前增量独立静态审查 PASS：共享查询锁、精确配置恢复、失败实例封禁与取消传播、预算及敏感／身份过滤，以及 READ_UI_TREE 与 FULL 的隔离均已核查。新增当前／历史样本及首／次模型回执的三项不联网合成检查 0.007 秒 PASS。最终仅测试 APK 更新为 `d1473e812f2ac2530283dae20a7925c1797c6790688a5c0f6be36af5d2ac272b` 并绑定设备，构建／Lint 28 秒成功；产品仍 `aef0f7c98ead31a1ca01257b813fb527307cc646fcbcda699e48f7cd45dc9a2c`。任务完成后原配置密文、启动列表原字节摘要、IME、三个原无障碍服务列表与基线一致，无 RootPilot 专用副屏及任务／IME 恢复记录。
 - 限定 PASS 不代表广泛应用或设备覆盖：本计算器仍 `truncated=true`，未证明全部节点完整；配置恢复失败封禁和异常回读已有 JVM 覆盖，但未做真机 Binder 故障注入。3 秒预算会拒绝超时数据，不代表同步框架调用可被硬中断。本轮不修改已有解析／输出超限问题结论，整体产品稳定性仍 PARTIAL。
 
-### 副屏滑动与限定按键（2026-10-06，离线循环限定 PASS）
+### 副屏滑动与限定按键（2026-10-07，真实 Service 闭环／三项待确认停止限定 PASS）
 
 - 基于授权小米 15（`12cd0365`／`24129PN74C`）的离线固定测试页实测，接入 Swipe、BACK 和 ENTER。私有协议、Transport、Session 与 helper 同步封闭动作集合；滑动两端限定 1080×1920 像素、时长 100–2000 ms，按键只接受 4／66。起始应用、点击、滑动及按键仍经原有确认，显示／会话／窗口校验和 `IME_POLICY_HIDE` 不变；不回退主屏，不开放任意 Shell、Type 或 HOME。提示和设置说明同步更新；旧计算器测试只保留仍有效的 Type／HOME 拒绝，不再声称 UI_TREE 不支持。
-- 当前最终 APK 的平台探针 `platform-05.txt`（5.144 秒）PASS：一次固定 ASCII `RootPilot42` 实际写入、BACK 固定回调、ENTER 按下／抬起与滚动位置变化，键盘仍隐藏。主屏 ActivityRecord 不变，原默认／启用 IME 与无障碍列表不变，拥有副屏释放及测试页消失；此前探针及加强收尾检查也保留成功证据。ASCII 结果仅为底层能力观察；未实现中文或绕过现有生产输入目标／密码保护，也未证明所有应用的 BACK 导航去向或主屏同时输入。
+- 平台探针限定证据 `platform-05.txt`（5.144 秒）PASS：一次固定 ASCII `RootPilot42` 实际写入、BACK 固定回调、ENTER 按下／抬起与滚动位置变化，键盘仍隐藏。主屏 ActivityRecord 不变，原默认／启用 IME 与无障碍列表不变，拥有副屏释放及测试页消失；此前探针及加强收尾检查也保留成功证据。ASCII 结果仅为底层能力观察；未实现中文或绕过现有生产输入目标／密码保护，也未证明所有应用的 BACK 导航去向或主屏同时输入。
 - 修正后的 `loop-02.txt`（7.755 秒）限定 PASS：真实 AgentLoop → 策略／确认 → DisplayRoutingRootExecutor → 私有传输 → Root helper，真实拥有截图；本地固定假模型、零网络。manual=false 下启动、滑动、BACK、ENTER 恰好四次确认／执行，四次本地模型调用且成功完成；逐次回读滚动／回调／按键计数，主屏执行器调用为零，Type／HOME 在生产路由拒绝。副屏释放后再次核对主屏完整 ActivityRecord、原默认／启用 IME 与无障碍列表，均通过。确认由测试批准，不代表生产 Service 悬浮窗、真人触摸或真实 API 规划新动作。
+- 真实 Service／DeepSeek／实际悬浮窗监听器闭环限定 PASS：`service-live-02.txt`，27.226 秒，run `57ae19c9-3ee1-4884-afc3-d1b470cf067a`。manual=false 下启动、向上滑动、BACK、ENTER 恰好四次确认与执行，十次模型请求；固定页真实滚动，BACK=1、ENTER down/up=1，最终 UI_TREE 成功回执进入后续成功模型请求，模型成功 Finish 并明确报告计数。最终效果用本实例／显示绑定的固定计数保留回执、最后生产帧及模型结果共同核验，不把释放后回执当成新鲜页面观察；`service-live-02-result.jpg` 可见计数及滚动后的固定行。测试页 Launcher 仍受签名权限保护，仅接入既有生产应用目录，本轮不改产品代码／APK，不增加应用特判。
+- 三项待确认停止限定 PASS：Swipe 为 `service-stop-swipe-02.txt`（4.407 秒，run `7ca4a3bd-c071-43ec-a3a2-95b90292426a`），只执行启动；BACK 为 `service-stop-back-02.txt`（8.206 秒，run `1185fd08-f18b-4b15-b1bf-6bffe8317514`），只执行启动／滑动；ENTER 为 `service-stop-enter-01.txt`（11.157 秒，run `c767e3f8-fa8f-4035-9057-ed2bf6abcae1`），只执行启动／滑动／BACK。实际停止监听器分别在目标动作待确认时调用，STOP_REQUESTED 后零执行／新模型请求／截图，终态均 STOPPED／取消 RUN_END；实例绑定回执分别为零滚动／零按键、已滚动／零按键、已滚动／BACK=1／ENTER=0。停止任务只依据截图规划，不要求信息工具；实际 history 均零信息查询，模型请求分别为 1／2／3 次，不当作工具契约修复。
+- 四项真实限定用例均确认 RUN_END、副屏及测试页消失，无任务／IME 恢复记录；主屏完整 RootPilotActivity 身份、原默认／启用 IME、无障碍配置和本服务实例／标志不变；原内存配置、启动列表字节恢复，API 密文不变。确认和停止来自脚本 `performClick` 调用实际按钮监听器，不是真人触摸；主屏身份不变不代表主屏并行输入或所有应用 BACK 导航通过。
 - 保留失败：`platform-01.txt` 与 `platform-03.txt` 均在前置阶段退出，零创建／输入，分别涉及签名 Provider 访问和 target 36 不能直接读旧输入法列表 Settings；沿用既有前台 fixture 准备流程，改用公开 InputMethodManager 已启用列表，不修改系统授权。`loop-01.txt`（2.443 秒）FAIL，传输层遗漏新增动作白名单，未送达滑动；释放及环境恢复通过。独立审查还指出按键只改内存可能触发重复帧保护；已让固定页常驻回执可见变化，不放宽生产重复帧、窗口或确认保护，不自动重试／重放。
-- 本地最终 `final-checks-04.txt`（34 秒）通过：570 项 JVM 单测零失败／错误／跳过，App／androidTest／fixture 构建与两模块 Lint 成功，`git diff --check` 通过。新增实际 Transport 帧／会话／序号／payload、畸形回执、取消不重放，以及协议边界、强制确认和失效会话拒绝测试。独立静态复审 PASS，既有回执复核支持离线循环限定 PASS，不冒充 Reviewer 自行操作设备。最新产品 APK `07968993124a5d8950d4e8b21b9ffeda0c38233d14fff4fc255a7281e375d412`，测试 APK `0fb13b898ffbc219778322dd7dd5b1b0f287dba5be4a1358eaee191bf216a765`，fixture `6b815b792f06574dd7f4aa39b883f4c6e45f5dd555000fbeaf8b56b4f8290c11`；产物与真机绑定摘要分别留档。既有签名 View-only 通道不联网复验 `fixture-channel-cleanup-01.txt`（1.113 秒）PASS，正常关闭前台准备时的旧测试页；最后无 fixture Activity、专用副屏和任务／IME 恢复记录，原 IME 及三个无障碍服务保持绑定。证据位于 `/tmp/rootpilot-virtual-capabilities.DfEQ45/`。
-- 剩余范围：新动作真实模型／正式 Service、主屏并行按键、更多应用／厂商、执行中进程死亡未补验；HOME 仍属未开放／未验证，不称平台绝对不可做。生产 Unicode 输入需补副屏编辑框及显示绑定／IME 行为证据，不能以 ASCII 探针替代。Activity 栈、任务外副屏截图和单步仍未接入，本轮不扩展这些生命周期边界；整体仍 PARTIAL。
+- 正式验收保留失败：`service-live-01.txt`（5.515 秒）仅启动，Swipe 被测试过窄的中央半区守卫拦截。绑定原失败 run 的零动作／零网络诊断 `rejected-swipe-inspection-01.txt`（0.003 秒）及保留私有帧确认 880→350 位于固定测试行；只改测试为本次可见行区 `[rowsTop, rowsBottom)` 校验，未补点、重放或改生产坐标。`service-stop-swipe-01.txt`（5.153 秒）仅启动，随后以 INFORMATION_CALL_INVALID 结束，未达到停止按钮；具体非法工具原因未保留，不认定协议问题已修复。两次失败均安全释放并恢复环境，不能改写为 PASS。成功完成用例仍出现一次既有 `PARSE_RETRY`／`PARSE_FAILED`，也不代表协议稳定性已解决；本轮未新增重试或放宽协议。
+- 本地验证：此前 `final-checks-04.txt` 的 570 项 JVM 单测零失败／错误／跳过；本轮 JVM 为 UP-TO-DATE，未重跑。`geometry-checks-01.txt`（77 秒）的 App／测试／fixture 构建及两模块 Lint、`stop-task-checks-01.txt`（26 秒）的最终测试构建／Lint、`git diff --check` 均通过；签名 View-only 离线准备 `geometry-fixture-prepare-01.txt`（1.100 秒）PASS。最终三个默认关闭入口按预期跳过（`default-disabled-final.txt`，0.006 秒），不计业务通过。正式 harness、实例计数保留、可见行区及停止任务的独立静态复审 PASS；Reviewer 只读源码／证据，未操作设备。
+- APK 绑定：产品始终为 `07968993124a5d8950d4e8b21b9ffeda0c38233d14fff4fc255a7281e375d412`，fixture 为 `266d092e3278fd62353bf9e60576e0cc335128ebba7df6c9cf850e15781c5ccd`。完成用例测试 APK 为 `0d2cd20bbf6f7b3be651aed752af6005a5e982ed35e8f58d83d87659c01e6115`；最后停止任务版测试 APK 为 `159c67f6ddadccdae952a94e2f831160445fe39995994ccbfed482ea0da8397e`，正常完成任务／逻辑未变，但未在最终测试 APK 重跑完成用例。对应产物与设备摘要、metadata、history、受控图片在 `/tmp/rootpilot-virtual-service-capabilities.CmCg3R/`；此前离线证据仍在 `/tmp/rootpilot-virtual-capabilities.DfEQ45/`。
+- 锁屏前置保护：`service-stop-back-01.txt`（0.004 秒）因 device_locked 拒绝，零创建／联网／输入；用户手动解锁后重新核对同一设备和 RootPilot 前台，BACK／ENTER 补验通过，旧前置失败不改写为 PASS。剩余未验：主屏并行输入、更多应用／厂商、执行中进程死亡。HOME 仍属未开放／未验证，不称平台绝对不可做；生产 Unicode 输入不能以 ASCII 探针替代。Activity 栈、任务外副屏截图和单步仍未接入；整体稳定性仍 PARTIAL。
 
 ### 副屏产品接入验证（2026-10-04，PARTIAL）
 

@@ -19,17 +19,20 @@ import java.util.UUID;
 /** Fixed, offline content for display-targeted input acceptance. */
 public final class VirtualCapabilityActivity extends Activity {
     static VirtualCapabilityActivity current;
+    static Bundle lastReceipt;
     private final String instance = UUID.randomUUID().toString();
     private ScrollView scroll;
     private EditText editor;
     private boolean resumed;
     private int backInvoked, enterDown, enterUp;
     private TextView receipt;
+    private TextView firstRow;
     private final OnBackInvokedCallback backCallback = () -> { backInvoked++; renderReceipt(); };
 
     @Override public void onCreate(Bundle saved) {
         super.onCreate(null);
         current = this;
+        lastReceipt = null;
         scroll = new ScrollView(this);
         scroll.setBackgroundColor(Color.WHITE);
         scroll.setSaveEnabled(false);
@@ -55,6 +58,7 @@ public final class VirtualCapabilityActivity extends Activity {
             label.setText("固定测试行 " + row);
             label.setTextColor(Color.BLACK);
             label.setTextSize(24);
+            if (row == 0) firstRow = label;
             content.addView(label, new LinearLayout.LayoutParams(-1, 180));
         }
         scroll.addView(content);
@@ -68,6 +72,7 @@ public final class VirtualCapabilityActivity extends Activity {
         page.addView(receipt);
         page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(page);
+        scroll.setOnScrollChangeListener((view, x, y, oldX, oldY) -> recordReceipt());
         editor.requestFocus();
         getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
     }
@@ -88,6 +93,20 @@ public final class VirtualCapabilityActivity extends Activity {
 
     private void renderReceipt() {
         receipt.setText("BACK=" + backInvoked + " ENTER=" + enterDown + "/" + enterUp);
+        recordReceipt();
+    }
+
+    // Retain only fixed counters from this instance, so release cannot race test readback.
+    private void recordReceipt() {
+        Bundle result = new Bundle();
+        result.putString("instance", instance);
+        result.putInt("displayId", getDisplay() == null ? -1 : getDisplay().getDisplayId());
+        result.putInt("scrollY", scroll.getScrollY());
+        result.putBoolean("empty", editor.getText().length() == 0);
+        result.putInt("backInvoked", backInvoked);
+        result.putInt("enterDown", enterDown);
+        result.putInt("enterUp", enterUp);
+        lastReceipt = result;
     }
 
     @Override protected void onResume() { super.onResume(); resumed = true; }
@@ -117,6 +136,13 @@ public final class VirtualCapabilityActivity extends Activity {
             result.putInt("x", bounds.centerX());
             result.putInt("fromY", bounds.top + bounds.height() * 3 / 4);
             result.putInt("toY", bounds.top + bounds.height() / 4);
+            Rect rowBounds = new Rect();
+            if (firstRow.getLocalVisibleRect(rowBounds)) {
+                firstRow.getLocationOnScreen(location);
+                rowBounds.offset(location[0], location[1]);
+                result.putInt("rowsTop", Math.max(bounds.top, rowBounds.top));
+                result.putInt("rowsBottom", bounds.bottom);
+            }
         }
         return result;
     }
