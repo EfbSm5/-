@@ -18,10 +18,19 @@ public final class FixtureProvider extends ContentProvider {
         // ContentProvider.call does not enforce read/write permissions automatically.
         getContext().enforceCallingPermission("com.example.rootpilot.fixture.ACCESS", "fixture_access_denied");
         if (arg != null || extras != null || !("state".equals(method)
-                || "snapshot".equals(method) || "finish".equals(method))) {
+                || "snapshot".equals(method) || "finish".equals(method)
+                || "virtual_state".equals(method) || "virtual_finish".equals(method))) {
             throw new IllegalArgumentException("fixture_command_not_allowed");
         }
         FutureTask<Bundle> task = new FutureTask<>(() -> {
+            if ("virtual_state".equals(method) || "virtual_finish".equals(method)) {
+                VirtualCapabilityActivity virtual = VirtualCapabilityActivity.current;
+                if ("virtual_finish".equals(method)) {
+                    if (virtual != null) virtual.finishAndRemoveTask();
+                    return Bundle.EMPTY;
+                }
+                return virtual == null ? Bundle.EMPTY : virtual.state();
+            }
             ExecutionFixtureActivity activity = ExecutionFixtureActivity.current;
             if ("finish".equals(method)) {
                 if (activity != null) activity.finishAndRemoveTask();

@@ -6,6 +6,7 @@ import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import com.example.agent.rootpilot.model.ExecutableRootAction
+import com.example.agent.rootpilot.model.RootPilotKey
 import com.example.agent.rootpilot.root.RootExecutionResult
 import com.example.agent.rootpilot.root.RootScreenshotResult
 import com.example.agent.rootpilot.virtualdisplay.VirtualDisplayProtocol.Failure
@@ -77,8 +78,21 @@ internal class VirtualDisplaySession(context: Context) {
                 VirtualDisplayProtocol.waitDuration(action.durationMillis)
                 Op.WAIT to VirtualDisplayProtocol.payload { writeInt(action.durationMillis) }
             }
-            is ExecutableRootAction.Type, is ExecutableRootAction.Swipe, is ExecutableRootAction.Key ->
-                throw Failure(Reason.UNSUPPORTED)
+            is ExecutableRootAction.Swipe -> {
+                VirtualDisplayProtocol.swipe(action.x1, action.y1, action.x2, action.y2, action.durationMillis)
+                Op.SWIPE to VirtualDisplayProtocol.payload {
+                    writeInt(action.x1); writeInt(action.y1); writeInt(action.x2); writeInt(action.y2); writeInt(action.durationMillis)
+                }
+            }
+            is ExecutableRootAction.Key -> {
+                val code = when (action.key) {
+                    RootPilotKey.BACK -> 4
+                    RootPilotKey.ENTER -> 66
+                    RootPilotKey.HOME -> throw Failure(Reason.UNSUPPORTED)
+                }
+                Op.KEY to VirtualDisplayProtocol.payload { writeInt(code) }
+            }
+            is ExecutableRootAction.Type -> throw Failure(Reason.UNSUPPORTED)
         }
         transport.execute(request.first, request.second)
     }

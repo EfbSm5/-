@@ -12,6 +12,7 @@ import com.example.agent.rootpilot.model.ExecutableRootAction
 import com.example.agent.rootpilot.model.ExecutionDisplay
 import com.example.agent.rootpilot.model.RootPilotApp
 import com.example.agent.rootpilot.model.RootPilotConfig
+import com.example.agent.rootpilot.model.RootPilotKey
 import com.example.agent.rootpilot.screen.DisplaySession
 import com.example.agent.rootpilot.screen.ScreenObservation
 import com.example.agent.rootpilot.screen.sameTarget
@@ -98,11 +99,13 @@ internal class DisplayRoutingRootExecutor(
         else session?.capture() ?: RootScreenshotResult.Failure("副屏会话不存在，未截取主屏")
 
     override fun supports(action: ExecutableRootAction): Boolean = if (!virtualRequested) main.supports(action)
-        else action is ExecutableRootAction.OpenApp || action is ExecutableRootAction.Tap || action is ExecutableRootAction.Wait
+        else action is ExecutableRootAction.OpenApp || action is ExecutableRootAction.Tap ||
+            action is ExecutableRootAction.Swipe || action is ExecutableRootAction.Wait ||
+            (action is ExecutableRootAction.Key && action.key != RootPilotKey.HOME)
 
     override suspend fun execute(action: ExecutableRootAction): RootExecutionResult {
         if (!virtualRequested) return main.execute(action)
-        if (!supports(action)) return RootExecutionResult.Failure("副屏首版只支持应用启动、点击和等待")
+        if (!supports(action)) return RootExecutionResult.Failure("副屏不支持文字输入或 HOME 按键")
         val owned = session ?: return RootExecutionResult.Failure("副屏会话不存在，未执行动作")
         if (!owned.validate()) return RootExecutionResult.Failure("副屏会话已失效，未执行动作")
         if (action is ExecutableRootAction.OpenApp && apps.listApps().none {

@@ -51,7 +51,8 @@ class VirtualDisplayLoopTest {
             return RootExecutionResult.Success()
         }
         override fun supports(action: ExecutableRootAction) = action is ExecutableRootAction.Tap ||
-            action is ExecutableRootAction.OpenApp || action is ExecutableRootAction.Wait
+            action is ExecutableRootAction.OpenApp || action is ExecutableRootAction.Wait ||
+            action is ExecutableRootAction.Swipe || (action is ExecutableRootAction.Key && action.key != RootPilotKey.HOME)
         override fun cancel() { valid = false }
     }
     private fun loop(root: Root, responses: List<String>, modelCalled: () -> Unit = {}): AgentLoop {
@@ -106,6 +107,55 @@ class VirtualDisplayLoopTest {
                     it.approval.approve()
                 }
             }
+        assertEquals(listOf(ExecutableRootAction.OpenApp(app)), root.actions)
+    }
+
+    @Test fun virtualSwipeBackAndEnterRequireConfirmationInAutoMode() = runTest {
+        val root = Root()
+        val approvals = mutableListOf<RootPilotAction>()
+        val events = mutableListOf<AgentLoopEvent>()
+        loop(root, listOf(
+            """{"action":"swipe","x1":500,"y1":800,"x2":500,"y2":200,"duration_ms":400,"reason":"fixed"}""",
+            """{"action":"key","key":"BACK","reason":"fixed"}""",
+            """{"action":"key","key":"ENTER","reason":"fixed"}""",
+            """{"action":"finish","success":true,"message":"fixed"}""",
+        )).run(AgentLoopRequest(config, 4)) {
+            events += it
+            if (it is AgentLoopEvent.AwaitingConfirmation) { approvals += it.action; it.approval.approve() }
+        }
+        assertEquals(4, approvals.size)
+        assertTrue(approvals[1] is RootPilotAction.Swipe)
+        assertEquals(RootPilotKey.BACK, (approvals[2] as RootPilotAction.Key).key)
+        assertEquals(RootPilotKey.ENTER, (approvals[3] as RootPilotAction.Key).key)
+        assertEquals(listOf(ExecutableRootAction.OpenApp(app), ExecutableRootAction.Swipe(539, 1535, 539, 383, 400),
+            ExecutableRootAction.Key(RootPilotKey.BACK), ExecutableRootAction.Key(RootPilotKey.ENTER)), root.actions)
+        assertTrue(events.last() is AgentLoopEvent.Completed)
+    }
+
+    @Test fun changedSessionAtSwipeOrKeyConfirmationPreventsNewAction() = runTest {
+        for (response in listOf(
+            """{"action":"swipe","x1":500,"y1":800,"x2":500,"y2":200,"duration_ms":400,"reason":"fixed"}""",
+            """{"action":"key","key":"BACK","reason":"fixed"}""",
+        )) {
+            val root = Root()
+            loop(root, listOf(response)).run(AgentLoopRequest(config, 1)) {
+                if (it is AgentLoopEvent.AwaitingConfirmation) {
+                    if (it.action !is RootPilotAction.OpenApp) root.identity = "replacement"
+                    it.approval.approve()
+                }
+            }
+            assertEquals(listOf(ExecutableRootAction.OpenApp(app)), root.actions)
+        }
+    }
+
+    @Test fun homeIsRejectedWithoutNewConfirmationOrExecution() = runTest {
+        val root = Root()
+        var approvals = 0
+        loop(root, listOf("""{"action":"key","key":"HOME","reason":"fixed"}"""))
+            .run(AgentLoopRequest(config, 1)) {
+                if (it is AgentLoopEvent.AwaitingConfirmation) { approvals++; it.approval.approve() }
+            }
+        assertEquals(1, approvals)
         assertEquals(listOf(ExecutableRootAction.OpenApp(app)), root.actions)
     }
     @Test fun unsupportedTextNeverTouchesImeOrRequestsTextConfirmation() = runTest {

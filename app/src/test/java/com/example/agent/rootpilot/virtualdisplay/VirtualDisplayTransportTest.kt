@@ -11,6 +11,7 @@ import java.io.OutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.util.UUID
+import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -24,6 +25,66 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VirtualDisplayTransportTest {
+    @Test fun swipeAndAllowedKeysCrossTheActualFramedTransport() = runBlocking {
+        val peer = Peer()
+        val transport = peer.transport()
+        val swipe = VirtualDisplayProtocol.payload { writeInt(3); writeInt(1800); writeInt(3); writeInt(100); writeInt(400) }
+        val back = VirtualDisplayProtocol.payload { writeInt(4) }
+        val enter = VirtualDisplayProtocol.payload { writeInt(66) }
+        transport.start()
+        transport.execute(Op.SWIPE, swipe)
+        transport.execute(Op.KEY, back)
+        transport.execute(Op.KEY, enter)
+        transport.validate()
+        assertTrue(transport.close())
+        val actions = peer.received.filter { it.op == Op.SWIPE || it.op == Op.KEY }
+        assertEquals(listOf(Op.SWIPE, Op.KEY, Op.KEY), actions.map { it.op })
+        assertEquals(listOf(2L, 3L, 4L), actions.map { it.sequence })
+        assertTrue(actions.all { it.session == peer.session })
+        assertArrayEquals(swipe, actions[0].payload)
+        assertArrayEquals(back, actions[1].payload)
+        assertArrayEquals(enter, actions[2].payload)
+        peer.assertStreamsClosed()
+    }
+
+    @Test fun nonActionOpcodeIsNotSentByExecute() = runBlocking {
+        val peer = Peer()
+        val transport = peer.transport()
+        transport.start()
+        val error = runCatching { transport.execute(Op.CAPTURE, byteArrayOf()) }.exceptionOrNull() as Failure
+        assertEquals(Reason.UNSUPPORTED, error.reason)
+        assertTrue(transport.close())
+        assertEquals(listOf(Op.HELLO), peer.received.map { it.op })
+    }
+
+    @Test fun malformedActionReceiptTerminatesInsteadOfAcceptingOrReplaying() = runBlocking {
+        val peer = Peer(extraActionReplyBytes = true)
+        val transport = peer.transport()
+        transport.start()
+        assertEquals(Reason.PROTOCOL, (runCatching {
+            transport.execute(Op.KEY, VirtualDisplayProtocol.payload { writeInt(4) })
+        }.exceptionOrNull() as Failure).reason)
+        assertTrue(runCatching { transport.validate() }.exceptionOrNull() is Failure)
+        assertTrue(transport.close())
+        assertEquals(1, peer.received.count { it.op == Op.KEY })
+    }
+
+    @Test fun cancellationDuringSwipeClosesWithoutReplay() = runBlocking {
+        val peer = Peer(holdInputAction = true)
+        val transport = peer.transport()
+        transport.start()
+        val action = async(Dispatchers.Default) {
+            transport.execute(Op.SWIPE, VirtualDisplayProtocol.payload {
+                writeInt(3); writeInt(1800); writeInt(3); writeInt(100); writeInt(400)
+            })
+        }
+        assertTrue(peer.inputActionReceived.await(1, TimeUnit.SECONDS))
+        action.cancelAndJoin()
+        assertTrue(transport.close())
+        assertEquals(1, peer.received.count { it.op == Op.SWIPE })
+        peer.assertStreamsClosed()
+    }
+
     @Test fun emptyDisplayStartsWithoutCaptureAndCloseIsIdempotent() = runBlocking {
         val peer = Peer()
         val transport = peer.transport()
@@ -162,6 +223,8 @@ class VirtualDisplayTransportTest {
         private val malformedReceipt: Boolean = false,
         private val keepDisplay: Boolean = false,
         private val changeIdentity: Boolean = false,
+        private val holdInputAction: Boolean = false,
+        private val extraActionReplyBytes: Boolean = false,
     ) : Process() {
         val session: UUID = UUID.randomUUID()
         val launches = AtomicInteger()
@@ -173,6 +236,8 @@ class VirtualDisplayTransportTest {
         private val stdoutClosed = CountDownLatch(1)
         private val stderrClosed = CountDownLatch(1)
         val waitReceived = CountDownLatch(1)
+        val inputActionReceived = CountDownLatch(1)
+        val received = Collections.synchronizedList(mutableListOf<VirtualDisplayProtocol.Frame>())
         private val exited = CountDownLatch(1)
         private val helperInput = PipedInputStream(4096)
         private val clientInput = object : PipedInputStream(4096) {
@@ -192,6 +257,7 @@ class VirtualDisplayTransportTest {
                 try {
                     while (true) {
                         val request = VirtualDisplayProtocol.read(helperInput, false) ?: break
+                        received += request
                         accepted = request.sequence
                         when (request.op) {
                             Op.HELLO -> {
@@ -209,6 +275,12 @@ class VirtualDisplayTransportTest {
                             Op.WAIT -> {
                                 waitReceived.countDown()
                                 if (!holdWait) VirtualDisplayProtocol.write(helperOutput, VirtualDisplayProtocol.reply(request, Reason.OK))
+                            }
+                            Op.SWIPE, Op.KEY -> {
+                                inputActionReceived.countDown()
+                                if (!holdInputAction) VirtualDisplayProtocol.write(helperOutput,
+                                    VirtualDisplayProtocol.reply(request, Reason.OK,
+                                        if (extraActionReplyBytes) byteArrayOf(1) else byteArrayOf()))
                             }
                             Op.CLOSE -> {
                                 VirtualDisplayProtocol.write(helperOutput, VirtualDisplayProtocol.reply(request, Reason.OK))

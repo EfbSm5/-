@@ -63,7 +63,7 @@ internal class VirtualDisplayTransport(
     }
 
     suspend fun execute(op: Op, payload: ByteArray) = operation(VirtualDisplayProtocol.REQUEST_TIMEOUT_MS, setOf(State.ACTIVE)) {
-        if (op !in setOf(Op.OPEN_APP, Op.TAP, Op.WAIT)) throw Failure(Reason.UNSUPPORTED)
+        if (op !in setOf(Op.OPEN_APP, Op.TAP, Op.SWIPE, Op.KEY, Op.WAIT)) throw Failure(Reason.UNSUPPORTED)
         VirtualDisplayProtocol.requireProtocol(exchange(op, payload).isEmpty())
     }
 

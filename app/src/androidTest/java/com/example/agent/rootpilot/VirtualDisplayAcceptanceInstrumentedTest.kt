@@ -306,11 +306,9 @@ class VirtualDisplayAcceptanceInstrumentedTest {
         initial: Sample,
         evidence: Evidence,
     ) {
-        val tap = initial.tap ?: fail(Reason.KEY_UNAVAILABLE)
         val unsupported = listOf(
             ExecutableRootAction.Type("virtual-display-test"),
-            ExecutableRootAction.Swipe(tap.x, tap.y, tap.x, tap.y, 300),
-            ExecutableRootAction.Key(RootPilotKey.BACK),
+            ExecutableRootAction.Key(RootPilotKey.HOME),
         )
         for (action in unsupported) {
             check(!backend.supports(action), Reason.UNSUPPORTED_ACTION_ACCEPTED)
@@ -318,9 +316,6 @@ class VirtualDisplayAcceptanceInstrumentedTest {
             check(currentIme(context) == originalIme, Reason.IME_CHANGED)
             evidence.unsupportedRejected++
         }
-        val uiTree = backend.queryDeviceInfo(DeviceInfoTool.UI_TREE, initial.observation)
-        evidence.uiTreeNotSupported = uiTree.unavailable == DeviceInfoUnavailable.NOT_SUPPORTED && uiTree.data == null
-        check(evidence.uiTreeNotSupported, Reason.UI_TREE_NOT_REJECTED)
     }
 
     private suspend fun observe(backend: DisplayRoutingRootExecutor, evidence: Evidence? = null): ScreenObservation {
@@ -540,7 +535,6 @@ class VirtualDisplayAcceptanceInstrumentedTest {
         var approvedDigits = 0
         var executedTaps = 0
         var unsupportedRejected = 0
-        var uiTreeNotSupported = false
         var postCloseCaptureRejected = false
         var postCloseTapRejected = false
         var endAcknowledged = false
@@ -574,7 +568,7 @@ class VirtualDisplayAcceptanceInstrumentedTest {
                         })
                     }
                 }
-                put("unsupportedRejected", unsupportedRejected); put("uiTreeNotSupported", uiTreeNotSupported)
+                put("unsupportedRejected", unsupportedRejected)
                 put("postCloseCaptureRejected", postCloseCaptureRejected); put("postCloseTapRejected", postCloseTapRejected)
                 put("endAcknowledged", endAcknowledged); put("cleanupRequested", cleanupRequested)
                 put("cleanupConfirmed", cleanupConfirmed); put("imeUnchanged", imeUnchanged); put("mainDisplayCalls", mainDisplayCalls)

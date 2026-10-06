@@ -451,7 +451,7 @@ class AgentLoop(
             }
             if (!rootExecutor.supports(executableAction)) {
                 trace.fail(TraceReason.POLICY_REJECTED)
-                onEvent(AgentLoopEvent.Failed("当前执行屏幕不支持该动作，副屏首版仅支持启动、点击和等待"))
+                onEvent(AgentLoopEvent.Failed("当前执行屏幕不支持该动作"))
                 return
             }
             var rejected = false

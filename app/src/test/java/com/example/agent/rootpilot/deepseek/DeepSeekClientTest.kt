@@ -257,7 +257,7 @@ class DeepSeekClientTest {
     }
 
     @Test(timeout = 10_000)
-    fun virtualPromptOffersOnlyOwnedDisplayTreeAndContextWithoutExpandingActions() = runTest {
+    fun virtualPromptOffersOwnedDisplayToolsAndOnlySupportedActions() = runTest {
         ServerSocket(0).apply { soTimeout = 3000 }.use { server ->
             val captured = AtomicReference<String>()
             val worker = thread(isDaemon = true) {
@@ -284,8 +284,9 @@ class DeepSeekClientTest {
             assertTrue(prompt.contains("get_screen_context 和 get_ui_tree 可用于本次副屏"))
             assertTrue(prompt.contains("get_activity_stack 在副屏返回 not_supported"))
             assertTrue(prompt.contains("不请求读取主屏"))
-            assertTrue(prompt.contains("不支持文字输入、滑动或系统按键"))
-            assertTrue(prompt.contains("所有点击需确认"))
+            assertTrue(prompt.contains("不支持文字输入或 HOME"))
+            assertTrue(prompt.contains("key（仅 BACK、ENTER）"))
+            assertTrue(prompt.contains("所有点击、滑动和按键需确认"))
             assertFalse(prompt.contains("仅 get_screen_context 可用"))
         }
     }

@@ -32,7 +32,7 @@ internal object VirtualDisplayProtocol {
     const val RESPONSE_BIT = 0x100
 
     enum class Op(val wire: Int) {
-        HELLO(1), VALIDATE(2), CAPTURE(3), OPEN_APP(4), TAP(5), WAIT(6), CLOSE(7), RELEASED(8);
+        HELLO(1), VALIDATE(2), CAPTURE(3), OPEN_APP(4), TAP(5), WAIT(6), CLOSE(7), RELEASED(8), SWIPE(9), KEY(10);
         companion object {
             fun fromWire(value: Int): Op = entries.firstOrNull { it.wire == value }
                 ?: fail(Reason.PROTOCOL)
@@ -175,6 +175,16 @@ internal object VirtualDisplayProtocol {
 
     fun waitDuration(duration: Int) {
         if (duration !in 300..5_000) fail(Reason.ARGUMENT)
+    }
+
+    fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, duration: Int) {
+        tap(x1, y1); tap(x2, y2)
+        if (duration !in 100..2_000) fail(Reason.ARGUMENT)
+    }
+
+    fun key(code: Int) {
+        // HOME can affect system navigation beyond the owned application display.
+        if (code != 4 && code != 66) fail(Reason.ARGUMENT)
     }
 
     fun checkPng(bytes: ByteArray) {

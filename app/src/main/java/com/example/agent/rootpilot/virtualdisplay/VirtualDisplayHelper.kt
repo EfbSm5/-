@@ -125,7 +125,7 @@ internal object VirtualDisplayHelper {
                                 val result = when (request.op) {
                                     Op.VALIDATE -> { empty(request); VirtualDisplayProtocol.hello(identity) }
                                     Op.CAPTURE -> { empty(request); owner.capture() }
-                                    Op.TAP, Op.OPEN_APP -> {
+                                    Op.TAP, Op.OPEN_APP, Op.SWIPE, Op.KEY -> {
                                         command(VirtualDisplayCommands.arguments(request.op, request.payload, identity.displayId), request.op)
                                         byteArrayOf()
                                     }

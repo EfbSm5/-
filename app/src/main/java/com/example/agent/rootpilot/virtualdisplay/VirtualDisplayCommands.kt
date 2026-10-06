@@ -23,6 +23,16 @@ internal object VirtualDisplayCommands {
                 VirtualDisplayProtocol.tap(x, y)
                 listOf("/system/bin/cmd", "input", "-d", displayId.toString(), "tap", x.toString(), y.toString())
             }
+            Op.SWIPE -> VirtualDisplayProtocol.parse(payload) {
+                val x1 = readInt(); val y1 = readInt(); val x2 = readInt(); val y2 = readInt(); val duration = readInt()
+                VirtualDisplayProtocol.swipe(x1, y1, x2, y2, duration)
+                listOf("/system/bin/cmd", "input", "-d", displayId.toString(), "swipe",
+                    x1.toString(), y1.toString(), x2.toString(), y2.toString(), duration.toString())
+            }
+            Op.KEY -> VirtualDisplayProtocol.parse(payload) {
+                val code = readInt().also(VirtualDisplayProtocol::key)
+                listOf("/system/bin/cmd", "input", "-d", displayId.toString(), "keyevent", code.toString())
+            }
             else -> throw Failure(Reason.UNSUPPORTED)
         }
     }

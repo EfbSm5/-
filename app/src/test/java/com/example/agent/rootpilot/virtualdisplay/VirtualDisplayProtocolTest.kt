@@ -133,6 +133,34 @@ class VirtualDisplayProtocolTest {
         assertThrows(IOException::class.java) { VirtualDisplayCommands.arguments(Op.CAPTURE, byteArrayOf(), 9) }
     }
 
+    @Test fun swipeUsesOwnedDisplayAndExactlyFiveBoundedArguments() {
+        fun payload(x1: Int = 3, y1: Int = 1800, x2: Int = 900, y2: Int = 100, duration: Int = 400) =
+            VirtualDisplayProtocol.payload { writeInt(x1); writeInt(y1); writeInt(x2); writeInt(y2); writeInt(duration) }
+        val valid = payload()
+        assertEquals(listOf("/system/bin/cmd", "input", "-d", "9", "swipe", "3", "1800", "900", "100", "400"),
+            VirtualDisplayCommands.arguments(Op.SWIPE, valid, 9))
+        for (bad in listOf(payload(x1 = -1), payload(y1 = 1920), payload(x2 = 1080), payload(y2 = -1),
+                payload(duration = 99), payload(duration = 2001), valid + 0, valid.copyOf(19))) {
+            assertThrows(IOException::class.java) { VirtualDisplayCommands.arguments(Op.SWIPE, bad, 9) }
+        }
+        assertThrows(IOException::class.java) { VirtualDisplayCommands.arguments(Op.SWIPE, valid, 0) }
+        VirtualDisplayProtocol.swipe(0, 0, 1079, 1919, 100)
+        VirtualDisplayProtocol.swipe(1079, 1919, 0, 0, 2000)
+    }
+
+    @Test fun keysAreDisplayTaggedAndRejectHomeOrArbitraryCodes() {
+        fun payload(code: Int) = VirtualDisplayProtocol.payload { writeInt(code) }
+        for (code in listOf(4, 66)) {
+            assertEquals(listOf("/system/bin/cmd", "input", "-d", "9", "keyevent", code.toString()),
+                VirtualDisplayCommands.arguments(Op.KEY, payload(code), 9))
+        }
+        for (code in listOf(3, 0, -1, 67, Int.MAX_VALUE)) {
+            assertThrows(IOException::class.java) { VirtualDisplayCommands.arguments(Op.KEY, payload(code), 9) }
+        }
+        assertThrows(IOException::class.java) { VirtualDisplayCommands.arguments(Op.KEY, payload(4), 0) }
+        assertThrows(IOException::class.java) { VirtualDisplayCommands.arguments(Op.KEY, payload(4) + 0, 9) }
+    }
+
     @Test fun shellCommandQuotesOnlyCurrentApkPath() {
         val value = VirtualDisplayProtocol.launchCommand("/data/app/a'b/base.apk", session)
         assertEquals("CLASSPATH='/data/app/a'\\''b/base.apk' exec /system/bin/app_process /system/bin ${VirtualDisplayProtocol.ENTRY} $session", value)

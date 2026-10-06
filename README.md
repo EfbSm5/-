@@ -140,11 +140,13 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 ### 独立副屏（实验）
 
-“设置 → 任务偏好”中的独立副屏默认关闭。开启后，从允许启动的应用中选择起始应用，再从任务页开始完整任务。每次任务新建 1080×1920、320 dpi 副屏；启动应用和每次点击都需要确认。任务页显示本次副屏截图预览；同意上传后，仅该执行屏幕的截图会发送至配置的 API。
+“设置 → 任务偏好”中的独立副屏默认关闭。开启后，从允许启动的应用中选择起始应用，再从任务页开始完整任务。每次任务新建 1080×1920、320 dpi 副屏；启动、点击、滑动和按键都需要确认。任务页显示本次副屏截图预览；同意上传后，仅该执行屏幕的截图会发送至配置的 API。
 
-首版支持启动、点击和等待；不支持文字输入、滑动、系统按键、任务外截图和单步执行。副屏信息工具提供屏幕上下文和可选 `get_ui_tree`；控件树只从本次拥有显示上的唯一焦点应用窗口采集，绑定显示／会话／窗口，不借用主屏活动窗口。无服务、身份未知或会话失效返回 unavailable，Activity 栈仍不支持。沿用主屏的脱敏与容量限制，节点位置是该副屏的物理像素，不新增节点点击／输入。既有应用页面可能迁入副屏，不是应用实例、账号或数据隔离。结束会关闭副屏页面；释放未确认时保留恢复记录并禁止新任务，不自动回退主屏。恢复只保留执行模式和起始应用，不复用旧副屏，也不恢复截图上传同意。
+支持启动、点击、滑动、BACK／ENTER 和等待；不支持文字输入、HOME、任务外截图和单步执行。滑动两端限于本次副屏像素范围，时长为 100–2000 ms；按键仅开放固定两个码，不开放任意 shell 或主屏回退。副屏仍隐藏输入法，底层固定 ASCII 输入成功不代表中文或生产 Type 已支持。副屏信息工具提供屏幕上下文和可选 `get_ui_tree`；控件树只从本次拥有显示上的唯一焦点应用窗口采集，绑定显示／会话／窗口，不借用主屏活动窗口。无服务、身份未知或会话失效返回 unavailable，Activity 栈仍不支持。沿用主屏的脱敏与容量限制，节点位置是该副屏的物理像素，不新增节点点击／输入。既有应用页面可能迁入副屏，不是应用实例、账号或数据隔离。结束会关闭副屏页面；释放未确认时保留恢复记录并禁止新任务，不自动回退主屏。恢复只保留执行模式和起始应用，不复用旧副屏，也不恢复截图上传同意。
 
 副屏树查询期间，本服务临时开启包含布局节点的读取标志；本服务的主、副屏树查询串行执行，结束或取消时恢复原标志。恢复无法确认时，当前服务实例拒绝后续树读取，不把扩展配置带入主屏查询；需要服务重新连接。不启用 `isAccessibilityTool`，不改变其他无障碍服务或敏感文字过滤。
+
+`VirtualDisplayCapabilityInstrumentedTest` 在签名专用 `VirtualCapabilityActivity` 上离线验证，不用真实模型或 UiAutomation。`platformDeliversSwipeKeysAndAsciiWithHiddenIme`（`virtualCapabilityPlatformProbe=true`）是生产接入前的显示定向平台探针，回读固定 ASCII、BACK 回调、ENTER 按下／抬起和滚动位置；`productionLoopConfirmsSwipeBackAndEnterWithoutNetwork`（`virtualCapabilityLoopAcceptance=true`）使用真实 AgentLoop、截图、路由和 helper，本地固定模型响应，核对四次确认／执行及 Type／HOME 拒绝。两个开关默认关闭、按方法单独执行，使用 `--no-restart`。均检查原输入法、启用输入法及无障碍列表，副屏释放后再次核验主屏 Activity 身份；BACK 仅证明测试回调到达，不保证各应用导航去向。首次测试页后台访问可能受本机限制，沿用前台准备测试页、再打开 RootPilot 的流程，不自动重试动作。限定结果及未验证范围见 `SPEC.md`。
 
 `VirtualDisplayAcceptanceInstrumentedTest` 是默认关闭、不联网的底层验收：单独运行 `createsAndClosesEmptyVirtualDisplay` 配合 `virtualDisplayTransportAcceptance=true` 检查创建／释放；单独运行 `calculatesKnownProductOnVirtualDisplay` 配合 `virtualDisplayAcceptance=true` 才通过新鲜副屏节点操作固定算式 `123×45`。后者需要已连接的 RootPilot 页面结构读取，使用 `am instrument --no-restart`，不会清除历史或修改启动列表。测试通过不代表生产 Service、模型或真人确认闭环已通过；实际证据和未验证项见 `SPEC.md`。
 

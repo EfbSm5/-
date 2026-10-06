@@ -161,7 +161,7 @@ internal fun RootPilotSettingsContent(
                 )
                 Text("每次任务新建副屏，退出会关闭其中页面；已有应用可能被迁到副屏，不提供账号或数据隔离。",
                     style = MaterialTheme.typography.bodySmall)
-                Text("首期仅支持应用启动和点击，不支持文字输入、系统按键或滑动。起始应用仍需确认打开后才会启动；同意上传后，副屏截图仍会发送至所配置的 API。",
+                Text("支持应用启动、点击、滑动及 BACK／ENTER；不支持文字输入或 HOME。起始应用仍需确认打开后才会启动；同意上传后，副屏截图仍会发送至所配置的 API。",
                     style = MaterialTheme.typography.bodySmall)
                 if (recoveryRequired) {
                     Text("请先恢复或放弃上次任务，再修改执行屏幕和起始应用。", style = MaterialTheme.typography.bodySmall)
@@ -172,7 +172,7 @@ internal fun RootPilotSettingsContent(
                 checked = virtualDisplay || state.config.manualConfirmation, enabled = !busy && !virtualDisplay,
                 onCheckedChange = onManualConfirmationChanged,
             )
-            Text(if (virtualDisplay) "副屏实验模式下，打开应用和每次点击都需要确认。"
+            Text(if (virtualDisplay) "副屏实验模式下，打开应用、点击、滑动及按键都需要确认。"
                 else "自动模式可执行点击和滑动；打开应用、输入文本及系统按键始终需要确认。",
                 style = MaterialTheme.typography.bodySmall)
             Text("同意上传后，截图、当前任务的 Activity 信息、页面控件结构及勾选的应用名称、包名会发送至所配置的 API 服务。",

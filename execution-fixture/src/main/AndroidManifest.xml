@@ -7,6 +7,9 @@
         <activity android:name=".ExecutionFixtureActivity" android:exported="true"
             android:permission="com.example.rootpilot.fixture.ACCESS"
             android:windowSoftInputMode="stateAlwaysHidden|adjustResize" />
+        <activity android:name=".VirtualCapabilityActivity" android:exported="true"
+            android:permission="com.example.rootpilot.fixture.ACCESS"
+            android:windowSoftInputMode="stateAlwaysHidden|adjustResize" />
         <provider android:name=".FixtureProvider"
             android:authorities="com.example.rootpilot.fixture.state"
             android:permission="com.example.rootpilot.fixture.ACCESS"
