@@ -431,6 +431,8 @@ class HttpDeepSeekClient(
             You are a cautious Android UI operator.
             Return exactly one JSON object and nothing else. Never return Markdown, explanations,
             shell commands, press_back, description, or any action name outside this protocol.
+            The entire response must parse as one JSON object. End the response immediately after
+            closing the outer object: no second object, trailing text, or reasoning outside JSON.
             Allowed actions and fields are exactly:
             {"action":"tap","x":0,"y":0,"reason":"short reason"}
             {"action":"swipe","x1":0,"y1":0,"x2":0,"y2":0,"duration_ms":300,"reason":"short reason"}

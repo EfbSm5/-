@@ -77,6 +77,29 @@ class ActionParserTest {
     }
 
     @Test
+    fun trailingContentIsRejectedAndClassifiedWithoutAcceptingAValidPrefix() {
+        val action = """{"action":"tap","x":1,"y":2,"reason":"fixed"}"""
+        for (suffix in listOf("{}", " trailing-text", "\n```")) {
+            val failure = parser.parse(action + suffix) as ActionParseResult.Failure
+            assertEquals(ActionParseFailureKind.TRAILING_CONTENT, failure.kind)
+        }
+        assertTrue(parser.parse("  $action\n ") is ActionParseResult.Success)
+    }
+
+    @Test
+    fun protocolErrorsCannotForgeTrailingContentClassification() {
+        for (input in listOf(
+            "not-json",
+            """{"action":"tap","x":1.5,"y":2,"reason":"fixed"}""",
+            """{"action":"tap","x":1,"y":2,"reason":"fixed","Expected EOF after parsing, but had private":0}""",
+            """{"action":"tap","x":1001,"y":2,"reason":"Expected EOF after parsing, but had private"}""",
+        )) {
+            val failure = parser.parse(input) as ActionParseResult.Failure
+            assertEquals(ActionParseFailureKind.INVALID_PROTOCOL, failure.kind)
+        }
+    }
+
+    @Test
     fun rejectsInvalidJsonAndUnknownFields() {
         assertTrue(parser.parse("not-json") is ActionParseResult.Failure)
         assertTrue(

@@ -23,20 +23,30 @@ class RootScreenObserver internal constructor(
     private val clock: () -> Long,
     private val start: (String) -> Process,
     private val session: DisplaySession? = null,
+    private val maxActivityOutputBytes: Int = maxOutputBytes,
 ) : ScreenObserver {
     constructor() : this(
-        Dispatchers.IO, 3_000, 256 * 1024, { System.nanoTime() / 1_000_000 },
+        Dispatchers.IO, 3_000, DEFAULT_OUTPUT_BYTES, { System.nanoTime() / 1_000_000 },
         { ProcessBuilder("su", "-c", it).redirectErrorStream(true).start() },
+        maxActivityOutputBytes = DEFAULT_ACTIVITY_OUTPUT_BYTES,
     )
 
     constructor(session: DisplaySession) : this(
-        Dispatchers.IO, 3_000, 256 * 1024, { System.nanoTime() / 1_000_000 },
+        Dispatchers.IO, 3_000, DEFAULT_OUTPUT_BYTES, { System.nanoTime() / 1_000_000 },
         { ProcessBuilder("su", "-c", it).redirectErrorStream(true).start() }, session,
+        maxActivityOutputBytes = DEFAULT_ACTIVITY_OUTPUT_BYTES,
     )
 
     init {
         require(timeoutMillis > 0)
         require(maxOutputBytes in 1..1024 * 1024)
+        require(maxActivityOutputBytes in 1..1024 * 1024)
+    }
+
+    internal companion object {
+        const val DEFAULT_OUTPUT_BYTES = 256 * 1024
+        // Activity dumps include background task history as well as the foreground identity.
+        const val DEFAULT_ACTIVITY_OUTPUT_BYTES = 512 * 1024
     }
 
     private val lock = Any()
@@ -54,7 +64,7 @@ class RootScreenObserver internal constructor(
         try {
             withContext(dispatcher) {
                 withTimeoutOrNull(timeoutMillis) {
-                    val activities = collect("exec dumpsys activity activities")
+                    val activities = collect("exec dumpsys activity activities", maxActivityOutputBytes)
                     val windows = collect("exec dumpsys window windows")
                     val displays = collect("exec dumpsys window displays")
                     val ime = collect("exec dumpsys input_method --dump-priority CRITICAL")
@@ -68,7 +78,7 @@ class RootScreenObserver internal constructor(
         }
     }
 
-    private suspend fun collect(command: String): String? {
+    private suspend fun collect(command: String, limitBytes: Int = maxOutputBytes): String? {
         currentCoroutineContext().ensureActive()
         var process: Process? = null
         try {
@@ -86,7 +96,7 @@ class RootScreenObserver internal constructor(
                     // Read only bytes already available: no blocking reader or reader thread.
                     val count = input.read(buffer, 0, minOf(available, buffer.size))
                     if (count < 0) return null
-                    if (count > maxOutputBytes - output.size()) return null
+                    if (count > limitBytes - output.size()) return null
                     output.write(buffer, 0, count)
                 } else if (!process.isAlive) {
                     // Recheck after exit, since the final pipe write may race the first check.

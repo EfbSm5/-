@@ -375,6 +375,44 @@ class AgentLoopTest {
     }
 
     @Test
+    fun trailingModelContentGetsOneFixedCorrectionWithoutReplayingOrReturningRawOutput() = runTest {
+        val root = RecordingRootExecutor()
+        val client = QueueDeepSeekClient(
+            """{"action":"tap","x":1,"y":2,"reason":"private-marker"}{}""",
+            """{"action":"finish","success":true,"message":"完成"}""",
+        )
+        AgentLoop(
+            screenshotProvider = IncrementingScreenshotProvider(),
+            deepSeekClient = client,
+            rootExecutor = root,
+        ).run(request()) {}
+        assertEquals(2, client.requestCount)
+        assertTrue(root.actions.isEmpty())
+        val correction = client.requests.last().history.single()
+        assertTrue(correction.contains("JSON 结束后还有额外内容"))
+        assertTrue(correction.contains("不附第二个对象"))
+        assertTrue(!correction.contains("private-marker"))
+    }
+
+    @Test
+    fun repeatedTrailingModelContentStopsAfterTheExistingSingleCorrection() = runTest {
+        val root = RecordingRootExecutor()
+        val client = QueueDeepSeekClient(
+            """{"action":"tap","x":1,"y":2,"reason":"fixed"}{}""",
+            """{"action":"tap","x":1,"y":2,"reason":"fixed"}{}""",
+        )
+        val events = mutableListOf<AgentLoopEvent>()
+        AgentLoop(
+            screenshotProvider = IncrementingScreenshotProvider(),
+            deepSeekClient = client,
+            rootExecutor = root,
+        ).run(request()) { events += it }
+        assertEquals(2, client.requestCount)
+        assertTrue(root.actions.isEmpty())
+        assertTrue(events.last() is AgentLoopEvent.Failed)
+    }
+
+    @Test
     fun invalidModelJsonTwice_failsWithoutRootExecution() = runTest {
         val root = RecordingRootExecutor()
         val events = mutableListOf<AgentLoopEvent>()

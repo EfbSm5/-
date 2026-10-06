@@ -142,6 +142,85 @@ class RootScreenObserverTest {
         assertEquals(true, observer(limit = valid.length) { FakeProcess(valid) }.observe().keyboardVisible)
     }
 
+    private fun TestScope.productionBudgets(start: (String) -> Process) = RootScreenObserver(
+        StandardTestDispatcher(testScheduler), 3_000, RootScreenObserver.DEFAULT_OUTPUT_BYTES,
+        { 987L }, start, maxActivityOutputBytes = RootScreenObserver.DEFAULT_ACTIVITY_OUTPUT_BYTES,
+    )
+
+    private fun dumpAtSize(prefix: String, size: Int): String {
+        val line = "  taskMetadata=opaque\n"
+        require(prefix.length <= size)
+        val remaining = size - prefix.length
+        return prefix + line.repeat(remaining / line.length) + line.take(remaining % line.length)
+    }
+
+    @Test fun activityAtLargerBudgetRetainsForegroundIdentityAndCleansProcesses() = runTest {
+        val identity = "mResumedActivity: ActivityRecord{abcd u0 com.example.app/.Main t1}\n"
+        val activities = dumpAtSize(identity, RootScreenObserver.DEFAULT_ACTIVITY_OUTPUT_BYTES)
+        val processes = mutableListOf<FakeProcess>()
+        val result = productionBudgets { command ->
+            FakeProcess(if (command == "exec dumpsys activity activities") activities else "")
+                .also { processes += it }
+        }.observe()
+        assertTrue(activities.length > 256 * 1024)
+        assertEquals("com.example.app", result.foregroundPackage)
+        assertEquals("com.example.app.Main", result.foregroundActivity)
+        assertEquals(4, processes.size)
+        processes.forEach { it.assertCleaned() }
+    }
+
+    @Test fun activityOneByteOverLargerBudgetDiscardsEvenAValidIdentityPrefix() = runTest {
+        val identity = "mResumedActivity: ActivityRecord{abcd u0 com.example.app/.Main t1}\n"
+        val activities = dumpAtSize(identity, RootScreenObserver.DEFAULT_ACTIVITY_OUTPUT_BYTES + 1)
+        val processes = mutableListOf<FakeProcess>()
+        val result = productionBudgets { command ->
+            FakeProcess(if (command == "exec dumpsys activity activities") activities else "")
+                .also { processes += it }
+        }.observe()
+        assertNull(result.foregroundPackage)
+        assertNull(result.foregroundActivity)
+        processes.forEach { it.assertCleaned() }
+    }
+
+    @Test fun conflictingIdentityBeyondOldBudgetIsStillParsedAndRejected() = runTest {
+        val identity = "mResumedActivity: ActivityRecord{abcd u0 com.example.app/.Main t1}\n"
+        val activities = dumpAtSize(identity, 256 * 1024 + 1) +
+            "\nmResumedActivity: ActivityRecord{abce u0 com.example.other/.Main t2}"
+        val result = productionBudgets { command ->
+            FakeProcess(if (command == "exec dumpsys activity activities") activities else "")
+        }.observe()
+        assertNull(result.foregroundPackage)
+        assertNull(result.foregroundActivity)
+    }
+
+    @Test fun largerActivityBudgetDoesNotIncreaseOtherCommandBudgets() = runTest {
+        for (size in listOf(RootScreenObserver.DEFAULT_OUTPUT_BYTES, RootScreenObserver.DEFAULT_OUTPUT_BYTES + 1)) {
+            val processes = mutableListOf<FakeProcess>()
+            val result = productionBudgets { command ->
+                FakeProcess(dumpAtSize(when (command) {
+                    "exec dumpsys window windows" ->
+                        "Window #0 Window{abcd u0 private title}:\n  mDisplayId=0\n" +
+                            "  mOwnerUid=10000 showForAllUsers=false package=com.example.app appop=NONE\n"
+                    "exec dumpsys window displays" -> "mCurrentFocus=Window{abcd u0 private title}\n"
+                    "exec dumpsys input_method --dump-priority CRITICAL" ->
+                        "Current Input Method Manager state:\n  mInputShown=true\n"
+                    else -> ""
+                }, if (command == "exec dumpsys activity activities") 0 else size))
+                    .also { processes += it }
+            }.observe()
+            if (size == RootScreenObserver.DEFAULT_OUTPUT_BYTES) {
+                assertEquals("com.example.app", result.focusedPackage)
+                assertEquals("abcd", result.focusedWindowId)
+                assertEquals(true, result.keyboardVisible)
+            } else {
+                assertNull(result.focusedPackage)
+                assertNull(result.focusedWindowId)
+                assertNull(result.keyboardVisible)
+            }
+            processes.forEach { it.assertCleaned() }
+        }
+    }
+
     @Test fun failedCommandsAndStartErrorsNeverExposeSensitiveText() = runTest {
         val process = FakeProcess("mInputShown=true\nprivate title", code = 1)
         val failed = observer { process }.observe()

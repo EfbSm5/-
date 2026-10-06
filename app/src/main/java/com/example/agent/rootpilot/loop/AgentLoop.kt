@@ -2,6 +2,7 @@ package com.example.agent.rootpilot.loop
 
 import com.example.agent.rootpilot.action.ActionParser
 import com.example.agent.rootpilot.action.ActionParseResult
+import com.example.agent.rootpilot.action.ActionParseFailureKind
 import com.example.agent.rootpilot.action.ActionPolicy
 import com.example.agent.rootpilot.action.ActionPolicyResult
 import com.example.agent.rootpilot.apps.AppCatalog
@@ -320,7 +321,13 @@ class AgentLoop(
                         }
                         parseRetryUsed = true
                         trace.record(TraceEvent.PARSE_RETRY, TraceStatus.FAILED, TraceReason.PARSE_FAILED)
-                        requestHistory = history + "上一响应未通过本地动作协议校验，请只返回合法的单个动作 JSON。"
+                        val correction = when (parseResult.kind) {
+                            ActionParseFailureKind.TRAILING_CONTENT ->
+                                "上一响应在 JSON 结束后还有额外内容。整个响应必须且只能是一个完整动作 JSON 对象；外层对象闭合后立即结束，不附第二个对象、解释、思考文本或 Markdown。"
+                            ActionParseFailureKind.INVALID_PROTOCOL ->
+                                "上一响应未通过本地动作协议校验，请只返回合法的单个动作 JSON。"
+                        }
+                        requestHistory = history + correction
                     }
                 }
             }

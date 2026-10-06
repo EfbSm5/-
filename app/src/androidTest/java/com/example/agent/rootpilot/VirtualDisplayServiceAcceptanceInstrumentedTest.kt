@@ -21,6 +21,8 @@ import android.view.inspector.WindowInspector
 import android.widget.Button
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.example.agent.rootpilot.action.ActionParseResult
+import com.example.agent.rootpilot.action.ActionParser
 import com.example.agent.rootpilot.apps.AppLaunchAllowlistStore
 import com.example.agent.rootpilot.deepseek.ModelProtocolReason
 import com.example.agent.rootpilot.history.RunHistoryRecord
@@ -32,6 +34,7 @@ import com.example.agent.rootpilot.log.TraceEvent
 import com.example.agent.rootpilot.log.TraceReason
 import com.example.agent.rootpilot.log.TraceStage
 import com.example.agent.rootpilot.log.TraceStatus
+import com.example.agent.rootpilot.log.RunTraceEvent
 import com.example.agent.rootpilot.model.ExecutionDisplay
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotConfig
@@ -142,6 +145,43 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
         verifyReceiptCases(3)
     }
 
+    @Test
+    fun verifiesThreeKeyParseFailureReceiptWithoutDeviceActions() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("verifyVirtualThreeKeyParseReceipt") == "true")
+        verifyReceiptCases(3)
+    }
+
+    @Test
+    fun parseFailureTailRejectsConfirmedOrExecutedActions() {
+        val id = "9c7b3d27-8894-430a-a48f-5d125cf43992"
+        fun event(stage: TraceStage, event: TraceEvent, status: TraceStatus, reason: TraceReason) =
+            RunTraceEvent(id, 3, 0, TraceActionType.NONE, stage, event, status, reason)
+        val events = listOf(
+            event(TraceStage.PARSE, TraceEvent.PARSE_RETRY, TraceStatus.FAILED, TraceReason.PARSE_FAILED),
+            event(TraceStage.MODEL, TraceEvent.RESULT, TraceStatus.SUCCESS, TraceReason.NONE),
+            event(TraceStage.PARSE, TraceEvent.RESULT, TraceStatus.FAILED, TraceReason.PARSE_FAILED),
+            event(TraceStage.PARSE, TraceEvent.RUN_END, TraceStatus.FAILED, TraceReason.PARSE_FAILED),
+        )
+        val record = RunHistoryRecord(id, 0, status = RunHistoryStatus.FAILED, events = events)
+        check(parseFailedBeforeAction(record), Reason.UNEXPECTED)
+        val end = events.last()
+        val invalid = listOf(
+            record.copy(status = RunHistoryStatus.RUNNING), record.copy(eventsTruncated = true),
+            record.copy(events = events.drop(1)),
+            record.copy(events = events.dropLast(1) + end.copy(reason = TraceReason.MODEL_FAILED)),
+            record.copy(events = events.dropLast(1) + end.copy(status = TraceStatus.CANCELLED)),
+            record.copy(events = events.dropLast(1) + end.copy(actionType = TraceActionType.TAP)),
+            record.copy(events = events.dropLast(1) + end.copy(runId = "other")),
+            record.copy(events = events.dropLast(2) + listOf(
+                event(TraceStage.APPROVAL, TraceEvent.CONFIRMED, TraceStatus.SUCCESS, TraceReason.NONE),
+            ) + events.takeLast(2)),
+            record.copy(events = events.dropLast(2) + listOf(
+                event(TraceStage.EXECUTION, TraceEvent.START, TraceStatus.STARTED, TraceReason.NONE),
+            ) + events.takeLast(2)),
+        )
+        invalid.forEach { check(!parseFailedBeforeAction(it), Reason.UNEXPECTED) }
+    }
+
     private fun verifyReceiptCases(firstKeyIndex: Int) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val state = RootPilotService.uiState.value
@@ -159,6 +199,85 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
             check(rejected, Reason.PRIOR_RECEIPT_INVALID)
         }
         check(RootPilotService.uiState.value === state && history.value == beforeHistory, Reason.CONFIG_CHANGED)
+    }
+
+    @Test
+    fun inspectsRetainedActionParseFailureWithoutDeviceActions() {
+        val arguments = InstrumentationRegistry.getArguments()
+        assumeTrue(arguments.getString("inspectVirtualActionParseFailure") == "true")
+        val id = arguments.getString("parseFailureRunId").orEmpty()
+        val expectedPid = arguments.getString("parseFailurePid")?.toIntOrNull()
+        check(UUID_PATTERN.matches(id) && expectedPid == android.os.Process.myPid(), Reason.RUN_IDENTITY)
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val state = RootPilotService.uiState.value
+        val history = RootPilotService.historyState(context)
+        val before = history.value
+        val record = before.records.singleOrNull { it.id == id } ?: fail(Reason.HISTORY_UNAVAILABLE)
+        check(!state.running && state.pendingAction == null && state.status == RootPilotStatus.FAILED &&
+            !state.modelReportedResult && before.error == null && !record.eventsTruncated &&
+            record.status == RunHistoryStatus.FAILED && record == before.records.maxByOrNull { it.startedAtEpochMs },
+            Reason.PRIOR_RECEIPT_INVALID)
+        val end = record.events.lastOrNull() ?: fail(Reason.HISTORY_INCOMPLETE)
+        val liveEnd = Json.parseToJsonElement(state.logs.last()).jsonObject
+        check(end.event == TraceEvent.RUN_END && end.stage == TraceStage.PARSE &&
+            end.status == TraceStatus.FAILED && end.reason == TraceReason.PARSE_FAILED &&
+            end.step == state.step && liveEnd["runId"]?.jsonPrimitive?.contentOrNull == id &&
+            liveEnd["event"]?.jsonPrimitive?.contentOrNull == "run_end", Reason.RUN_IDENTITY)
+        val classification = retainedParseFailureCode(state.errorMessage.orEmpty())
+        val report = buildJsonObject {
+            put("runId", id); put("parseFailureCode", classification.name)
+            put("modelRequests", 0); put("deviceActions", 0); put("screenshotReads", 0)
+        }.toString()
+        InstrumentationRegistry.getInstrumentation().sendStatus(0, Bundle().apply {
+            putString("retainedActionParseFailure", report)
+        })
+        check(RootPilotService.uiState.value === state && history.value == before, Reason.CONFIG_CHANGED)
+    }
+
+    @Test
+    fun parseFailureClassificationNeverExportsMessageContents() {
+        val cases = mapOf(
+            "动作字段不符合协议，期望：private，实际：private" to ParseFailureCode.FIELD_SET,
+            "动作 JSON 不合法：Encountered an unknown key 'private'" to ParseFailureCode.JSON_UNKNOWN_FIELD,
+            "动作 JSON 不合法：Unexpected JSON token at offset private" to ParseFailureCode.JSON_DECODING,
+            "x 必须在 0 到 1000 之间" to ParseFailureCode.COORDINATE_RANGE,
+            "reason 不合法" to ParseFailureCode.REASON_VALUE,
+            "message 不能为空" to ParseFailureCode.MESSAGE_VALUE,
+            "不支持的 action：private" to ParseFailureCode.ACTION_VALUE,
+            "private" to ParseFailureCode.UNKNOWN,
+        )
+        cases.forEach { (message, expected) -> check(classifyParseFailure(message) == expected, Reason.UNEXPECTED) }
+        val parserCases = mapOf(
+            """{"action":"tap","x":1.5,"y":2,"reason":"fixed"}""" to ParseFailureCode.JSON_NUMERIC_VALUE,
+            """{"action":"tap","x":"private","y":2,"reason":"fixed"}""" to ParseFailureCode.JSON_NUMERIC_VALUE,
+            """{"action":"tap","x":1,"y":2,"reason":42}""" to ParseFailureCode.JSON_STRING_VALUE,
+            """{"x":1,"y":2,"reason":"fixed"}""" to ParseFailureCode.JSON_REQUIRED_FIELD,
+            """{"action":"finish","success":"private","message":"fixed"}""" to ParseFailureCode.JSON_BOOLEAN_VALUE,
+            """{"action":"tap","x":1,"y":2,"reason":"fixed"}{}""" to ParseFailureCode.JSON_TRAILING_DATA,
+        )
+        parserCases.forEach { (input, expected) ->
+            val failure = ActionParser().parse(input) as? ActionParseResult.Failure ?: fail(Reason.UNEXPECTED)
+            check(classifyParseFailure(failure.message) == expected, Reason.UNEXPECTED)
+        }
+        check(classifyParseFailure("动作 JSON 不合法：Unexpected JSON token\nJSON input: numeric literal private") ==
+            ParseFailureCode.JSON_DECODING, Reason.UNEXPECTED)
+    }
+
+    @Test
+    fun overwrittenPreflightErrorsCannotBeAttributedToRetainedParseFailure() {
+        val overwrittenMessages = listOf(
+            "副屏退出未确认，禁止启动任务；请先核对副屏已消失再重启 RootPilot",
+            "恢复记录不可用，请先核对已执行结果，再放弃记录",
+            "请先处理上次中断的任务", "请先输入自然语言任务",
+            "发送截图前请先打开上传确认", "副屏仅支持完整任务，不支持任务间保留单步会话",
+            "请选择副屏起始应用", "",
+        )
+        overwrittenMessages.forEach { message ->
+            var rejected = false
+            try { retainedParseFailureCode(message) }
+            catch (error: AcceptanceFailure) { rejected = error.reason == Reason.PARSE_MESSAGE_UNCONFIRMED }
+            check(rejected, Reason.UNEXPECTED)
+        }
     }
 
     @Test
@@ -383,7 +502,7 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                         end.let {
                             end.modelFailure?.protocolReason == ModelProtocolReason.OUTPUT_LIMIT ||
                                 end.reason == TraceReason.MODEL_REPORTED_FAILURE && end.stage == TraceStage.PARSE &&
-                                end.actionType == TraceActionType.FINISH
+                                end.actionType == TraceActionType.FINISH || parseFailedBeforeAction(record)
                         }
                     val rejectedBeforeConfirmation =
                         metadata["failure"]?.jsonPrimitive?.contentOrNull == "TAP_NOT_ON_EXPECTED_KEY" &&
@@ -1107,6 +1226,11 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
     }
 
     private class AcceptanceFailure(val reason: Reason) : AssertionError(reason.name)
+    private enum class ParseFailureCode {
+        FIELD_SET, JSON_UNKNOWN_FIELD, JSON_NUMERIC_VALUE, JSON_STRING_VALUE, JSON_REQUIRED_FIELD,
+        JSON_BOOLEAN_VALUE, JSON_TRAILING_DATA, JSON_DECODING, COORDINATE_RANGE, REASON_VALUE,
+        MESSAGE_VALUE, ACTION_VALUE, UNKNOWN,
+    }
     private enum class Reason {
         TARGET_PACKAGE, SERVICE_BUSY, RECOVERY_PENDING, IME_RECOVERY_PENDING, IME_UNAVAILABLE, DEVICE_LOCKED,
         OVERLAY_PERMISSION, ACCESSIBILITY_UNAVAILABLE, EXISTING_PRIVATE_DISPLAY, HISTORY_UNAVAILABLE,
@@ -1122,7 +1246,7 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
         ACCEPTANCE_INCOMPLETE, PRIOR_RECEIPT_INVALID, PRIOR_RECEIPT_SUPERSEDED, TIMEOUT, CANCELLED, UNEXPECTED,
         MAIN_FIXTURE_CHANGED, MAIN_INPUT_TARGET, MAIN_FIXTURE_CLEANUP,
         STOP_BOUNDARY_MISSED, TERMINAL_NOT_STOPPED, ACTION_AFTER_STOP,
-        PERMISSION_DENIED,
+        PERMISSION_DENIED, PARSE_MESSAGE_UNCONFIRMED,
         FIXTURE_INVALID_COMMAND, FIXTURE_REMOTE_STATE, FIXTURE_MISSING_RESULT, FIXTURE_TRANSPORT_FAILURE,
         FIXTURE_UNKNOWN_PROVIDER, FIXTURE_INVALID_ARGUMENT,
     }
@@ -1134,6 +1258,44 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
         const val RUN_TIMEOUT_MS = 240_000L
         const val POLL_MS = 25L
         val UUID_PATTERN = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+        fun parseFailedBeforeAction(record: RunHistoryRecord): Boolean {
+            val tail = record.events.takeLast(2)
+            val end = tail.lastOrNull() ?: return false
+            return record.status == RunHistoryStatus.FAILED && !record.eventsTruncated && tail.size == 2 &&
+                tail.map { it.event } == listOf(TraceEvent.RESULT, TraceEvent.RUN_END) &&
+                tail.all { it.runId == record.id && it.step == end.step && it.stage == TraceStage.PARSE &&
+                    it.actionType == TraceActionType.NONE && it.status == TraceStatus.FAILED && it.reason == TraceReason.PARSE_FAILED } &&
+                record.events.count { it.step == end.step && it.event == TraceEvent.PARSE_RETRY &&
+                    it.stage == TraceStage.PARSE && it.status == TraceStatus.FAILED && it.reason == TraceReason.PARSE_FAILED } == 1 &&
+                record.events.none { it.step >= end.step && (it.stage == TraceStage.APPROVAL ||
+                    it.stage == TraceStage.EXECUTION || it.event == TraceEvent.TODO_SAVED) }
+        }
+        fun retainedParseFailureCode(message: String): ParseFailureCode = classifyParseFailure(message).also {
+            check(it != ParseFailureCode.UNKNOWN, Reason.PARSE_MESSAGE_UNCONFIRMED)
+        }
+        fun classifyParseFailure(message: String): ParseFailureCode {
+            val header = message.substringBefore('\n')
+            return when {
+                header.startsWith("动作字段不符合协议，") -> ParseFailureCode.FIELD_SET
+                header.startsWith("动作 JSON 不合法：") -> when {
+                    header.contains("Encountered an unknown key") -> ParseFailureCode.JSON_UNKNOWN_FIELD
+                    header.contains("numeric literal") || header.contains("Numeric value overflow") ||
+                        header.contains("Failed to parse int") || header.contains("to Long") -> ParseFailureCode.JSON_NUMERIC_VALUE
+                    header.contains("is required for type") || header.contains("are required for type") ->
+                        ParseFailureCode.JSON_REQUIRED_FIELD
+                    header.contains("boolean literal") -> ParseFailureCode.JSON_BOOLEAN_VALUE
+                    header.contains("Expected EOF after parsing") -> ParseFailureCode.JSON_TRAILING_DATA
+                    header.contains("quotation mark") || header.contains("string literal") -> ParseFailureCode.JSON_STRING_VALUE
+                    else -> ParseFailureCode.JSON_DECODING
+                }
+                header in setOf("x 必须在 0 到 1000 之间", "y 必须在 0 到 1000 之间") ->
+                    ParseFailureCode.COORDINATE_RANGE
+                header in setOf("reason 不合法", "reason 不能为空") -> ParseFailureCode.REASON_VALUE
+                header in setOf("message 不合法", "message 不能为空") -> ParseFailureCode.MESSAGE_VALUE
+                header.startsWith("不支持的 action：") || header == "action 不能为空" -> ParseFailureCode.ACTION_VALUE
+                else -> ParseFailureCode.UNKNOWN
+            }
+        }
         const val TASK = "请只在本次独立副屏中的系统计算器完成固定计算。启动由启动确认完成，不要再次打开应用。根据每轮最新副屏截图与最近成功动作判断下一键。初始条件只在本任务尚未执行任何点击时检查：当前行只能为0或同一行完整的123×45=5535，否则失败结束。开始点击后，1、12、123、123×、123×4、123×45都是正常中间态，不得再套用初始条件拒绝，也不要重放已经成功的按键。依次且仅点击1、2、3、×、4、5、=，每键一次，不清除历史，不输入文本，不使用系统按键、滑动、等待动作或其他功能。禁止调用get_ui_tree和get_activity_stack，副屏不支持这些工具。最后一次等号后，必须根据新截图视觉读取当前123×45的结果，只有看到5535才报告读到5535并成功finish；否则失败finish。"
         fun continuationTask(first: Int): String {
             check(first in 1..7, Reason.PRIOR_RECEIPT_INVALID)

@@ -15,10 +15,15 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.put
 
+enum class ActionParseFailureKind { INVALID_PROTOCOL, TRAILING_CONTENT }
+
 sealed interface ActionParseResult {
     data class Success(val action: RootPilotAction) : ActionParseResult
 
-    data class Failure(val message: String) : ActionParseResult
+    data class Failure(
+        val message: String,
+        val kind: ActionParseFailureKind = ActionParseFailureKind.INVALID_PROTOCOL,
+    ) : ActionParseResult
 }
 
 class ActionParser(
@@ -34,7 +39,9 @@ class ActionParser(
         val rawAction = json.decodeFromString<RawAction>(rawJson)
         ActionParseResult.Success(rawAction.toDomain(objectKeys))
     } catch (error: SerializationException) {
-        ActionParseResult.Failure("动作 JSON 不合法：${error.message}")
+        val kind = if (TRAILING_CONTENT_ERROR.containsMatchIn(error.message.orEmpty().substringBefore('\n')))
+            ActionParseFailureKind.TRAILING_CONTENT else ActionParseFailureKind.INVALID_PROTOCOL
+        ActionParseResult.Failure("动作 JSON 不合法：${error.message}", kind)
     } catch (error: IllegalStateException) {
         ActionParseResult.Failure(error.message ?: "动作必须是 JSON 对象")
     } catch (error: IllegalArgumentException) {
@@ -199,6 +206,7 @@ class ActionParser(
     )
 
     private companion object {
+        val TRAILING_CONTENT_ERROR = Regex("^(?:Unexpected JSON token at offset [0-9]+: )?Expected EOF after parsing, but had ")
         const val MAX_REASON_LENGTH = 200
         const val MAX_MESSAGE_LENGTH = 500
         const val MAX_TEXT_LENGTH = 128

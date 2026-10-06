@@ -233,6 +233,8 @@ class DeepSeekClientTest {
                 val messages = payload.getValue("messages").jsonArray
                 val prompt = messages[0].jsonObject.getValue("content").jsonPrimitive.content
                 assertTrue(prompt.contains("normalized to the FULL screenshot"))
+                assertTrue(prompt.contains("End the response immediately after"))
+                assertTrue(prompt.contains("no second object, trailing text, or reasoning outside JSON"))
                 assertTrue(prompt.contains("including status and navigation bars"))
                 assertTrue(prompt.contains("y=round(pixel_y/image_height*1000)"))
                 assertTrue(prompt.contains("create_todo"))
