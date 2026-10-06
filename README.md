@@ -96,6 +96,8 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 设备决策请求的模型结果事件还可包含 `modelUsage`：服务端输入／输出／思考／总 Token 数，以及已解析片段的思考／正文／空白 UTF-16 字符数和固定结束原因。成功和失败均可记录；缺失 Token 字段为未知，畸形或矛盾用量标记 `usageMalformed` 并清空 Token 数，不影响原响应判定。统计只绑定当前请求的 MODEL RESULT，进入现有脱敏日志和任务历史，不进入任务恢复快照；旧历史缺少此字段仍可读。中断时的字符数可能不完整，不能据一次正常请求的用量解释另一次失败。纯聊天、文件 Agent 和旧单步动作路径不采集这些统计。
 
+动作响应必须整份解析为单个 JSON 对象；对象后有多余内容时仍拒绝，不截取合法前缀。既有的一次协议纠正请求会发送固定格式提示，不回传被拒绝的模型原文、不增加重试次数，动作仍需策略校验和原有确认。
+
 ### 独立测试页验收
 
 `execution-fixture` 是仅 Debug 的独立测试 APK，不是产品入口。它通过签名权限保护的 Provider 只导出自己的 View 画面，排除系统、键盘和其他应用；非空内容必须是固定测试文本。生产代码不依赖该模块，RootPilot 仅 Debug Manifest 声明访问权限。
@@ -108,6 +110,8 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 仅运行 `LiveExecutionInstrumentedTest#fixtureChannelRendersOnlyKnownContent` 并传入 `fixtureChannelAcceptance=true` 可检查不联网通道；另行明确授权后，运行 `LiveExecutionInstrumentedTest#liveModelTypesFixtureAndObservesCompletion` 并传入 `liveFixtureExecution=true` 才会调用真实 API。两个参数默认关闭，不应将整个测试套件带 live 开关运行。
 
+`FixtureCloseInstrumentedTest#classifySingleCloseWithoutRetry` 是默认关闭的离线关闭诊断。`fixtureCloseProbeMode=foreground` 在空测试页前台请求关闭；`background` 先核对默认 HOME 的真实候选组件，只执行一次 HOME，并验证前台／焦点后等待 30 秒。两种模式均拒绝已有任务或 IME 恢复记录，不截图、不读控件树、不联网、不输入文本；通过 `ContentProviderClient` 只请求一次关闭，区分固定 Binder／回执失败类别，不自动重试。小米后台启动受限时，沿用上文 Root 启动流程准备空 fixture；观察前置失败不代表关闭失败。`RECEIPT` 只证明收到返回值，仍须在外部核对 fixture Activity/task 已消失；失败时保留现场，确认身份后正常 UI 收尾。诊断不改变生产或原 `FixtureClient` 的关闭行为。
+
 真实用例只允许一次固定中文 Type，确认由脚本批准；模型必须在下一帧看到输入结果并结束，且输入法恢复断言通过才算成功。它验证 HTTP、执行循环与真实 IME，不替代正式 Service、悬浮窗／通知、物理屏幕或点击验收。
 
 新增信息工具验收位于 `DeviceInformationInstrumentedTest`。仅运行 `readsAllThreeToolsFromFocusedFixture` 并传入 `deviceInformationAcceptance=true` 可不联网检查三个工具；另行授权并手动启用页面结构读取后，单独运行 `realModelConsumesToolsThenTypesAndObservesFixture`、传入 `liveDeviceInformationExecution=true`，才会向手机已保存的 DeepSeek API 发送测试页画面和工具结果。真实用例要求三个结果进入后续请求后才批准一次固定 Type，输入后必须再次读取树并精确匹配；不允许坐标动作。未开启服务的负向用例需用户手动关闭，使用 `deviceInformationDisabledAcceptance=true` 单独运行。所有开关默认关闭，不将整个测试套件带 live 开关运行。
@@ -119,6 +123,12 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 真实断连补验由用户仅关闭 RootPilot 页面结构读取，再单独运行 `realServiceContinuesAfterManuallyDisabledPageStructure`（`productionServiceDisconnectedAcceptance=true`）；要求真实 provider 返回 `not_enabled`，生产 Service 处理不可用回执并完成，零输入。重连必须由用户手动重新启用，再跑不联网三工具采集用例；测试代码不修改系统授权，不用默认 instrumentation 人为杀进程充作断连。
 
 本次测试期间 GKD 与 Cumulus 保持连接；仅用户配合补验时关闭／重开 RootPilot 服务。不代表 GKD 业务、所有共存模式、进程死亡恢复、通知或真人触摸确认通过。
+
+### 应用商店搜索只读预检
+
+`MarketSearchUiAcceptanceInstrumentedTest#inspectPublicMarketPageWithoutActionsOrNetwork` 需显式 `marketSearchPreflight=true`，默认跳过。它只在已打开的应用商店公开首页／搜索页核对前台、焦点与新鲜控件树，输出固定安全标签、资源 ID、控件状态和坐标；不启动任务、不输入查询、不提交搜索、不下载或安装。正常 RootPilot 界面发起的联网搜索验收尚未实现或运行。观察器的 Activity dump 上限为 512 KiB，其余三份输入仍为 256 KiB；超限仍整份丢弃，具体证据见 `SPEC.md`。
+
+`RootScreenObserverInstrumentedTest#productionObserverRecognizesKnownForeground` 默认跳过，仅显式 `observerKnownPage=rootpilot` 或 `observerKnownPage=market` 时启用。先正常打开对应公开页面，再使用 `am instrument --no-restart`；测试只调用生产观察器并核对完整窗口身份与键盘状态，不启动页面、截图、输入或联网，回执及失败信息只输出固定字段。
 
 ### 系统计算器限定验收
 
@@ -138,9 +148,13 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 `cancelsOwnedVirtualDisplay`（`virtualDisplayCancellationAcceptance=true`）检查空副屏取消清理；`inspectsVirtualCalculatorWithoutInput`（`virtualDisplayInspection=true`）只读检查指定计算器，不输入、不联网。分段续跑用例只接受先前恰好执行数字 1 且清理成功的测试回执，并重新核对当前行，不能用于任意失败任务恢复或自动重放。
 
-`VirtualDisplayServiceAcceptanceInstrumentedTest#realServiceCalculatesOnOwnedVirtualDisplay` 配合默认关闭的 `liveVirtualCalculatorAcceptance=true`，才使用手机已保存的 DeepSeek 配置运行真实 Service、模型与实际悬浮窗确认监听器。须先同意发送非敏感计算器副屏画面，初始状态仅接受 0 或当前完整 `123×45=5535`；初始条件不重复套用于已执行点击后的中间态。只批准一次启动和七个指定键，不清除历史。结束核对 RUN_END、显示消失、输入法及原配置／启动列表恢复；脚本确认不等于真人触摸。LOW／65536 已取得一次独立单任务七键、当前结果 5535、模型成功结束和清理通过的完整证据（61.774 秒）。该固定用例限定 PASS；此前有输出超限和模型点位被拦截的失败，不能据一次成功认定原因消失，整体稳定性仍为 PARTIAL，详见 `SPEC.md`。
+`VirtualDisplayServiceAcceptanceInstrumentedTest#realServiceCalculatesOnOwnedVirtualDisplay` 配合默认关闭的 `liveVirtualCalculatorAcceptance=true`，才使用手机已保存的 DeepSeek 配置运行真实 Service、模型与实际悬浮窗确认监听器。须先同意发送非敏感计算器副屏画面，初始状态仅接受 0 或当前完整 `123×45=5535`；初始条件不重复套用于已执行点击后的中间态。只批准一次启动和七个指定键，不清除历史。结束核对 RUN_END、显示消失、输入法及原配置／启动列表恢复；脚本确认不等于真人触摸。LOW／65536 在动作格式提示修正版取得新的独立单任务七键、当前结果 5535、模型成功结束和清理通过证据（65.906 秒）；此前完整 61.774 秒成功另保留。该固定用例限定 PASS；本轮仍有首键点位被拦截、零点击的失败，既有输出超限与解析失败也不因成功复跑关闭，整体稳定性仍为 PARTIAL，详见 `SPEC.md`。
 
 真实 Service 的受控续验入口 `realServiceContinuesVerifiedPrefixWithoutReplayingIt` 默认关闭，需 `liveVirtualContinueVerifiedPrefix=true`、`firstKeyIndex`（已完成前缀长度 1–6），以及按执行顺序逗号分隔的 `priorServiceRunIds` 和 `priorServiceAcceptanceDirectories`。首份回执可证明 1–6 键，数量取自本次元数据并与实际 trace／历史逐项核对；仅旧版缺失数量字段时按一键校验。它只接受本固定算式的已核验执行／清理回执链，并逐键重新核对当前行和模型坐标；缺少回执、前缀不符或链外存在后续输入即拒绝。只执行剩余键，不清除、不补点、不自动续跑，也不是产品任务恢复能力；分段完成不能记为一次完整七键通过。
+
+解析失败的首回执还须证明：完整 FAILED 历史以同一 run／step 的 PARSE_FAILED RESULT／RUN_END 结束，失败步没有批准或执行，且恰有一次既有协议纠正。`verifyVirtualThreeKeyParseReceipt=true` 的默认关闭离线入口检查三键回执，并拒绝少报、多报和重复链；不启动任务或联网。
+
+`inspectsRetainedActionParseFailureWithoutDeviceActions` 仅显式 `inspectVirtualActionParseFailure=true`、`parseFailureRunId` 和 `parseFailurePid` 时启用。它只对原进程内最新 PARSE_FAILED 的现存文案归类固定原因码，无法确认文案来源时拒绝；不导出错误／模型原文，不读取截图，不发请求或执行动作。
 
 如果回执链已证明等号执行成功、但测试在结果布局过渡时停止，可单独用 `realServiceObservesVerifiedProductWithoutReplayingEquals` 和 `liveVirtualObserveVerifiedProduct=true` 补做结果观察，并提供同样的完整回执链。它只确认启动计算器，禁止任何点击；使用生产新截图及本地当前行核验后，要求模型只报告结果。普通算式测试的结果读取以生产既有的等待与下一轮截图完成为门槛，不在等号执行回执刚到时读取布局；该观察与原输入任务分开计证。
 

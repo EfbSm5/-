@@ -1,6 +1,6 @@
 # RootPilot 当前状态
 
-更新日期：2026-10-05。生产代码基线：`9b5954f`；设备动作现为 LOW／65536。独立副屏固定计算器用例已取得一次真实 Service 单任务完整七键、5535 结果、模型成功结束及清理的限定 PASS；整体规划稳定性及更广验收仍为 PARTIAL，既有输出超限与点位拒绝不因单次通过而视为修复；提交与推送状态以 Git 为准。
+更新日期：2026-10-06。生产代码基线：`06ad68f`，含观察器容量与动作格式提示修复；设备动作现为 LOW／65536。独立副屏固定计算器在修复版取得新的真实 Service 单任务完整七键 PASS，结果、模型完成与安全收尾通过；此前三键后的 PARSE_FAILED 和首键前坐标拦截仍保留，整体规划稳定性及更广验收仍为 PARTIAL；提交与推送状态以 Git 为准。
 
 本文件只保存最新状态，直接更新对应条目，不追加开发过程、历次测试数字或补验流水。使用与构建说明见 [README.md](README.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
@@ -100,8 +100,12 @@ RootPilot 是已 Root 的 Android 手机上的实验性 Agent：根据截图、�
 - 真机前置已恢复：同一硬件 serial `12cd0365`／型号 `24129PN74C`，初次安装的 App／测试 APK SHA-256 均与 build-11 产物一致，后续仅更新测试 APK，最新哈希见下文。经用户明确授权，使用 ADB 在正常系统界面开启 RootPilot 页面结构读取并确认系统风险提示；未直接写权限配置。组件名规范化比较确认仅新增 RootPilot，GKD／Cumulus 等既有服务未增删，快捷方式未开启。服务连接且无崩溃；只读预检通过，当前值为 0 后才进入联网验收。用于读取设置树的临时工具未能连接已有 UiAutomation 会话，未终止该会话，最终使用本地截图确认操作目标；远端临时工具已移除。
 - HIGH／8192 阶段的历史边界：当时尚未完成真实模型单任务完整七键／结果再观察闭环；该固定用例的最新通过证据、当前预算与 APK 见下节。该阶段六键规划走通，后续一次重建请求正常结束，不能据此认定输出超限已解决，当时未继续提高预算、关闭生产思考、放宽解析或自动重放。进一步归因不能用成功请求的统计倒推原失败。当前仍待规划稳定性、主屏同时操作、执行期间主动停止／进程死亡及更广的厂商／应用兼容性；已有等待确认和 SETTLE 阶段的测试主动 STOP 与清理证据，不替代所有中断时机。多次底层观察曾出现前台／焦点未知并安全停止，原因未定位；后续成功不证明该问题已消失，IME 字段修复也不作为它的归因。该阶段续验及对照证据在 `/tmp/rootpilot-service-continuation.VgkMSI/`；原首键／权限证据在 `/tmp/rootpilot-virtual-reacceptance.WSOk8l/`，此前底层／构建产物在 `/tmp/rootpilot-virtual-integration.dvokKX/`。历史 8192 产品 APK SHA-256 为 `ea28c41dd4d4ecef68b628ac56f4597396714babcfa674b2c43f259786851928`；当时用量探针测试 APK 为 `a6faaca38c974b8a66f745a0b8412135f7c630f24f3da1a06c660f5cd92f13b8`，两者当时均与安装包哈希一致。该阶段预算调整后仅补诊断测试及验收文档，未提交或推送。
 
-### 当前设备动作预算与 LOW 验收（2026-10-05，固定用例 PASS／稳定性 PARTIAL）
+### 当前设备动作预算与 LOW 验收（2026-10-06，固定用例 PASS／稳定性 PARTIAL）
 
+- 用户明确授权自主继续后，在原运行 `c4372a9f-99cc-48c6-8fb1-d02c07aea729`／原 PID 5528 中以默认关闭的只读探针取得 `JSON_TRAILING_DATA`，确认末次响应有 JSON 尾部多余内容；不能据此断言原首值类型，第一份响应的具体不符也仍未知。不保存模型／异常原文；探针只输出固定分类、零请求／动作／截图，绑定原 PID、最新完整历史、PARSE_FAILED 终态与 live runId，并拒绝可能被前置校验覆盖的文案。独立审查先指出文案归属守卫不足，修复后复审 PASS。最小生产改动仅强化通用单对象输出提示，并对尾部内容在既有一次纠正请求中发送固定反馈；不回传原响应，严格解析、预算、时限、策略、确认与执行不变。首份续验回执仅额外接受无批准／执行的 PARSE_FAILED 尾部，保留逐键与清理对账、当前行及链外无后续输入守卫；合成一正九反和真实三键回执的少报／多报／重复链拒绝均通过。三个离线测试 0.011 秒 PASS，真实回执检查 0.011 秒 PASS。核心生产及测试增量独立静态审查 PASS；`fix-checks-final.txt` 45 秒通过实际重跑的 539 项单测（零失败／错误／跳过）、App／测试 APK 构建及 Lint。首次门禁 `fix-checks.txt` 亦通过，不重复累计执行数。
+- 修复版完整复验限定 PASS：`full-seven-retry.txt`，run `22400432-6b34-4285-8bf5-a0e924ce48e7`，65.906 秒。无前序回执链，独立完成七键；一次 OpenApp＋七次 Tap 的逐步成功回执、八次脚本监听器确认、新生产截图及当前行 `123×45=5535`、模型成功 Finish 均通过，66 项未截断历史、8 次模型请求、零协议纠正，最大输出 5651 Token。结果已在最后一次模型请求期间独立核验；RUN_END、副屏释放、原 IME／配置／启动列表及保屏标志恢复通过。此前仅接续已证三键后的四键用例 `continuation-four.txt` 为 29.118 秒 PASS，run `e4fb1e56-bbce-4feb-8354-cdd9bf40de77`，42 项事件、5 次模型请求、零协议纠正；该分段成功另计，不合并为完整七键。
+- 保留本轮首轮完整失败：`full-seven.txt` 58.601 秒 FAIL，run `872ae637-f857-42e5-85e7-705c4c2117a6`。唯一模型请求正常返回，零协议纠正；首键 Tap 因 `TAP_NOT_ON_EXPECTED_KEY` 在确认前被测试拦截，零点击、停止及清理通过。已核对保存的生产截图，测试与生产坐标转换公式一致；具体错误点位原因未定位，不归因于本轮格式改动。确认零点击和已知完整初始状态、环境收尾后，才进行上述唯一安全复跑；未补点、放宽命中范围或清除计算器历史。新包主产品 SHA-256 `dfa824cba04ec1a08660bcdefccf70cb6a52e310c5c8aed68827504d812b4f12`、测试 APK `9123b74b87ba0416867026739ed7748211168474de157748d327ea7b00b4ed15` 均与设备安装包匹配。最终外部回读专用副屏数 0、历史 RUNNING 数 0、恢复文件不存在，原 IME 及加密 API／启动列表摘要与基线一致，RootPilot／GKD／Cumulus 均绑定、Binding／Crashed 为空。证据目录 `/tmp/rootpilot-parse-recheck.LBbEYi/` 保留各轮固定字段回执／历史、初始及结果图；成功不抹除点位失败，不证明规划稳定性或旧输出超限已修复。固定纠正分支的失败分类、一次纠正和二次失败零执行仅由 JVM 用例覆盖，本轮成功模型请求未触发该分支；仍未补验真人触摸确认及更广应用。
+- 观察器修正版的前一轮真机复验（2026-10-06）为 PARTIAL：同一小米 15，安装已审查的观察器修正版后，不联网首帧检查 3.582 秒 PASS，副屏创建／启动均为 ON，81 ms 获取有效 PNG，零输入／模型／电源请求，环境及窗口标志恢复通过。真实完整计算 `service-full.txt` 38.752 秒 FAIL，run `c4372a9f-99cc-48c6-8fb1-d02c07aea729`；一次 OpenApp 和三次 Tap（1、2、3）成功，下一步两份动作输出在一次既有纠正请求后仍以 PARSE_FAILED 结束。5 次模型请求均为成功／STOP，最大输出 2791 Token，无 OUTPUT_LIMIT 证据；当时未保存模型原文，具体协议不符原因未定位，后续末次响应的固定原因归类见上文。RUN_END、副屏消失、IME／配置／启动列表及保屏标志恢复均通过。随后只读副屏检查 12.896 秒 PASS，当前行确为 123，历史 5535 不计本次结果；空副屏取消检查亦通过。当时的受控前缀入口不接受 PARSE_FAILED 首回执，未修改守卫、重放三键、补按后续键或追加联网请求。证据在 `/tmp/rootpilot-virtual-recheck.1tPBRQ/` 的 `offline-capture.txt`、`service-full.txt`、`service-full-{metadata,history}.json`、`inspection-after-failure.txt`、`current-123.png`、`offline-cancel.txt`；确认仍由脚本调用实际监听器，不计作真人确认、主屏并行交互或更多应用验收。
 - 用户授权设备动作两条请求路径使用 LOW，并随后要求把输出上限从 8192 提到 65536，与 [DeepSeek 普通思考模式默认预算](https://api-docs.deepseek.com/api/create-chat-completion/)一致；不是 MAX 档位。普通／流式动作共用 builder 及工具决策路径均设置同一上限，纯聊天／文件 Agent 不变。保留原时限、解析、策略、确认与执行；预算变大不保证不超限、点位正确或任务成功，LOW 档位仍在验收中。
 - LOW／65536 完整用例 PASS：`full-seven-64k.txt`，run `d948974c-71d1-4301-8286-2bf711efa870`，61.774 秒。无前序回执链，从初始完整结果行开始独立输入七键；一次 OpenApp＋七次 Tap 的开始／成功回执成对、八次真实监听器确认，`firstKeyIndex=0`、`sevenKeysApproved=true`。逐键命中与当前行核验通过，等号后新生产截图为 123×45=5535，模型下一次请求期间已独立读到当前结果，随后成功 Finish；RUN_END、副屏消失、IME 不变、原配置／启动列表及保屏标志恢复。持久化历史 66 项未截断事件、八份真实模型用量；本轮最大输出 5498 Token，未跨过旧 8192 上限，因此不能把本次成功归因为预算扩大。执行前同版本另有仅续跑剩余四键的 21.880 秒 PASS（run `816bef2e-0014-4d06-b31c-aa3e3236f355`），该轮单独计证，不合并成完整七键。
 - LOW／8192 受控续验限定 PASS：run `de1bed6c-8a56-4778-9edb-f290aa85b431` 只接续已证六键后的等号，9.430 秒；run `92b6ae86-fe40-4db1-8a2e-3b409e0fdacb` 接续已证首键后的六键，90.508 秒。两次均为真实生产 Service／模型／Root 执行，当前行和结果图为 5535，模型成功报告、精确执行回执、RUN_END、副屏消失及 IME／原配置／启动列表恢复通过；后者在下一模型请求期间已观察到结果。分别持久化 18／58 项未截断历史事件，模型用量 2／7 份。确认是脚本调用真实监听器，不是真人触摸；分段成功不计作单任务七键通过。
@@ -157,6 +161,26 @@ RootPilot 是已 Root 的 Android 手机上的实验性 Agent：根据截图、�
 - 最终外部回读：原小米 IME、任务快照及 IME 文件的本体／bak／new 均不存在，历史 50 条、零 RUNNING、最新为上述 COMPLETED；RootPilot／GKD／Cumulus 全部绑定且 Binding／Crashed 为空，设备未锁定。正常收尾后截图仍保留同一搜索结果；没有再次模型请求或输入，也没有修改系统设置或其他服务。
 - 测试 APK／Lint 构建 29 秒、时区修正版 30 秒、入口守卫版 26 秒成功；最终不带开关运行 0.010 秒，时区三个正例／五个反例通过，另外两项按预期跳过，不计业务 PASS。仅更新测试 APK，最终 SHA-256 `a52292404544cf067d2f0ae5f5928680670064bb61fc3b5c8b9226a908fc4460` 与设备一致；生产 APK 仍为 `c57d08bf3c41b2313676c1f3717dc02b971bee672002198bc448709a4a33e52b`，fixture 仍为 `380496a2e22a7983b8af3d1288a77413295cb8a5c539dd5c92cd6886e57c0673`，均未重新安装。本轮未重跑 JVM 单测。
 - 证据保存于 `/tmp/rootpilot-city-search.qeCpE8/`，主要为 `live-search-entry-guard.txt`、`completed-search-history.json`、`clock-result-beijing.png`、`clock-result-after-cleanup.png`、`final-activities.txt`、`final-history-summary.json`、`final-recovery-files.txt`、`final-ime.txt` 和 `final-accessibility.txt`。独立静态首审发现时区正则可接受错误偏移量，收紧边界后复审 PASS；后续入口增量亦单独复审 PASS。历史沿用最近 50 条的正常淘汰机制，不清空或改写历史；验收代码及文档同批交付，提交与推送状态以 Git 为准。
+
+### 测试页关闭离线诊断（2026-10-05，前台／后台限定通过，原异常未复现）
+
+- 新增默认关闭的 `FixtureCloseInstrumentedTest`，仅修改测试及文档，生产 APK、fixture APK、原 `FixtureClient` 和 Provider 均未改动。签名空页、Service 空闲、无任务／IME 恢复记录通过后，前台或 HOME 后台模式各只发一次关闭。直接使用 `ContentProviderClient` 保留固定 Binder 失败分类，不记录异常原文，不重试关闭；这不是原失败根因的修复。
+- 前台探针 `probe-foreground.txt` 1.127 秒，6 ms 获得 RECEIPT，外部 Activity/task 均不存在。后台最终使用既有 Root 启动流程准备空 fixture，HOME 前台／焦点校验通过，后台间隔 30 秒；`probe-home-root-prepared.txt` 31.502 秒，8 ms 获得 RECEIPT，外部 Activity/task 均不存在，原小米 IME 未变。两轮零模型请求、零文本输入，不截屏／读取控件树；后台仅执行一次 HOME。当前未验证重复关闭、Binder 断连／冻结故障注入或原真实任务同路径复现。
+- 中间失败保留：RootPilot 背景准备版 42.148 秒和有界观察版 6.167 秒未通过前台／焦点校验；前者曾受外部启动干预，不作为有效对照。HOME 版 6.366 秒也未通过观察前置；未前置打开 fixture 的版本 4.029 秒报 `fixture_not_ready`。这些运行均未发出关闭或模型请求，不记为关闭 FAIL/PASS。失败后的正常返回仅用于已核对身份的测试页；没有修改系统设置或关闭其他服务。
+- 对页面未知做了只读对照：当前独立解析器在宿主内存中可解析 HOME，四份输入均低于既有 256 KiB 限额，不保存系统原始 dump。历史显示映射不作为活动副屏证据；现有数据未定位此前观察未知的根因。未放宽生产观察器、增加生产等待、重试或坐标补偿。
+- 独立静态首审修正 IME 恢复前置，HOME 增量修正默认桌面选择器校验后复审 PASS，最终源码 SHA-256 `41f68ccbb6f9f083bbd518378366ffef581805f07b3c9fb51c8f04dbcb80c189`。最终测试 APK 构建及 Lint 29 秒通过；过程中一个测试回执类型编译笔误已修正，不保留为运行问题。本轮未重跑 JVM 单测。测试 APK SHA-256 `dc22db4bea662a7f7ccb8d35586bd11deb192c4b4e291fdf5feca9dea9a9f362`，仅更新测试包。
+- 证据在 `/tmp/rootpilot-fixture-close.rYuPCN/`，包含上述原始探针回执、`build-home-verified.txt`、`foreground-activity-after.txt`／`foreground-task-after.txt`、`background-activity-after.txt`／`background-task-after.txt`、只含长度及归属分类的观察摘要和 `final-ime.txt`。上一节真实时钟自动测试仍为 FAIL，不能因本次未复现而改判通过。
+
+### 正常界面真实搜索准备（2026-10-06，只读预检限定通过，观察器修复已安装，联网验收未开始）
+
+- 为避免时钟初始页暴露个人闹钟，先在本机检查计算器的公开币种入口；该入口只展示下拉列表，未作为中文搜索用例继续。未选择币种、改金额或清除计算历史，随后正常返回关闭本轮新开的计算器 Activity。改选应用商店 `com.xiaomi.market` 的公开搜索联想，拟输入一次“计算器”并只读候选，不提交搜索、不选结果、不安装／下载；本轮尚未输入该查询，也未启动模型或 Service 任务。
+- 新增默认关闭的只读 `MarketSearchUiAcceptanceInstrumentedTest#inspectPublicMarketPageWithoutActionsOrNetwork`，仅采集固定安全标签及控件元数据。初次 0.515 秒因前台归属未知失败；正常退出本轮计算器 Activity 后，第二次 0.692 秒限定通过，识别搜索 Activity 和原生 `android:id/input`。树仍截断，节点 text 非空不能代替实际 IME 判断查询是否为空；没有从此预检推断中文输入或搜索结果通过。
+- 已确认本次页面未知的触发条件：搜索页的 Activity dump 为 264551 字节，超过单份既有 262144 字节限额；宿主内存中对同批数据执行当前已编译解析器时，完整输入可解析归属，将超限输入按生产规则置空后归属全未知。关闭本轮计算器页面后降至 257220 字节，解析与只读预检通过。随后正常打开 RootPilot，Activity dump 为 264404 字节，再打开应用商店搜索页为 275661 字节，两次均出现同样 raw／bounded 差异。只保存长度和固定归属分类，不保存系统原始 dump；不据这些证据倒推原 fixture 回执异常或所有历史页面未知的原因。
+- 该容量边界经用户确认已修复：仅将主屏／副屏观察器的 Activity dump 上限从 256 KiB 提为 512 KiB，其余三份输入保持 256 KiB，原 3 秒时限、取消清理、完整读取及窗口身份解析不变；超限仍整份丢弃。新增回归覆盖新上限／多一字节、旧边界之后的身份冲突及其他命令容量，535 项单测零失败／错误／跳过，App／测试 APK 构建与 Lint 通过。单行 256 KiB 空格的合成测试曾卡在既有显示分隔正则，改用实际多行 dump 形态后通过；这项解析性能边界未修复，不将中断的检查记作通过。正常 UI 联网搜索验收仍未实现／开始，当前继续副屏验证。
+- 新增默认关闭的只读 `RootScreenObserverInstrumentedTest`，固定页面参数仅为 rootpilot／market，失败不输出意外前台应用内容。三文件最终独立静态复审 PASS；生产 APK SHA-256 `51d9de050d6d5b2ceccd53034afc46a17d330263740971dbea70debc1f689048`、测试 APK `62c62eee88e4b603302ed20286fc0531353124d763a1a7b8b7cfa7fc6fdd6ed6` 已安装到同一小米，设备哈希一致。旧产品／新产品的 RootPilot 观察分别 0.226／0.234 秒 PASS，默认入口 0.007 秒按预期跳过；本次 Activity dump 为 119618 字节，未复现超过 256 KiB 的真机现场，因此大容量运行覆盖仅来自单测和此前原因对照。安装后 RootPilot 从短暂 Binding 自动恢复 Bound，GKD／Cumulus 保持绑定；API 密文及启动列表摘要不变。绑定构建 10 秒全部 UP-TO-DATE，不重复计单测；证据在 `/tmp/rootpilot-virtual-recheck.1tPBRQ/`，前轮全量门禁在 `/tmp/rootpilot-observer-budget.urKDvR/`。
+- 只读预检测试 APK 构建通过，最终构建／Lint 23 秒通过；默认不带开关运行 0.004 秒按预期跳过，不算业务通过。本轮未重跑 JVM 单测。当前测试 APK SHA-256 `055c8ead7a4f9bcdec4259c9b6c01efec65215ce30b8464314e6c12e1da75459` 与设备安装包一致；生产／fixture APK 未更新。源码 SHA-256 `e61641108dbe13bd7ab18b11a08b2534e5ea7209eaee880032b1cd95601d1bf0`，独立静态及已有证据复审 PASS，联网验收未开始。
+- 最终回读历史仍 50 条、零 RUNNING，最新仍为上一节时钟 run `7b3a2580-d8f2-4e7a-95f3-0559236cc0f5` 的 COMPLETED／42 项事件；无新增任务历史。任务与 IME 恢复文件本体／旁路文件不存在，原输入法不变；RootPilot／GKD／Cumulus 仍绑定，Binding／Crashed 为空。应用商店已正常退出搜索页，未删除原搜索历史；最后回到 RootPilot 页面。
+- 证据在 `/tmp/rootpilot-market-ui.5vVeAo/`：`preflight-empty-search.txt`、`preflight-empty-search-after-exit.txt`、`observation-after-calculator-exit.txt`、`observation-with-rootpilot-ui.txt`、`observation-search-with-rootpilot-ui.txt`、`checks.txt`、`default-closed.txt`、`final-history-summary.json`、`final-recovery-files-verified.txt`、`final-accessibility-verified.txt` 和 `final-ime.txt`。早期恢复文件检查有一次 shell 引号错误，未用空文件充作恢复证据，以上述 verified 文件为准。
 
 ### 真实 Service 用量诊断（2026-10-05，静态 PASS／真机 PARTIAL）
 
@@ -237,7 +261,7 @@ RootPilot 是已 Root 的 Android 手机上的实验性 Agent：根据截图、�
 - 截图前后窗口未知或变化时，不发送该帧。确认后先移除悬浮面板，再核对窗口；点击、滑动、按键和启动应用还要求键盘状态已知且一致。
 - 文本输入允许切换输入法引起的键盘变化，但仍核对原窗口、目标包名与编辑框身份；等待动作不做执行前窗口核对。
 - 状态变化或无法确认时停止，原因码 `SCREEN_CONTEXT_CHANGED`；不自动返回、补点或重放。恢复任务需重新同意上传。
-- 四条固定诊断命令共用 3 秒协程时限，每条最多 256 KiB，超时／超限不解析截断内容；取消清理进程与流。系统进程启动／清理不保证硬实时。解析覆盖 AOSP 15／16 与本次小米 Android 17 已观察格式，仅接受可确认的默认显示状态；可容纳两份诊断均确认休眠、无焦点且无活动的副屏。全局等待停止／结束队列与显示区段分开，窗口块按缩进结束，避免误归属；不据此放行真实副屏活动或身份冲突。
+- 四条固定诊断命令共用 3 秒协程时限，Activity dump 最多 512 KiB，窗口／显示／输入法各最多 256 KiB，超时／超限不解析截断内容；取消清理进程与流。系统进程启动／清理不保证硬实时。解析覆盖 AOSP 15／16 与本次小米 Android 17 已观察格式，仅接受可确认的默认显示状态；可容纳两份诊断均确认休眠、无焦点且无活动的副屏。全局等待停止／结束队列与显示区段分开，窗口块按缩进结束，避免误归属；不据此放行真实副屏活动或身份冲突。
 
 ### 已有限定验收证据
 
