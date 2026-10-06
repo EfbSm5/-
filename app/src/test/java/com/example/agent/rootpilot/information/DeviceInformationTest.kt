@@ -71,6 +71,17 @@ class DeviceInformationTest {
         assertThrows(IllegalArgumentException::class.java) { UiTreeSnapshot.format(emptyList(), "com.test.app", false) }
     }
 
+    @Test fun virtualTreeNamesItsDisplayWithoutChangingBoundsOrSensitiveTextFiltering() {
+        val formatted = UiTreeSnapshot.format(listOf(node(sensitive = true)), "com.test.app", false, 9)
+        assertEquals(JsonPrimitive(9), formatted.data["display_id"])
+        assertEquals(JsonPrimitive("physical_screen_pixels"), formatted.data["bounds_unit"])
+        assertEquals(JsonPrimitive(42), formatted.data["nodes"]!!.jsonArray.single().jsonObject["bounds"]!!.jsonObject["left"])
+        assertFalse(formatted.data.toString().contains("private-content"))
+        assertFalse(formatted.truncated)
+        assertFalse(UiTreeSnapshot.format(listOf(node()), "com.test.app", false).data.containsKey("display_id"))
+        assertThrows(IllegalArgumentException::class.java) { UiTreeSnapshot.format(listOf(node()), "com.test.app", false, -1) }
+    }
+
     private fun node(id: String = "n0", text: String = "private-content", sensitive: Boolean = false) = UiNodeSnapshot(
         id, null, "com.test.app", "android.widget.EditText", "com.test.app:id/input", text,
         "private-content-description", "private-content-hint", 42, 20, 100, 80,

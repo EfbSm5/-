@@ -256,6 +256,40 @@ class DeepSeekClientTest {
         }
     }
 
+    @Test(timeout = 10_000)
+    fun virtualPromptOffersOnlyOwnedDisplayTreeAndContextWithoutExpandingActions() = runTest {
+        ServerSocket(0).apply { soTimeout = 3000 }.use { server ->
+            val captured = AtomicReference<String>()
+            val worker = thread(isDaemon = true) {
+                server.accept().apply { soTimeout = 3000 }.use { socket ->
+                    captured.set(readHttpBody(socket.getInputStream()))
+                    val body = """{"choices":[{"message":{"content":"{\"action\":\"finish\",\"success\":true,\"message\":\"fixed\"}"}}]}""".toByteArray()
+                    socket.getOutputStream().write(
+                        "HTTP/1.1 200 OK\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n".toByteArray() + body,
+                    )
+                }
+            }
+            val result = HttpDeepSeekClient().requestAction(DeepSeekVisionRequest(
+                RootPilotConfig(apiKey = "test-token", baseUrl = "http://127.0.0.1:${server.localPort}",
+                    allowScreenUpload = true, executionDisplay = com.example.agent.rootpilot.model.ExecutionDisplay.VIRTUAL),
+                ScreenshotFrame(byteArrayOf(1), 1080, 1920, "fixture"), emptyList(), 1, 0,
+            ))
+            worker.join(5_000)
+            assertFalse(worker.isAlive)
+            assertTrue(result is DeepSeekActionResult.Success)
+            val messages = Json.parseToJsonElement(captured.get()).jsonObject.getValue("messages").jsonArray
+            val prompt = messages[1].jsonObject.getValue("content").jsonArray
+                .first { it.jsonObject["type"]?.jsonPrimitive?.content == "text" }
+                .jsonObject.getValue("text").jsonPrimitive.content
+            assertTrue(prompt.contains("get_screen_context 和 get_ui_tree 可用于本次副屏"))
+            assertTrue(prompt.contains("get_activity_stack 在副屏返回 not_supported"))
+            assertTrue(prompt.contains("不请求读取主屏"))
+            assertTrue(prompt.contains("不支持文字输入、滑动或系统按键"))
+            assertTrue(prompt.contains("所有点击需确认"))
+            assertFalse(prompt.contains("仅 get_screen_context 可用"))
+        }
+    }
+
     private fun readHttpBody(input: InputStream): String = readHttpRequest(input).second
 
     private fun readHttpRequest(input: InputStream): Pair<String, String> {

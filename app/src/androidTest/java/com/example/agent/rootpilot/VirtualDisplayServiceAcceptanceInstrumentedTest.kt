@@ -106,6 +106,72 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
     }
 
     @Test
+    fun realServiceReadsOwnedCalculatorTreeWithoutInput() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("liveVirtualUiTreeAcceptance") == "true")
+        runBlocking { withRootPilotAcceptanceScreen {
+            Acceptance(InstrumentationRegistry.getInstrumentation().targetContext, mode = Mode.READ_UI_TREE).run()
+        } }
+    }
+
+    @Test
+    fun readOnlySampleRequiresCurrentZeroAndSeparateHistoricalProduct() {
+        fun sample(expression: Expression = Expression.ZERO, product: Boolean = false,
+            complete: Boolean = false, history: Boolean = true) = Sample(expression, product, complete, null, 0, history)
+        check(sample().knownReadOnlyZero(), Reason.UNEXPECTED)
+        check(!sample(history = false).knownReadOnlyZero(), Reason.UNEXPECTED)
+        check(!sample(Expression.EQUATION, true, true).knownReadOnlyZero(), Reason.UNEXPECTED)
+        check(!sample(product = true).knownReadOnlyZero(), Reason.UNEXPECTED)
+        check(!sample(complete = true).knownReadOnlyZero(), Reason.UNEXPECTED)
+        check(readOnlyMessageMatches(READ_ONLY_RESULT), Reason.UNEXPECTED)
+        check(!readOnlyMessageMatches("当前行=5535；历史123×45=5535"), Reason.UNEXPECTED)
+    }
+
+    @Test
+    fun treeReceiptRequiresAvailableResultAndSuccessfulNextModel() {
+        val id = "5dd47b6c-28aa-4a20-881c-b86222248664"
+        fun event(stage: TraceStage, event: TraceEvent, status: TraceStatus) =
+            RunTraceEvent(id, 0, 0, TraceActionType.NONE, stage, event, status, TraceReason.NONE)
+        val events = listOf(
+            event(TraceStage.MODEL, TraceEvent.START, TraceStatus.STARTED),
+            event(TraceStage.MODEL, TraceEvent.RESULT, TraceStatus.SUCCESS),
+            event(TraceStage.INFORMATION, TraceEvent.READ_UI_TREE, TraceStatus.STARTED),
+            event(TraceStage.INFORMATION, TraceEvent.RESULT, TraceStatus.SUCCESS),
+            event(TraceStage.MODEL, TraceEvent.START, TraceStatus.STARTED),
+            event(TraceStage.MODEL, TraceEvent.RESULT, TraceStatus.SUCCESS),
+        )
+        check(treeForwardedToNextModel(events), Reason.UI_TREE_NOT_OBSERVED)
+        val invalid = listOf(events.filterIndexed { index, _ -> index != 3 }, events.dropLast(1),
+            events.take(3) + events[3].copy(status = TraceStatus.FAILED) + events.drop(4),
+            events.take(5) + events[5].copy(status = TraceStatus.FAILED),
+            events + events[2], events + events[0],
+            events.take(4) + events.drop(4).map { it.copy(step = 1) },
+            events.take(4) + events.drop(4).map { it.copy(runId = "other") },
+            events.take(3) + events[4] + events[3] + events[5],
+            events + event(TraceStage.INFORMATION, TraceEvent.READ_SCREEN_CONTEXT, TraceStatus.STARTED))
+        invalid.forEach { check(!treeForwardedToNextModel(it), Reason.UI_TREE_NOT_OBSERVED) }
+    }
+
+    @Test
+    fun treeObservationAllowsFirstToolReplyBeforeOrDuringSampling() {
+        val first = LiveEvent(0, "model", "result", "success", "none")
+        val query = LiveEvent(0, "information", "read_ui_tree", "started", "none")
+        val available = LiveEvent(0, "information", "result", "success", "none")
+        val followup = LiveEvent(0, "model", "start", "started", "none")
+        val final = first.copy()
+        for (snapshots in listOf(
+            listOf(listOf(first), listOf(first, query, available, followup)),
+            listOf(emptyList(), listOf(first, query)),
+        )) {
+            snapshots.forEach { check(resultObservationWindowOpen(it, 0, true), Reason.RESULT_WINDOW_MISSED) }
+        }
+        check(!resultObservationWindowOpen(listOf(first, query, available, followup, final), 0, true),
+            Reason.RESULT_WINDOW_MISSED)
+        check(!resultObservationWindowOpen(listOf(first.copy(status = "failed")), 0, true), Reason.RESULT_WINDOW_MISSED)
+        check(!resultObservationWindowOpen(listOf(first), 0, false), Reason.RESULT_WINDOW_MISSED)
+        check(resultObservationWindowOpen(listOf(first.copy(step = 0)), 1, false), Reason.RESULT_WINDOW_MISSED)
+    }
+
+    @Test
     fun realServiceContinuesVerifiedOneWithoutReplayingIt() {
         val arguments = InstrumentationRegistry.getArguments()
         assumeTrue(arguments.getString("liveVirtualContinueVerifiedOne") == "true")
@@ -339,11 +405,11 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
     private data class PriorRun(val id: String, val directory: String)
     private data class PriorChain(val firstKeyIndex: Int, val receipts: List<PriorRun>)
 
-    private enum class Mode { FULL, STOP_MODEL, STOP_APPROVAL, ISOLATION }
+    private enum class Mode { FULL, STOP_MODEL, STOP_APPROVAL, ISOLATION, READ_UI_TREE }
 
     private class Acceptance(private val context: Context, private val prior: PriorChain? = null,
         private val mode: Mode = Mode.FULL) {
-        private val firstKeyIndex = prior?.firstKeyIndex ?: 0
+        private val firstKeyIndex = if (mode == Mode.READ_UI_TREE) KEYS.size else prior?.firstKeyIndex ?: 0
         private val remainingKeys = KEYS.size - firstKeyIndex
         private val manager = context.getSystemService(DisplayManager::class.java) ?: fail(Reason.DISPLAY_IDENTITY)
         private val history = RootPilotService.historyState(context)
@@ -366,6 +432,8 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
         private var approvedAction: RootPilotAction? = null
         private var approvedStep = -1
         private val resultStep: Int get() = if (remainingKeys == 0) 0 else approvedStep + 1
+        private val resultObserved: Boolean get() =
+            if (mode == Mode.READ_UI_TREE) evidence.currentZero && evidence.history5535 else evidence.result5535
         private var beforeEqualsFrame: ScreenshotFrame? = null
         private var failure: Reason? = null
 
@@ -431,7 +499,7 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
             configChanged = true
             RootPilotService.updateApiConfig(saved)
             testConfig = saved.applyTo(RootPilotConfig(
-                task = if (prior == null) TASK else continuationTask(firstKeyIndex),
+                task = if (mode == Mode.READ_UI_TREE) TASK_READ_UI_TREE else if (prior == null) TASK else continuationTask(firstKeyIndex),
                 manualConfirmation = true,
                 allowScreenUpload = true,
                 executionDisplay = ExecutionDisplay.VIRTUAL,
@@ -580,7 +648,7 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                 val state = RootPilotService.uiState.value
                 check(state.config == testConfig, Reason.CONFIG_CHANGED)
                 val events = liveEvents()
-                checkNoUnsupportedTools(events)
+                checkNoUnsupportedTools(events, mode == Mode.READ_UI_TREE)
                 if (mode == Mode.STOP_MODEL && state.status == RootPilotStatus.REQUESTING_MODEL &&
                     evidence.opened && !evidence.stopRequested && modelRequestInFlight(events)) {
                     if (stopOverlay(state)) evidence.stopRequested = true
@@ -596,14 +664,14 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                     fail(Reason.STOP_BOUNDARY_MISSED)
                 }
                 // Observe after the production settle/capture cycle, not during the equals animation.
-                if (evidence.opened && evidence.approvedKeys == remainingKeys && !evidence.result5535 &&
+                if (evidence.opened && evidence.approvedKeys == remainingKeys && !resultObserved &&
                     state.step >= resultStep && state.frame != null &&
                     events.any { it.step == resultStep && it.stage == "screenshot" &&
                         it.event == "result" && it.status == "success" } &&
                     (remainingKeys == 0 || events.any { it.executionSuccess("tap") && it.step == approvedStep })) {
                     observeResult()
                 }
-                if (evidence.result5535 && !evidence.resultImage) saveResultFrame()
+                if (resultObserved && !evidence.resultImage) saveResultFrame()
                 if (state.status == RootPilotStatus.WAITING_CONFIRMATION &&
                     (state.pendingAction !== approvedAction || state.step != approvedStep) &&
                     !evidence.stopRequested && (mode !in setOf(Mode.STOP_MODEL, Mode.STOP_APPROVAL) || !evidence.opened)) {
@@ -620,10 +688,16 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
             check(terminal.status == RootPilotStatus.COMPLETED, Reason.TERMINAL_NOT_COMPLETED)
             check(evidence.opened && evidence.approvedKeys == remainingKeys, Reason.APPROVAL_COUNT)
             check(terminal.pendingAction == null && terminal.savedTodos.isEmpty(), Reason.UNEXPECTED_SIDE_EFFECT)
-            check(evidence.result5535 && evidence.resultImage, Reason.RESULT_NOT_OBSERVED)
-            evidence.modelReported5535 = terminal.modelReportedResult &&
-                normalize(terminal.errorMessage.orEmpty()).contains("5535")
-            check(evidence.modelReported5535, Reason.MODEL_RESULT_MISMATCH)
+            check(resultObserved && evidence.resultImage, Reason.RESULT_NOT_OBSERVED)
+            if (mode == Mode.READ_UI_TREE) {
+                evidence.modelReportedZeroAndHistory = terminal.modelReportedResult &&
+                    readOnlyMessageMatches(terminal.errorMessage.orEmpty())
+                check(evidence.modelReportedZeroAndHistory, Reason.MODEL_RESULT_MISMATCH)
+            } else {
+                evidence.modelReported5535 = terminal.modelReportedResult &&
+                    normalize(terminal.errorMessage.orEmpty()).contains("5535")
+                check(evidence.modelReported5535, Reason.MODEL_RESULT_MISMATCH)
+            }
             withTimeout(5_000) {
                 while (record()?.status == RunHistoryStatus.RUNNING ||
                     record()?.events?.none { it.event == TraceEvent.RUN_END } != false) delay(POLL_MS)
@@ -633,7 +707,10 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                 history.value.error == null, Reason.HISTORY_INCOMPLETE)
             val events = completed.events
             check(events.all { it.runId == evidence.runId }, Reason.RUN_IDENTITY)
-            check(events.none { it.event in FORBIDDEN_TOOLS }, Reason.UNSUPPORTED_TOOL)
+            if (mode == Mode.READ_UI_TREE) {
+                evidence.uiTreeFollowupObserved = treeForwardedToNextModel(events)
+                check(evidence.uiTreeFollowupObserved, Reason.UI_TREE_NOT_OBSERVED)
+            } else check(events.none { it.event in FORBIDDEN_TOOLS }, Reason.UNSUPPORTED_TOOL)
             val starts = events.filter { it.stage == TraceStage.EXECUTION && it.event == TraceEvent.START }
             val receipts = events.filter { it.stage == TraceStage.EXECUTION && it.event == TraceEvent.RESULT &&
                 it.status == TraceStatus.SUCCESS }
@@ -822,13 +899,16 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                 ensureResultWindow()
                 val sample = collect(display, null)
                 ensureResultWindow()
-                if (sample.knownProduct()) {
+                if (if (mode == Mode.READ_UI_TREE) sample.knownReadOnlyZero() else sample.knownProduct()) {
                     if (remainingKeys == 0) {
                         evidence.initialExpressionKnown = true
                         saveFrame(RootPilotService.uiState.value.frame ?: fail(Reason.FRAME_UNAVAILABLE), "initial.jpg")
                         evidence.initialImage = true
                     }
-                    evidence.result5535 = true
+                    if (mode == Mode.READ_UI_TREE) {
+                        evidence.currentZero = true
+                        evidence.history5535 = true
+                    } else evidence.result5535 = true
                     evidence.resultDuringModelRequest = liveEvents().any {
                         it.step >= resultStep && it.stage == "model" && it.event == "start"
                     }
@@ -844,9 +924,8 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
             validateDisplay(owned ?: fail(Reason.DISPLAY_IDENTITY))
             val state = RootPilotService.uiState.value
             check(state.running && state.config == testConfig, Reason.RESULT_WINDOW_MISSED)
-            check(liveEvents().none {
-                it.step >= resultStep && it.stage == "model" && it.event == "result"
-            }, Reason.RESULT_WINDOW_MISSED)
+            check(resultObservationWindowOpen(liveEvents(), resultStep, mode == Mode.READ_UI_TREE),
+                Reason.RESULT_WINDOW_MISSED)
         }
 
         private fun saveResultFrame() {
@@ -873,7 +952,7 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                         current.frame !== expected.frame) return@runOnMainSync
                     check(current.config == testConfig, Reason.CONFIG_CHANGED)
                     validateDisplay(display)
-                    checkNoUnsupportedTools(liveEvents())
+                    checkNoUnsupportedTools(liveEvents(), mode == Mode.READ_UI_TREE)
                     val panel = WindowInspector.getGlobalWindowViews().singleOrNull {
                         it.isAttachedToWindow &&
                             (it.layoutParams as? WindowManager.LayoutParams)?.title == "RootPilotOverlay"
@@ -1055,13 +1134,16 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                     Reason.KEY_UNAVAILABLE)
                 bounds(node).also { rectangle -> check(inside(rectangle), Reason.KEY_UNAVAILABLE) }
             }
+            val historicalProduct = mode == Mode.READ_UI_TREE && targets.any { target ->
+                target !in lowest && labels(target.node).map(::expressionValue).any { it == Expression.EQUATION }
+            }
             safe(expression)
             check(expression.refresh() && labels(expression).map(::expressionValue)
                 .filter { it != Expression.OTHER }.distinct() == expressionLabels, Reason.STALE_TARGET)
             validateDisplay(expected)
             check(RootPilotAccessibilityService.connectedService === service && window().id == selected.id,
                 Reason.WINDOW_IDENTITY)
-            Sample(expressionLabels.single(), product, complete, keyBounds, SystemClock.elapsedRealtime())
+            Sample(expressionLabels.single(), product, complete, keyBounds, SystemClock.elapsedRealtime(), historicalProduct)
         }
 
         private suspend fun cleanup() {
@@ -1155,9 +1237,10 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
     private enum class Expression { ZERO, ONE, TWELVE, HUNDRED_TWENTY_THREE, MULTIPLY, MULTIPLY_FOUR, COMPLETE, PRODUCT, EQUATION, OTHER }
     private data class KeySpec(val id: String, val labels: Set<String>, val before: Expression)
     private data class Sample(val expression: Expression, val product: Boolean, val complete: Boolean,
-        val keyBounds: Rect?, val finishedAt: Long) {
+        val keyBounds: Rect?, val finishedAt: Long, val historicalProduct: Boolean = false) {
         fun knownInitial() = expression == Expression.ZERO || knownProduct()
         fun knownProduct() = product && complete && expression in setOf(Expression.COMPLETE, Expression.PRODUCT, Expression.EQUATION)
+        fun knownReadOnlyZero() = expression == Expression.ZERO && !product && !complete && historicalProduct
     }
 
     private class Evidence(private val firstKeyIndex: Int, private val priorRunId: String, private val mode: Mode) {
@@ -1177,6 +1260,9 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
         var resultImage = false
         var result5535 = false
         var modelReported5535 = false
+        var currentZero = false
+        var history5535 = false
+        var modelReportedZeroAndHistory = false
         var resultDuringModelRequest = false
         var resultBeforeNextModelResponse = false
         var executionsMatched = false
@@ -1190,6 +1276,7 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
         var mainClicks = 0
         var fixtureClosed = false
         var mainFocusLostBeforeTap = false
+        var uiTreeFollowupObserved = false
 
         fun publish() {
             val metadata = buildJsonObject {
@@ -1210,9 +1297,14 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                 put("sevenKeysApproved", approvedKeys == 7); put("initialExpressionKnown", initialExpressionKnown)
                 put("initialVirtualImageSaved", initialImage); put("resultVirtualImageSaved", resultImage)
                 put("result5535Observed", result5535); put("modelReported5535", modelReported5535)
+                put("readOnlyExpectedCurrentZero", mode == Mode.READ_UI_TREE)
+                put("currentZeroObserved", currentZero); put("historical5535Observed", history5535)
+                put("modelReportedCurrentZeroAndHistory5535", modelReportedZeroAndHistory)
                 put("resultDuringNextModelRequest", resultDuringModelRequest)
                 put("resultBeforeNextModelResponse", resultBeforeNextModelResponse)
                 put("exactExecutionReceipts", executionsMatched); put("stopRequested", stopRequested)
+                put("uiTreeAvailableAndNextModelSucceeded", uiTreeFollowupObserved)
+                put("uiTreeEvidenceSource", if (mode == Mode.READ_UI_TREE) "production_trace_and_reviewed_transport" else "none")
                 put("runEnd", runEnd); put("displayGone", displayGone); put("cleanupConfirmed", cleanupConfirmed)
                 put("imeUnchanged", imeUnchanged); put("configRestored", configRestored)
                 put("allowlistBytesRestored", allowlistRestored)
@@ -1246,6 +1338,7 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
         ACCEPTANCE_INCOMPLETE, PRIOR_RECEIPT_INVALID, PRIOR_RECEIPT_SUPERSEDED, TIMEOUT, CANCELLED, UNEXPECTED,
         MAIN_FIXTURE_CHANGED, MAIN_INPUT_TARGET, MAIN_FIXTURE_CLEANUP,
         STOP_BOUNDARY_MISSED, TERMINAL_NOT_STOPPED, ACTION_AFTER_STOP,
+        UI_TREE_NOT_OBSERVED,
         PERMISSION_DENIED, PARSE_MESSAGE_UNCONFIRMED,
         FIXTURE_INVALID_COMMAND, FIXTURE_REMOTE_STATE, FIXTURE_MISSING_RESULT, FIXTURE_TRANSPORT_FAILURE,
         FIXTURE_UNKNOWN_PROVIDER, FIXTURE_INVALID_ARGUMENT,
@@ -1296,7 +1389,10 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
                 else -> ParseFailureCode.UNKNOWN
             }
         }
-        const val TASK = "请只在本次独立副屏中的系统计算器完成固定计算。启动由启动确认完成，不要再次打开应用。根据每轮最新副屏截图与最近成功动作判断下一键。初始条件只在本任务尚未执行任何点击时检查：当前行只能为0或同一行完整的123×45=5535，否则失败结束。开始点击后，1、12、123、123×、123×4、123×45都是正常中间态，不得再套用初始条件拒绝，也不要重放已经成功的按键。依次且仅点击1、2、3、×、4、5、=，每键一次，不清除历史，不输入文本，不使用系统按键、滑动、等待动作或其他功能。禁止调用get_ui_tree和get_activity_stack，副屏不支持这些工具。最后一次等号后，必须根据新截图视觉读取当前123×45的结果，只有看到5535才报告读到5535并成功finish；否则失败finish。"
+        const val TASK = "请只在本次独立副屏中的系统计算器完成固定计算。启动由启动确认完成，不要再次打开应用。根据每轮最新副屏截图与最近成功动作判断下一键。初始条件只在本任务尚未执行任何点击时检查：当前行只能为0或同一行完整的123×45=5535，否则失败结束。开始点击后，1、12、123、123×、123×4、123×45都是正常中间态，不得再套用初始条件拒绝，也不要重放已经成功的按键。依次且仅点击1、2、3、×、4、5、=，每键一次，不清除历史，不输入文本，不使用系统按键、滑动、等待动作或其他功能。本截图固定用例禁止调用get_ui_tree和get_activity_stack。最后一次等号后，必须根据新截图视觉读取当前123×45的结果，只有看到5535才报告读到5535并成功finish；否则失败finish。"
+        const val READ_ONLY_RESULT = "当前行=0；历史123×45=5535"
+        const val TASK_READ_UI_TREE = "启动确认已打开本次拥有的副屏计算器。仅做只读验收：先且仅调用一次get_ui_tree，空参数，读取本副屏控件树；收到工具结果后，结合副屏截图核对当前行是0，上方历史记录是123×45=5535，必须区分当前行与历史。工具available且当前行确为0、历史确有123×45=5535时，成功finish，message必须严格为‘当前行=0；历史123×45=5535’；否则失败finish。禁止点击、输入、滑动、按键、等待、重新打开应用、get_screen_context、get_activity_stack、重复信息查询或其他操作，不重算、不清除、不再按等号。"
+        fun readOnlyMessageMatches(message: String) = normalize(message) == normalize(READ_ONLY_RESULT)
         fun continuationTask(first: Int): String {
             check(first in 1..7, Reason.PRIOR_RECEIPT_INVALID)
             if (first == 7) return "副屏计算器已打开，之前的任务已经逐键完成123×45及等号。现在只读取当前行算式和结果，不是上方历史。禁止点击、重新打开应用、信息工具或其他动作。当前行确为123×45且结果为5535时，返回成功finish并报告5535；否则失败finish。不要重算，不要再按等号。只返回一个finish动作JSON。"
@@ -1338,8 +1434,33 @@ class VirtualDisplayServiceAcceptanceInstrumentedTest {
         fun checkQueryDeadline(started: Long) {
             check(SystemClock.elapsedRealtime() - started < 3_000, Reason.TREE_TIMEOUT)
         }
-        fun checkNoUnsupportedTools(events: List<LiveEvent>) {
-            check(events.none { it.event == "read_ui_tree" || it.event == "read_activity_stack" }, Reason.UNSUPPORTED_TOOL)
+        fun treeForwardedToNextModel(events: List<RunTraceEvent>): Boolean {
+            val query = events.indices.singleOrNull { events[it].stage == TraceStage.INFORMATION &&
+                events[it].event == TraceEvent.READ_UI_TREE && events[it].status == TraceStatus.STARTED } ?: return false
+            val identity = events[query]
+            if (events.any { it.runId != identity.runId || it.event in setOf(TraceEvent.READ_ACTIVITY_STACK,
+                    TraceEvent.READ_SCREEN_CONTEXT, TraceEvent.PARSE_RETRY) }) return false
+            val information = events.indices.filter { events[it].stage == TraceStage.INFORMATION }
+            val result = events.getOrNull(query + 1) ?: return false
+            if (information != listOf(query, query + 1) || result.event != TraceEvent.RESULT ||
+                result.status != TraceStatus.SUCCESS || result.reason != TraceReason.NONE || result.step != identity.step) return false
+            val starts = events.indices.filter { events[it].stage == TraceStage.MODEL && events[it].event == TraceEvent.START }
+            val results = events.indices.filter { events[it].stage == TraceStage.MODEL && events[it].event == TraceEvent.RESULT }
+            return starts.size == 2 && results.size == 2 && starts[0] < results[0] && results[0] < query &&
+                query + 1 < starts[1] && starts[1] < results[1] && (starts + results).all {
+                    events[it].step == identity.step && events[it].status ==
+                        if (it in starts) TraceStatus.STARTED else TraceStatus.SUCCESS
+                }
+        }
+        fun resultObservationWindowOpen(events: List<LiveEvent>, resultStep: Int, uiTree: Boolean): Boolean {
+            val replies = events.filter { it.step >= resultStep && it.stage == "model" && it.event == "result" }
+            // The first reply requests the tree; only the second can be the final read-only answer.
+            return if (uiTree) replies.size < 2 && replies.all { it.status == "success" }
+                else replies.isEmpty()
+        }
+        fun checkNoUnsupportedTools(events: List<LiveEvent>, allowUiTree: Boolean = false) {
+            check(events.none { it.event == "read_activity_stack" ||
+                if (allowUiTree) it.event == "read_screen_context" else it.event == "read_ui_tree" }, Reason.UNSUPPORTED_TOOL)
         }
         fun views(root: View): List<View> {
             val pending = ArrayDeque<View>()

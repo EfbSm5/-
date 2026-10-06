@@ -2,6 +2,7 @@ package com.example.agent.rootpilot.root
 
 import android.content.Context
 import com.example.agent.rootpilot.apps.AppCatalog
+import com.example.agent.rootpilot.information.AndroidUiTreeProvider
 import com.example.agent.rootpilot.information.DeviceInfoResult
 import com.example.agent.rootpilot.information.DeviceInfoSource
 import com.example.agent.rootpilot.information.DeviceInfoTool
@@ -126,8 +127,21 @@ internal class DisplayRoutingRootExecutor(
             DeviceInfoTool.ACTIVITY_STACK -> DeviceInfoSource.ACTIVITY_DUMP
             DeviceInfoTool.UI_TREE -> DeviceInfoSource.UI_SEMANTICS
         }
-        if (tool != DeviceInfoTool.SCREEN_CONTEXT) return DeviceInfoResult(source, started, started,
+        if (tool == DeviceInfoTool.ACTIVITY_STACK) return DeviceInfoResult(source, started, started,
             unavailable = DeviceInfoUnavailable.NOT_SUPPORTED)
+        if (tool == DeviceInfoTool.UI_TREE) {
+            fun notReady() = DeviceInfoResult(source, started, System.nanoTime() / 1_000_000,
+                unavailable = DeviceInfoUnavailable.TARGET_NOT_READY)
+            val owned = session ?: return notReady()
+            if (expected.displayId <= 0 || expected.displayId != owned.displayId ||
+                expected.sessionId != owned.sessionId || !owned.validate() || session !== owned) return notReady()
+            val binding = DisplaySession(expected.displayId, owned.sessionId)
+            val result = AndroidUiTreeProvider(context.packageName, binding).query(expected)
+            currentCoroutineContext().ensureActive()
+            // A tree collected before release must not become evidence for a replacement session.
+            if (session !== owned || !owned.validate() || session !== owned) return notReady()
+            return result
+        }
         val current = observeScreen()
         return if (expected.sameTarget(current) && expected.keyboardVisible == current.keyboardVisible)
             DeviceInfoResult(source, started, System.nanoTime() / 1_000_000, current.publicMetadata())

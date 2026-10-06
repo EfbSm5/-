@@ -4,10 +4,18 @@ import com.example.agent.rootpilot.apps.AppCatalog
 import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.DeepSeekClient
 import com.example.agent.rootpilot.deepseek.DeepSeekVisionRequest
+import com.example.agent.rootpilot.deepseek.ChatToolCall
+import com.example.agent.rootpilot.deepseek.ModelStreamSnapshot
+import com.example.agent.rootpilot.deepseek.ToolChatResult
+import com.example.agent.rootpilot.deepseek.ToolChatTurn
+import com.example.agent.rootpilot.information.*
+import com.example.agent.rootpilot.log.RunTrace
+import com.example.agent.rootpilot.log.TraceReason
 import com.example.agent.rootpilot.model.*
 import com.example.agent.rootpilot.root.*
 import com.example.agent.rootpilot.screen.*
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -18,6 +26,10 @@ class VirtualDisplayLoopTest {
     private inner class Root : RootExecutor {
         var valid = true
         var identity = "first"
+        var window = "window"
+        var display = 9
+        var queries = 0
+        var queryMutation: () -> Unit = {}
         val actions = mutableListOf<ExecutableRootAction>()
         override val initialApp get() = app
         override val sessionIdentity get() = identity
@@ -25,7 +37,15 @@ class VirtualDisplayLoopTest {
         override suspend fun checkRoot() = RootExecutionResult.Success()
         override suspend fun captureScreen(): RootScreenshotResult = error("not used")
         override suspend fun observeScreen() = ScreenObservation(app.packageName, app.activityName, app.packageName,
-            "window", false, 1, 9, identity)
+            window, false, 1, display, identity)
+        override suspend fun queryDeviceInfo(tool: DeviceInfoTool, expected: ScreenObservation): DeviceInfoResult {
+            assertEquals(DeviceInfoTool.UI_TREE, tool)
+            queries++
+            val result = DeviceInfoResult(DeviceInfoSource.UI_SEMANTICS, 1, 2,
+                buildJsonObject { put("display_id", display); put("text", "private-tree-marker") })
+            queryMutation()
+            return result
+        }
         override suspend fun execute(action: ExecutableRootAction): RootExecutionResult {
             actions += action
             return RootExecutionResult.Success()
@@ -98,4 +118,60 @@ class VirtualDisplayLoopTest {
         assertEquals(1, approvals.size)
         assertEquals(listOf(ExecutableRootAction.OpenApp(app)), root.actions)
     }
+
+    @Test fun virtualTreeReceiptReachesNextModelRequestWithoutAnExtraActionOrApproval() = runTest {
+        val root = Root()
+        val histories = mutableListOf<List<ToolChatTurn>>()
+        val traceLines = mutableListOf<String>()
+        var approvals = 0
+        val events = treeLoop(root, histories).let { loop ->
+            val collected = mutableListOf<AgentLoopEvent>()
+            loop.run(AgentLoopRequest(config, 1), RunTrace(sink = { traceLines += it })) {
+                collected += it
+                if (it is AgentLoopEvent.AwaitingConfirmation) { approvals++; it.approval.approve() }
+            }
+            collected
+        }
+        assertEquals(1, root.queries)
+        assertEquals(2, histories.size)
+        val receipt = Json.parseToJsonElement(histories[1].single { it.role == "tool" }.content).jsonObject
+        assertEquals(JsonPrimitive("available"), receipt["status"])
+        assertEquals(JsonPrimitive(9), receipt.getValue("data").jsonObject["display_id"])
+        assertEquals(1, approvals)
+        assertEquals(listOf(ExecutableRootAction.OpenApp(app)), root.actions)
+        assertTrue(events.last() is AgentLoopEvent.Completed)
+        assertFalse(traceLines.joinToString().contains("private-tree-marker"))
+    }
+
+    @Test fun displaySessionOrWindowChangeDuringVirtualQueryNeverReturnsDataToModel() = runTest {
+        val changes = listOf<(Root) -> Unit>({ it.identity = "replacement" }, { it.display = 10 }, { it.window = "other" })
+        changes.forEach { change ->
+            val root = Root().also { it.queryMutation = { change(it) } }
+            val histories = mutableListOf<List<ToolChatTurn>>()
+            val trace = RunTrace()
+            treeLoop(root, histories).run(AgentLoopRequest(config, 1), trace) {
+                if (it is AgentLoopEvent.AwaitingConfirmation) it.approval.approve()
+            }
+            assertEquals(1, root.queries)
+            assertEquals(1, histories.size)
+            assertEquals(TraceReason.SCREEN_CONTEXT_CHANGED, trace.reason)
+            assertEquals(listOf(ExecutableRootAction.OpenApp(app)), root.actions)
+        }
+    }
+
+    private fun treeLoop(root: Root, histories: MutableList<List<ToolChatTurn>>) = AgentLoop(
+        object : ScreenshotProvider {
+            override suspend fun capture() = ScreenshotCaptureResult.Success(ScreenshotFrame(byteArrayOf(1),
+                1080, 1920, "fixture"))
+        },
+        object : DeepSeekClient {
+            override suspend fun requestAction(request: DeepSeekVisionRequest): DeepSeekActionResult = error("native path required")
+            override suspend fun requestDecision(request: DeepSeekVisionRequest, toolHistory: List<ToolChatTurn>, allowTools: Boolean,
+                onUpdate: suspend (ModelStreamSnapshot) -> Unit): ToolChatResult {
+                histories += toolHistory.toList()
+                return if (histories.size == 1) ToolChatResult.Success("", "", listOf(ChatToolCall("tree", "get_ui_tree", "{}")))
+                else ToolChatResult.Success("""{"action":"finish","success":true,"message":"fixed"}""", "", emptyList())
+            }
+        }, root, appCatalog = AppCatalog { listOf(app) },
+    )
 }

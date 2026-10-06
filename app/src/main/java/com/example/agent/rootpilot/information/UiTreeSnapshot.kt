@@ -41,7 +41,8 @@ internal object UiTreeSnapshot {
         override fun toString() = "UiTreeSnapshot(truncated=$truncated)"
     }
 
-    fun format(nodes: List<UiNodeSnapshot>, expectedPackage: String, incomplete: Boolean): Formatted {
+    fun format(nodes: List<UiNodeSnapshot>, expectedPackage: String, incomplete: Boolean, displayId: Int = 0): Formatted {
+        require(displayId >= 0)
         require(nodes.isNotEmpty() && nodes.all { it.packageName == expectedPackage })
         require(nodes.map { it.id }.distinct().size == nodes.size)
         var truncated = incomplete || nodes.size > MAX_NODES
@@ -50,6 +51,7 @@ internal object UiTreeSnapshot {
             return value?.take(MAX_LABEL_CHARS)
         }
         val data = buildJsonObject {
+            if (displayId > 0) put("display_id", displayId)
             put("package_name", expectedPackage)
             put("bounds_unit", "physical_screen_pixels")
             putJsonArray("nodes") {
