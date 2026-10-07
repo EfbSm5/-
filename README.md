@@ -45,7 +45,7 @@
 
 授权上传后，当前屏幕截图、前台包名／Activity、焦点窗口所属包名、键盘状态和采样时间，以及勾选的可启动应用名称、包名会发送至配置的 API。模型查询时还会发送当前前台任务的 Activity 组件、任务 ID，以及当前应用公开的控件文字／描述／提示、资源 ID、状态和物理像素位置。密码或敏感节点及其后代的文字不发送；这不代表普通页面全部隐私均能自动识别。RootPilot 自身页面不提供控件树，原始系统诊断与焦点窗口标识不上传、不落盘；恢复任务需重新同意上传。
 
-信息查询只接受固定空参数工具，每个动作规划步骤最多 3 次、整个任务最多 12 次，不占动作步骤；用尽后只允许返回最终动作。返回注明来源、采样时间、available／unavailable 和截断状态；最多 200 个 UI 节点、每字段 120 字符，Activity 最多 32 项，结果总上限 256 KiB。无服务、非焦点／非默认显示窗口、未知格式或采集失败不会假装为空树。查询结果仅留在当前规划步骤内存，不写入恢复快照或任务历史。工具和截图是分时采样，不是原子快照；Activity 堆栈不等于 Fragment／Compose 导航，也不保证返回键去向。
+信息查询只接受固定空参数工具，每个动作规划步骤最多 3 次、整个任务最多 12 次，不占动作步骤；用尽后只允许返回最终动作。返回注明来源、采样时间、available／unavailable 和截断状态；最多 200 个 UI 节点、每字段 120 字符，Activity 最多 32 项，结果总上限 256 KiB。无服务、非目标焦点窗口、未知格式或采集失败不会假装为空树。主屏查询接受默认显示，副屏查询仅接受本次拥有的显示与会话。查询结果仅留在当前规划步骤内存，不写入恢复快照或任务历史。工具和截图是分时采样，不是原子快照；Activity 堆栈不等于 Fragment／Compose 导航，也不保证返回键去向。
 
 当前验收版本的设备动作请求（含只读信息工具决策）使用 LOW 思考、输出上限 65536 Token，与 [DeepSeek 普通思考模式的默认预算](https://api-docs.deepseek.com/api/create-chat-completion/)一致；聊天及文件 Agent 的思考选择和预算不受影响。LOW 仍是验收中的档位选择，不保证不超限或点位正确；仍保留单请求时限、协议校验及逐动作确认，不自动重试失败动作。
 
@@ -142,13 +142,21 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 “设置 → 任务偏好”中的独立副屏默认关闭。开启后，从允许启动的应用中选择起始应用，再从任务页开始完整任务。每次任务新建 1080×1920、320 dpi 副屏；启动、点击、滑动和按键都需要确认。任务页显示本次副屏截图预览；同意上传后，仅该执行屏幕的截图会发送至配置的 API。
 
-支持启动、点击、滑动、BACK／ENTER 和等待；不支持文字输入、HOME、任务外截图和单步执行。滑动两端限于本次副屏像素范围，时长为 100–2000 ms；按键仅开放固定两个码，不开放任意 shell 或主屏回退。副屏仍隐藏输入法，底层固定 ASCII 输入成功不代表中文或生产 Type 已支持。副屏信息工具提供屏幕上下文和可选 `get_ui_tree`；控件树只从本次拥有显示上的唯一焦点应用窗口采集，绑定显示／会话／窗口，不借用主屏活动窗口。无服务、身份未知或会话失效返回 unavailable，Activity 栈仍不支持。沿用主屏的脱敏与容量限制，节点位置是该副屏的物理像素，不新增节点点击／输入。既有应用页面可能迁入副屏，不是应用实例、账号或数据隔离。结束会关闭副屏页面；释放未确认时保留恢复记录并禁止新任务，不自动回退主屏。恢复只保留执行模式和起始应用，不复用旧副屏，也不恢复截图上传同意。
+支持启动、点击、滑动、BACK／ENTER 和等待；HOME 与任务外截图仍禁用。滑动两端限于本次副屏像素范围，时长为 100–2000 ms；按键仅开放固定两个码，不开放任意 shell 或主屏回退。副屏仍隐藏输入法。单步执行每次新建副屏，先确认打开起始应用，再执行一个规划动作并关闭；下一次从新的会话重新开始，不保留上次页面。
+
+副屏信息工具提供屏幕上下文、当前前台任务的 `get_activity_stack` 和可选 `get_ui_tree`。Activity 栈只解析拥有显示的独立区段，不包含主屏、其他任务、全局等待队列或 Intent extras；控件树只从该显示上的唯一焦点应用窗口采集。两者均绑定显示／会话／窗口，失效返回 unavailable，不借用主屏结果。沿用主屏的脱敏与容量限制，节点位置是该副屏的物理像素。既有应用页面可能迁入副屏，不是应用实例、账号或数据隔离。结束会关闭副屏页面；释放未确认时保留恢复记录并禁止新任务，不自动回退主屏。恢复只保留执行模式和起始应用，不复用旧副屏，也不恢复截图上传同意。
+
+副屏 `type` 依赖已启用的页面结构服务，只向已聚焦、可见、启用且文本明确为空的普通文本框整段填写，最多 128 个 UTF-16 单元，支持中文、emoji、换行。它不切换输入法，也不提供主屏 `commitText` 的光标插入语义；非空、null／未知文本、非空提示造成的歧义、密码／敏感节点、未知祖先或服务／会话／目标变化均拒绝，不自动清空、替换或重试。确认前释放查询锁并恢复读取标志，确认后重新绑定同一节点及窗口；提交后仍需观察实际结果。该限定行为已通过专用页真实 Service／模型完成和输入待确认停止，不代表所有 App 编辑框兼容。
 
 副屏树查询期间，本服务临时开启包含布局节点的读取标志；本服务的主、副屏树查询串行执行，结束或取消时恢复原标志。恢复无法确认时，当前服务实例拒绝后续树读取，不把扩展配置带入主屏查询；需要服务重新连接。不启用 `isAccessibilityTool`，不改变其他无障碍服务或敏感文字过滤。
 
-`VirtualDisplayCapabilityInstrumentedTest` 在签名专用 `VirtualCapabilityActivity` 上离线验证，不用真实模型或 UiAutomation。`platformDeliversSwipeKeysAndAsciiWithHiddenIme`（`virtualCapabilityPlatformProbe=true`）是生产接入前的显示定向平台探针，回读固定 ASCII、BACK 回调、ENTER 按下／抬起和滚动位置；`productionLoopConfirmsSwipeBackAndEnterWithoutNetwork`（`virtualCapabilityLoopAcceptance=true`）使用真实 AgentLoop、截图、路由和 helper，本地固定模型响应，核对四次确认／执行及 Type／HOME 拒绝。两个开关默认关闭、按方法单独执行，使用 `--no-restart`。均检查原输入法、启用输入法及无障碍列表，副屏释放后再次核验主屏 Activity 身份；BACK 仅证明测试回调到达，不保证各应用导航去向。首次测试页后台访问可能受本机限制，沿用前台准备测试页、再打开 RootPilot 的流程，不自动重试动作。限定结果及未验证范围见 `SPEC.md`。
+`VirtualDisplayCapabilityInstrumentedTest` 在签名专用 `VirtualCapabilityActivity` 上离线验证，不用真实模型或 UiAutomation。`platformDeliversSwipeKeysAndAsciiWithHiddenIme`（`virtualCapabilityPlatformProbe=true`）是显示定向平台探针；`productionLoopConfirmsSwipeBackAndEnterWithoutNetwork`（`virtualCapabilityLoopAcceptance=true`）核对四次确认／执行及未确认 Type／HOME 拒绝。新入口 `productionLoopReadsOnlyOwnedActivityStackWithoutNetwork`（`virtualActivityStackAcceptance=true`）验证拥有栈及错屏／错会话拒绝；`twoIndependentSingleStepsUseFreshOwnedSessionsWithoutNetwork`（`virtualSingleStepLoopAcceptance=true`）核对两轮各一个规划动作、独立创建／关闭；`productionLoopTypesFixedUnicodeAndObservesCompletionWithoutNetwork`（`virtualUnicodeLoopAcceptance=true`）验证真实产品 Type、后帧树回读、非空及释放后的拒绝。另有 `platformSetsFixedUnicodeInEmptyOwnedEditorWithoutImeChange`（`virtualUnicodePlatformProbe=true`）和 `platformHomeTargetsOwnedDisplayWithoutChangingMain`（`virtualHomePlatformProbe=true`），不等同产品支持。所有开关默认关闭，按方法单独执行，使用 `--no-restart`；均核验环境和释放后主屏身份。首次后台访问可能未就绪，显式启动固定页后用 `closesOnlyExplicitlyLaunchedMainDisplayFixtureWithoutNetwork`（`closeExplicitVirtualFixture=true`）收尾，再打开 RootPilot；不添加生产等待或重试。限定结果见 `SPEC.md`。
+
+`VirtualSingleStepDispatchInstrumentedTest#dispatchesVirtualSingleStepButKeepsCaptureAndApiEditingBlocked`（`virtualSingleStepDispatchAcceptance=true`）验证公开 ViewModel 入口，使用隔离合成配置并拦截 Service 派发，零联网／零设备任务；不替代真实单步验收。
 
 `VirtualDisplayCapabilityServiceInstrumentedTest` 使用真实 Service、已保存的 DeepSeek 配置和实际悬浮窗监听器。单独运行 `realServiceConfirmsSwipeBackEnterAndObservesReceipts`（`liveVirtualCapabilityServiceAcceptance=true`），仅批准签名专用页的一次启动、向上滑动、BACK 和 ENTER；要求固定计数、本次执行回执、结果树进入后续请求及模型成功结束。停止用例单独运行 `realServiceStopsBeforeRequestedCapability`（`virtualCapabilityServiceStopAcceptance=true`），另传 `stopAction=SWIPE`、`BACK` 或 `ENTER`，仅依据固定副屏截图规划，在对应动作待确认时点击实际停止监听器，核对之后零执行。两个开关默认关闭，均会联网，必须先取得固定副屏画面／控件树上传授权并使用 `--no-restart`，不向整类开启 live 开关。测试临时选择专用页为唯一允许应用，退出与副屏释放确认后恢复原配置及启动列表字节，核对 API 密文、主屏 Activity、IME 和无障碍服务实例／标志不变。最终效果回读使用实例／显示绑定的固定计数保留回执，不把释放后的回执当成新鲜页面观察；新建实例会清空旧回执。fixture 的 Launcher 声明仍受签名权限保护，只用于既有生产应用目录发现；不在生产目录中增加特判。脚本确认不代表真人触摸；固定 BACK 回调不代表应用导航、主屏身份不变不代表主屏并行输入通过。
+
+该类另有独立入口：`realServiceReadsOwnedActivityStackWithoutInputAndFinishes`（`liveVirtualStackReadOnlyAcceptance=true`）只允许一次 stack 查询及 Finish；`realServiceReadsOwnedActivityStackAndCompletesCapabilities`（`liveVirtualStackServiceAcceptance=true`）为 stack＋滑动／按键组合，不能用前者替代。`realServiceSingleStepClosesAfterOnePlanningAction`（`liveVirtualSingleStepServiceAcceptance=true`）核对一次规划动作后本地完成并释放；`realServiceTypesFixedUnicodeAndObservesCompletion`（`liveVirtualUnicodeServiceAcceptance=true`）核对一次固定 Type、输入后树查询及完整文本完成；`realServiceStopsAtUnicodeConfirmationWithoutInput`（`virtualUnicodeServiceStopAcceptance=true`）核对待确认停止、零输入及停止后零新执行。均默认关闭、单方法执行；联网入口沿用相同上传授权和收尾门槛。
 
 `inspectRejectedSwipeWithoutActionsOrNetwork` 是同类默认关闭的诊断入口，需 `inspectRejectedVirtualCapabilitySwipe=true`、`failedCapabilityDirectory` 和 `failedCapabilityRunId`。仅在原失败回执、最近同 run 历史和当前进程保留私有帧全部匹配时，导出固定数值坐标和原帧；不把它当作新鲜截图，不回读或归属 fixture 计数，不执行动作、联网或修改配置。原现场不匹配即拒绝，不补采冒充原失败证据。
 

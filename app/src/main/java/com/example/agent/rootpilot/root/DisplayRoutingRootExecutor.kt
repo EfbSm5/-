@@ -8,6 +8,7 @@ import com.example.agent.rootpilot.information.DeviceInfoSource
 import com.example.agent.rootpilot.information.DeviceInfoTool
 import com.example.agent.rootpilot.information.DeviceInfoUnavailable
 import com.example.agent.rootpilot.information.publicMetadata
+import com.example.agent.rootpilot.input.VirtualDisplayTextInput
 import com.example.agent.rootpilot.model.ExecutableRootAction
 import com.example.agent.rootpilot.model.ExecutionDisplay
 import com.example.agent.rootpilot.model.RootPilotApp
@@ -34,6 +35,8 @@ internal class DisplayRoutingRootExecutor(
     @Volatile private var observer: RootScreenObserver? = null
     @Volatile private var startApp: RootPilotApp? = null
     private var generation = 0L
+    private val deviceInfoProvider = RootDeviceInfoProvider()
+    private val virtualTextInput = VirtualDisplayTextInput(context.packageName)
 
     override val initialApp: RootPilotApp? get() = startApp
     override val sessionIdentity: String? get() = session?.sessionId
@@ -101,11 +104,13 @@ internal class DisplayRoutingRootExecutor(
     override fun supports(action: ExecutableRootAction): Boolean = if (!virtualRequested) main.supports(action)
         else action is ExecutableRootAction.OpenApp || action is ExecutableRootAction.Tap ||
             action is ExecutableRootAction.Swipe || action is ExecutableRootAction.Wait ||
+            action is ExecutableRootAction.Type ||
             (action is ExecutableRootAction.Key && action.key != RootPilotKey.HOME)
 
     override suspend fun execute(action: ExecutableRootAction): RootExecutionResult {
         if (!virtualRequested) return main.execute(action)
-        if (!supports(action)) return RootExecutionResult.Failure("副屏不支持文字输入或 HOME 按键")
+        if (action is ExecutableRootAction.Type) return RootExecutionResult.Failure("副屏文字输入必须绑定空输入框并确认")
+        if (!supports(action)) return RootExecutionResult.Failure("副屏不支持 HOME 按键")
         val owned = session ?: return RootExecutionResult.Failure("副屏会话不存在，未执行动作")
         if (!owned.validate()) return RootExecutionResult.Failure("副屏会话已失效，未执行动作")
         if (action is ExecutableRootAction.OpenApp && apps.listApps().none {
@@ -119,8 +124,21 @@ internal class DisplayRoutingRootExecutor(
         return owned.execute(action)
     }
 
-    override suspend fun executeConfirmed(action: ExecutableRootAction, confirm: suspend (String?) -> Boolean): RootExecutionResult =
-        if (!virtualRequested) main.executeConfirmed(action, confirm) else super.executeConfirmed(action, confirm)
+    override suspend fun executeConfirmed(action: ExecutableRootAction, confirm: suspend (String?) -> Boolean): RootExecutionResult {
+        if (!virtualRequested) return main.executeConfirmed(action, confirm)
+        if (action !is ExecutableRootAction.Type) return super.executeConfirmed(action, confirm)
+        val owned = session ?: return RootExecutionResult.Failure("副屏会话不存在，未输入文本")
+        val ownedObserver = observer ?: return RootExecutionResult.Failure("副屏观察器不可用，未输入文本")
+        if (owned.displayId <= 0) return RootExecutionResult.Failure("副屏会话尚未就绪，未输入文本")
+        val epoch = synchronized(lock) { generation }
+        fun isCurrent() = virtualRequested && session === owned && observer === ownedObserver &&
+            synchronized(lock) { generation == epoch }
+        return virtualTextInput.type(action.text, DisplaySession(owned.displayId, owned.sessionId),
+            isCurrent = ::isCurrent,
+            validateSession = { isCurrent() && owned.validate() && isCurrent() },
+            observe = { ownedObserver.observe() },
+            confirm = { confirm(it) })
+    }
 
     override suspend fun queryDeviceInfo(tool: DeviceInfoTool, expected: ScreenObservation): DeviceInfoResult {
         if (!virtualRequested) return main.queryDeviceInfo(tool, expected)
@@ -130,8 +148,28 @@ internal class DisplayRoutingRootExecutor(
             DeviceInfoTool.ACTIVITY_STACK -> DeviceInfoSource.ACTIVITY_DUMP
             DeviceInfoTool.UI_TREE -> DeviceInfoSource.UI_SEMANTICS
         }
-        if (tool == DeviceInfoTool.ACTIVITY_STACK) return DeviceInfoResult(source, started, started,
-            unavailable = DeviceInfoUnavailable.NOT_SUPPORTED)
+        if (tool == DeviceInfoTool.ACTIVITY_STACK) {
+            fun notReady() = DeviceInfoResult(source, started, System.nanoTime() / 1_000_000,
+                unavailable = DeviceInfoUnavailable.TARGET_NOT_READY)
+            val owned = session ?: return notReady()
+            val ownedObserver = observer ?: return notReady()
+            if (expected.displayId <= 0 || expected.displayId != owned.displayId ||
+                expected.sessionId != owned.sessionId || !owned.validate() || session !== owned) return notReady()
+            val binding = DisplaySession(owned.displayId, owned.sessionId)
+            if (!ActivityStackParser.acceptsTarget(expected, binding)) return notReady()
+            val before = ownedObserver.observe()
+            currentCoroutineContext().ensureActive()
+            if (session !== owned || !expected.sameTarget(before) ||
+                expected.keyboardVisible != before.keyboardVisible) return notReady()
+            val result = deviceInfoProvider.activityStack(expected, binding)
+            currentCoroutineContext().ensureActive()
+            val after = ownedObserver.observe()
+            currentCoroutineContext().ensureActive()
+            // A dump from a released session cannot identify its replacement, even with the same display ID.
+            if (session !== owned || !owned.validate() || session !== owned ||
+                !expected.sameTarget(after) || expected.keyboardVisible != after.keyboardVisible) return notReady()
+            return result
+        }
         if (tool == DeviceInfoTool.UI_TREE) {
             fun notReady() = DeviceInfoResult(source, started, System.nanoTime() / 1_000_000,
                 unavailable = DeviceInfoUnavailable.TARGET_NOT_READY)
@@ -154,6 +192,8 @@ internal class DisplayRoutingRootExecutor(
 
     override fun cancel() {
         synchronized(lock) { generation++ }
+        virtualTextInput.cancel()
+        deviceInfoProvider.cancel()
         observer?.cancel()
         session?.cancel()
         main.cancel()

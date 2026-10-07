@@ -422,8 +422,7 @@ class RootPilotViewModel(
         if (chatState.value.generating && action != RootPilotService.ACTION_STOP &&
             action != RootPilotService.ACTION_CONFIRM) return
         val config = uiState.value.config
-        if (config.executionDisplay == ExecutionDisplay.VIRTUAL &&
-            (action == RootPilotService.ACTION_CAPTURE_SCREEN || action == RootPilotService.ACTION_SINGLE_STEP)) return
+        if (config.executionDisplay == ExecutionDisplay.VIRTUAL && action == RootPilotService.ACTION_CAPTURE_SCREEN) return
         RootPilotService.send(appContext, action, config)
     }
 

@@ -161,7 +161,7 @@ internal fun RootPilotSettingsContent(
                 )
                 Text("每次任务新建副屏，退出会关闭其中页面；已有应用可能被迁到副屏，不提供账号或数据隔离。",
                     style = MaterialTheme.typography.bodySmall)
-                Text("支持应用启动、点击、滑动及 BACK／ENTER；不支持文字输入或 HOME。起始应用仍需确认打开后才会启动；同意上传后，副屏截图仍会发送至所配置的 API。",
+                Text("支持应用启动、点击、滑动、BACK／ENTER，以及向已聚焦且明确为空的普通输入框整段填写。文字输入需开启页面结构读取，不替换已有文字、不支持密码／敏感字段或 HOME。起始应用需确认打开；同意上传后，副屏截图仍发送至所配置的 API。",
                     style = MaterialTheme.typography.bodySmall)
                 if (recoveryRequired) {
                     Text("请先恢复或放弃上次任务，再修改执行屏幕和起始应用。", style = MaterialTheme.typography.bodySmall)
@@ -172,7 +172,7 @@ internal fun RootPilotSettingsContent(
                 checked = virtualDisplay || state.config.manualConfirmation, enabled = !busy && !virtualDisplay,
                 onCheckedChange = onManualConfirmationChanged,
             )
-            Text(if (virtualDisplay) "副屏实验模式下，打开应用、点击、滑动及按键都需要确认。"
+            Text(if (virtualDisplay) "副屏实验模式下，打开应用、点击、滑动、文字输入及按键都需要确认。"
                 else "自动模式可执行点击和滑动；打开应用、输入文本及系统按键始终需要确认。",
                 style = MaterialTheme.typography.bodySmall)
             Text("同意上传后，截图、当前任务的 Activity 信息、页面控件结构及勾选的应用名称、包名会发送至所配置的 API 服务。",
@@ -197,14 +197,14 @@ internal fun RootPilotSettingsContent(
             Button(onClick = onInputMethodSettings, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
                 Text(if (inputMethodEnabled) "Unicode 输入已启用 · 管理输入法" else "启用 RootPilot 输入法（中文 / Unicode）")
             }
-            Text("文本通过输入法写入当前光标位置，完成后恢复原输入法；不支持密码框。请先在系统设置中手动启用，平时仍使用常用输入法。",
+            Text("主屏文本通过输入法写入当前光标位置，完成后恢复原输入法；不支持密码框。副屏空框填写通过页面结构服务完成，不切换输入法。主屏输入请先手动启用 RootPilot 输入法，平时仍使用常用输入法。",
                 style = MaterialTheme.typography.bodySmall)
             inputMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Button(onClick = onAccessibilitySettings, enabled = !busy,
                 modifier = Modifier.fillMaxWidth().testTag("accessibility_settings")) {
                 Text(if (uiTreeConnected) "页面结构读取已连接 · 管理服务" else "启用页面结构读取（可选）")
             }
-            Text("手动启用 RootPilot 页面结构读取后，任务可按需查询当前应用的控件文字、位置和状态。服务仅提供读取，未启用时仍可使用截图；读取结果不保存。",
+            Text("手动启用 RootPilot 页面结构读取后，任务可按需查询控件文字、位置和状态，并在逐次确认后填写本次副屏的空白普通输入框。不点击、不填写主屏或密码／敏感框；未启用时仍可用截图，读取结果不保存。",
                 style = MaterialTheme.typography.bodySmall)
         }
     }
@@ -214,9 +214,9 @@ internal fun RootPilotSettingsContent(
                 Button(onClick = onTestRoot, enabled = !busy && !recoveryRequired) { Text("测试 Root") }
                 Button(onClick = onCaptureScreen, enabled = !busy && !recoveryRequired && !virtualDisplay) { Text("截取屏幕") }
             }
-            Button(onClick = onSingleStep, enabled = !busy && !recoveryRequired && apiReady && !virtualDisplay) { Text("单步执行") }
+            Button(onClick = onSingleStep, enabled = !busy && !recoveryRequired && apiReady) { Text("单步执行") }
             if (virtualDisplay) {
-                Text("副屏按任务新建和关闭，请从任务页开始；副屏模式不提供任务外截屏或单步执行。",
+                Text("副屏单步每次新建和关闭副屏，确认打开起始应用后执行一个规划动作；下次单步重新开始。副屏模式不提供任务外截屏。",
                     style = MaterialTheme.typography.bodySmall)
             }
             Text("最近动作：${state.lastAction?.describe() ?: "无"}")

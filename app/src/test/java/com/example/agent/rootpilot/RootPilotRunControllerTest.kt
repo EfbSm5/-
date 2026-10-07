@@ -26,6 +26,7 @@ import com.example.agent.rootpilot.model.ExecutableRootAction
 import com.example.agent.rootpilot.model.RootPilotConfig
 import com.example.agent.rootpilot.model.ExecutionDisplay
 import com.example.agent.rootpilot.model.RootPilotApp
+import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.apps.AppCatalog
 import com.example.agent.rootpilot.model.RootPilotStatus
 import com.example.agent.rootpilot.model.RootPilotUiState
@@ -102,6 +103,136 @@ class RootPilotRunControllerTest {
         assertEquals(RootPilotStatus.COMPLETED, fixture.state.status)
         assertEquals(TraceEvent.RUN_END, fixture.history.state.value.records.single().events.last().event)
         fixture.controller.destroy()
+    }
+
+    @Test fun virtualSingleStepConfirmsBootstrapAndOneActionAndClosesEveryRun() = runTest {
+        val fixture = fixture()
+        fixture.useVirtual()
+        fixture.shared.mutableState.value = fixture.state.copy(config = fixture.state.config.copy(manualConfirmation = false))
+        for (round in 1..2) {
+            val closing = CompletableDeferred<Unit>()
+            val released = CompletableDeferred<Unit>()
+            fixture.end = { closing.complete(Unit); released.await(); RootExecutionResult.Success() }
+            fixture.start(round)
+            runCurrent()
+            assertEquals(round, fixture.begins)
+            assertEquals(RootPilotStatus.WAITING_CONFIRMATION, fixture.state.status)
+            assertTrue(fixture.state.pendingAction is RootPilotAction.OpenApp)
+            assertEquals(round - 1, fixture.captures)
+            assertEquals(round - 1, fixture.modelCalls)
+            assertEquals((round - 1) * 2, fixture.executions)
+            fixture.controller.confirmAction()
+            advanceUntilIdle()
+            assertEquals(RootPilotStatus.WAITING_CONFIRMATION, fixture.state.status)
+            assertTrue(fixture.state.pendingAction is RootPilotAction.Tap)
+            assertEquals(round, fixture.captures)
+            assertEquals(round, fixture.modelCalls)
+            assertEquals(round * 2 - 1, fixture.executions)
+            fixture.controller.confirmAction()
+            runCurrent()
+            assertEquals(round * 2, fixture.executions)
+            assertEquals(round - 1, fixture.ends)
+            assertEquals(RootPilotStatus.WAITING_SCREEN, fixture.state.status)
+            advanceUntilIdle()
+            assertTrue(closing.isCompleted)
+            assertTrue(fixture.controller.busy)
+            assertSame(fixture.controller, fixture.shared.owner)
+            assertTrue(fixture.file.exists())
+            assertNotEquals(RootPilotStatus.COMPLETED, fixture.state.status)
+            val current = fixture.history.state.value.records.single { it.status == RunHistoryStatus.RUNNING }
+            assertFalse(current.events.any { it.event == TraceEvent.RUN_END })
+            fixture.start(round + 10)
+            assertEquals(round, fixture.begins)
+            released.complete(Unit)
+            advanceUntilIdle()
+            runCurrent()
+            assertEquals(round, fixture.ends)
+            assertEquals(RootPilotStatus.COMPLETED, fixture.state.status)
+            assertEquals("单步执行完成", fixture.state.errorMessage)
+            assertFalse(fixture.state.modelReportedResult)
+            assertFalse(fixture.controller.busy)
+            assertNull(fixture.shared.owner)
+            assertFalse(fixture.file.exists())
+            assertFalse(fixture.shared.executionBlocked)
+            assertEquals(round, fixture.history.state.value.records.count { it.status == RunHistoryStatus.COMPLETED })
+        }
+        fixture.controller.destroy()
+    }
+
+    @Test fun virtualSingleStepCloseFailureRetainsSnapshotAndBlocksStopDiscardAndRestart() = runTest {
+        val fixture = fixture()
+        fixture.useVirtual()
+        fixture.end = { RootExecutionResult.Failure("fixed") }
+        fixture.start()
+        runCurrent()
+        fixture.controller.confirmAction()
+        advanceUntilIdle()
+        fixture.controller.confirmAction()
+        advanceUntilIdle()
+        runCurrent()
+        assertEquals(2, fixture.executions)
+        assertEquals(1, fixture.ends)
+        assertTrue(fixture.shared.executionBlocked)
+        fixture.assertRecoveryFailure()
+        assertTrue(fixture.file.exists())
+        val snapshot = fixture.file.readText()
+        assertEquals(RunHistoryStatus.FAILED, fixture.history.state.value.records.single().status)
+        fixture.controller.stopAgent(2)
+        fixture.controller.discardInterruptedRun(3)
+        fixture.start(4, recovering = true)
+        advanceUntilIdle()
+        assertEquals(snapshot, fixture.file.readText())
+        assertEquals(1, fixture.begins)
+        assertEquals(1, fixture.captures)
+        assertEquals(1, fixture.modelCalls)
+        assertEquals(2, fixture.executions)
+        assertTrue(fixture.shared.executionBlocked)
+        fixture.assertRecoveryFailure()
+        fixture.controller.destroy()
+    }
+
+    @Test fun virtualSingleStepStoppedAtBootstrapClosesWithoutCaptureOrExecution() = runTest {
+        val fixture = fixture()
+        fixture.useVirtual()
+        fixture.start()
+        runCurrent()
+        assertTrue(fixture.state.pendingAction is RootPilotAction.OpenApp)
+        fixture.controller.stopAgent(2)
+        advanceUntilIdle()
+        runCurrent()
+        assertEquals(1, fixture.begins)
+        assertEquals(1, fixture.ends)
+        assertEquals(0, fixture.executions)
+        assertEquals(0, fixture.captures)
+        assertEquals(0, fixture.modelCalls)
+        assertEquals(RootPilotStatus.STOPPED, fixture.state.status)
+        assertFalse(fixture.controller.busy)
+        assertFalse(fixture.file.exists())
+        assertEquals(RunHistoryStatus.STOPPED, fixture.history.state.value.records.single().status)
+        fixture.controller.destroy()
+    }
+
+    @Test fun virtualSingleStepStillRequiresUploadConsentAndSelectedStartApp() = runTest {
+        for (missingUpload in listOf(true, false)) {
+            val fixture = fixture()
+            fixture.useVirtual()
+            fixture.shared.mutableState.value = fixture.state.copy(config = fixture.state.config.copy(
+                allowScreenUpload = !missingUpload,
+                virtualDisplayStartPackage = if (missingUpload) "com.example.fixture" else "",
+            ))
+            fixture.start()
+            advanceUntilIdle()
+            assertEquals(RootPilotStatus.FAILED, fixture.state.status)
+            assertEquals(if (missingUpload) "发送截图前请先打开上传确认" else "请选择副屏起始应用", fixture.state.errorMessage)
+            assertEquals(0, fixture.begins)
+            assertEquals(0, fixture.ends)
+            assertEquals(0, fixture.executions)
+            assertEquals(0, fixture.captures)
+            assertEquals(0, fixture.modelCalls)
+            assertFalse(fixture.controller.busy)
+            assertFalse(fixture.file.exists())
+            fixture.controller.destroy()
+        }
     }
 
     @Test fun stopWhileClosingRecordsCancellationAfterCleanup() = runTest {

@@ -179,7 +179,6 @@ internal class RootPilotRunController(
             !recovering && uiState.value.status == RootPilotStatus.RECOVERY_REQUIRED -> "请先处理上次中断的任务"
             config.task.isBlank() -> "请先输入自然语言任务"
             !config.allowScreenUpload -> "发送截图前请先打开上传确认"
-            singleStep && config.executionDisplay == ExecutionDisplay.VIRTUAL -> "副屏仅支持完整任务，不支持任务间保留单步会话"
             config.executionDisplay == ExecutionDisplay.VIRTUAL && config.virtualDisplayStartPackage.isBlank() -> "请选择副屏起始应用"
             else -> null
         }

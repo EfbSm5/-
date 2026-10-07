@@ -3,6 +3,7 @@ package com.example.agent.rootpilot.root
 import com.example.agent.rootpilot.information.DeviceInfoResult
 import com.example.agent.rootpilot.information.DeviceInfoSource
 import com.example.agent.rootpilot.information.DeviceInfoUnavailable
+import com.example.agent.rootpilot.screen.DisplaySession
 import com.example.agent.rootpilot.screen.ScreenObservation
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CancellationException
@@ -37,11 +38,16 @@ internal class RootDeviceInfoProvider(
         synchronized(lock) { operations.toList() }.forEach { it.cancel(CancellationException("Device information cancelled")) }
     }
 
-    suspend fun activityStack(expected: ScreenObservation): DeviceInfoResult = coroutineScope {
+    suspend fun activityStack(expected: ScreenObservation, session: DisplaySession? = null): DeviceInfoResult = coroutineScope {
         val job = currentCoroutineContext().job
         synchronized(lock) { operations.add(job) }
         val startedAt = clock()
         try {
+            currentCoroutineContext().ensureActive()
+            if (!ActivityStackParser.acceptsTarget(expected, session)) {
+                return@coroutineScope DeviceInfoResult(DeviceInfoSource.ACTIVITY_DUMP, startedAt, clock(),
+                    unavailable = DeviceInfoUnavailable.TARGET_NOT_READY)
+            }
             withContext(dispatcher) {
                 val collected = withTimeoutOrNull(timeoutMillis) {
                     var process: Process? = null
@@ -65,7 +71,7 @@ internal class RootDeviceInfoProvider(
                             } else if (!process.isAlive) {
                                 if (input.available() > 0) continue
                                 if (process.exitValue() != 0) return@withTimeoutOrNull null to DeviceInfoUnavailable.COMMAND_FAILED
-                                val stack = ActivityStackParser.parse(output.toString("UTF-8"), expected)
+                                val stack = ActivityStackParser.parse(output.toString("UTF-8"), expected, session)
                                 return@withTimeoutOrNull stack to DeviceInfoUnavailable.INVALID_FORMAT
                             } else {
                                 delay(10)

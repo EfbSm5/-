@@ -1,6 +1,6 @@
 # RootPilot 当前状态
 
-更新日期：2026-10-07。副屏只读控件树 `a2bb306`、滑动及 BACK／ENTER `5d8d4e9` 已推送；新动作真实 Service 闭环及 Swipe／BACK／ENTER 三项待确认停止限定 PASS。设备动作仍为 LOW／65536。此前协议失败和坐标拦截仍保留，整体规划稳定性及更广验收仍为 PARTIAL；提交与推送状态以 Git 为准。
+更新日期：2026-10-08。副屏新增拥有 Activity 栈、临时单步及明确空框 Unicode 填写，专用页真实 Service 的只读栈、单步、Unicode 完成／输入待确认停止限定 PASS；原滑动及 BACK／ENTER 闭环保持已验范围。设备动作仍为 LOW／65536。HOME 在当前配置下平台探针失败，继续禁用；任务外副屏截图禁用。既有工具协议失败及广泛兼容仍为 PARTIAL；提交／推送状态以 Git 为准。
 
 本文件只保存最新状态，直接更新对应条目，不追加开发过程、历次测试数字或补验流水。使用与构建说明见 [README.md](README.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
@@ -25,6 +25,7 @@ RootPilot 是已 Root 的 Android 手机上的实验性 Agent：根据截图、�
 | 只读手机信息工具 | native function calling 查询上下文、当前任务 Activity 堆栈及可选无障碍 UI 树；查询前后核对窗口，最终动作仍经原策略与确认 | 三工具、生产 Service 完成／确认停止／查询停止、运行前手工断连后的不可用处理与重连采集通过；查询中断连、通知及稳定性仍 PARTIAL |
 | 应用启动与选择 | 动态应用目录，按勾选包名过滤，启动前复核入口与最新选择 | 核心选择、名称搜索、清空、重启持久化已验；包名搜索待验 |
 | Unicode 输入 | 临时输入法支持中文、emoji、换行；绑定编辑框，拒绝密码框并恢复原输入法 | 测试页及真实时钟一次中文搜索输入／IME 恢复限定通过；Type 待确认停止和进程死亡恢复通过；测试页正常完成补验的 EMPTY_OUTPUT 失败保留 |
+| 独立副屏（实验） | 任务内启动、点击、滑动、BACK／ENTER、等待、拥有栈／树查询；单步每次新建并关闭；可确认空普通框的 Unicode 整段填写，不切换 IME | 专用页真实 Service 只读栈、单步、Unicode 完成／待确认停止限定通过；HOME 当前平台探针失败，任务外截图禁用，更多应用及稳定性 PARTIAL |
 | 人工控制与悬浮预览 | App／悬浮窗／通知确认；紧凑面板、停止、流式思考与动作草稿预览 | 生产 Service 实际确认／停止监听器通过，来源为脚本本地 View 点击；不代表真人触摸或通知入口 |
 | 文字聊天 | 多轮、四档思考强度、流式 Markdown、停止、新对话 | 真实直连、页面交互及 Activity 重建已验；低档完整回答待验 |
 | 本地待办 | 确认后创建并持久化，同任务防重复，不创建系统提醒 | 真实模型创建、取消不写入、重启读取已验 |
@@ -40,11 +41,11 @@ RootPilot 是已 Root 的 Android 手机上的实验性 Agent：根据截图、�
 ### 信息工具行为
 
 - `get_screen_context` 返回前台包名／Activity、焦点包名及键盘状态；内部采样必须与原目标一致。
-- `get_activity_stack` 仅解析默认显示下当前前台任务的 Activity 组件，保留 top-to-bottom 顺序及任务 ID；不上传 Intent extras、路径、窗口标题和其他任务。最多 32 项，不表示 Fragment／Compose 导航或确定的 BACK 去向。
+- `get_activity_stack` 解析执行显示下当前前台任务的 Activity 组件，保留 top-to-bottom 顺序及任务 ID；主屏接受默认显示，副屏只接受本次拥有显示／会话的独立区段，并校验前后焦点／键盘及会话存活。排除其他显示、其他任务、全局等待队列，不上传 Intent extras、路径和窗口标题；副屏额外返回 `display_id`。最多 32 项，不表示 Fragment／Compose 导航或确定的 BACK 去向。
 - `get_ui_tree` 按需读取当前应用的公开语义节点；RootPilot 自身拒绝读取。默认主屏仍只接受 display 0；副屏绑定本次拥有的显示／会话，只选该显示上的唯一焦点应用窗口，不使用主屏活动窗口回退。树所属窗口必须具有输入焦点、与节点窗口一致，采集结束重新核验窗口及拥有会话；未知或改变时返回 unavailable。最多 200 节点、深度 32、每文字字段 120 字符；返回文字、描述、提示、资源 ID、执行显示的物理像素位置与交互状态，副屏额外带 `display_id`。密码／敏感节点及其后代文字过滤，不等于所有普通页面隐私均可识别。
 - 工具只接受单个固定名称和空参数 `{}`，每步最多 3 次、任务最多 12 次，不占动作步骤；结果最多 256 KiB。收到 native tool call 后回传对应 ID 并保留 assistant reasoning，完整最终 JSON 仍经原 ActionParser、ActionPolicy 和人工确认，没有 tool-to-executor 直通。
 - 查询前先移除模型预览悬浮窗，再比较原窗口及键盘；查询结束再次比较，不符合则不发送结果。结果包含来源、观察 ID、采样起止时间、available／unavailable、固定原因码及截断状态。无服务／超时／未知格式不是空树；不能据缺失节点推断控件不存在。
-- 上传同意覆盖新数据；查询数据仅驻当前规划步骤的内存历史，不进入任务快照、持久历史或日志。日志只增加固定信息阶段、工具枚举及原因码。服务不保存事件或执行无障碍动作，未启用仍可用截图。
+- 上传同意覆盖新数据；查询数据仅驻当前规划步骤的内存历史，不进入任务快照、持久历史或日志。日志只增加固定信息阶段、工具枚举及原因码。服务不保存事件；信息工具本身只读，副屏 Type 通过另行目标绑定及逐次确认的空框填写通道执行，不点击或填写主屏。未启用仍可用截图，但副屏 Type 不可用。
 - Activity 固定诊断独立 3 秒协程时限、512 KiB 输出上限；取消清理进程及流。UI 树有 3 秒协程与遍历期限，但同步系统 IPC 不能保证硬实时退出。查询与截图不是原子采样，窗口检查不能发现所有 A→B→A 或同窗口内容变化。
 
 ### 信息工具验证状态
@@ -100,9 +101,18 @@ RootPilot 是已 Root 的 Android 手机上的实验性 Agent：根据截图、�
 - 当前增量独立静态审查 PASS：共享查询锁、精确配置恢复、失败实例封禁与取消传播、预算及敏感／身份过滤，以及 READ_UI_TREE 与 FULL 的隔离均已核查。新增当前／历史样本及首／次模型回执的三项不联网合成检查 0.007 秒 PASS。最终仅测试 APK 更新为 `d1473e812f2ac2530283dae20a7925c1797c6790688a5c0f6be36af5d2ac272b` 并绑定设备，构建／Lint 28 秒成功；产品仍 `aef0f7c98ead31a1ca01257b813fb527307cc646fcbcda699e48f7cd45dc9a2c`。任务完成后原配置密文、启动列表原字节摘要、IME、三个原无障碍服务列表与基线一致，无 RootPilot 专用副屏及任务／IME 恢复记录。
 - 限定 PASS 不代表广泛应用或设备覆盖：本计算器仍 `truncated=true`，未证明全部节点完整；配置恢复失败封禁和异常回读已有 JVM 覆盖，但未做真机 Binder 故障注入。3 秒预算会拒绝超时数据，不代表同步框架调用可被硬中断。本轮不修改已有解析／输出超限问题结论，整体产品稳定性仍 PARTIAL。
 
-### 副屏滑动与限定按键（2026-10-07，真实 Service 闭环／三项待确认停止限定 PASS）
+### 副屏动作与剩余能力（2026-10-08，限定 PASS；稳定性 PARTIAL）
 
-- 基于授权小米 15（`12cd0365`／`24129PN74C`）的离线固定测试页实测，接入 Swipe、BACK 和 ENTER。私有协议、Transport、Session 与 helper 同步封闭动作集合；滑动两端限定 1080×1920 像素、时长 100–2000 ms，按键只接受 4／66。起始应用、点击、滑动及按键仍经原有确认，显示／会话／窗口校验和 `IME_POLICY_HIDE` 不变；不回退主屏，不开放任意 Shell、Type 或 HOME。提示和设置说明同步更新；旧计算器测试只保留仍有效的 Type／HOME 拒绝，不再声称 UI_TREE 不支持。
+- 新接入：Activity 栈仅解析拥有显示的当前前台任务，严格绑定 session／display／前后窗口及键盘；单步复用原生命周期，先确认起始应用、一个规划动作后关闭，下次新建，不保留跨次页面；Type 只在无障碍明确空文本、普通文本类型、同一焦点可编辑节点、完整无敏感祖先链时整段 SET_TEXT，最多 128 UTF-16，未知／null、非空或提示歧义拒绝。确认前恢复 flags 并释放查询锁，确认后重新绑定并紧邻提交检查取消；不切 IME、剪贴板或主屏回退，提交不确定时不重放。信息工具、主屏插入语义与既有恢复边界不变。
+- 离线限定 PASS：`stack-offline-02.txt`（10.369 秒）四次实际生产栈查询且错屏／错 session 拒绝；`single-step-dispatch-01.txt`（0.016 秒）公开 ViewModel 入口派发及任务外截图／API 编辑拦截、隔离配置恢复；`single-step-loop-02.txt`（7.481 秒）两轮独立 UUID，各 Open＋Swipe、一次本地模型规划、关闭后主屏和环境不变；`unicode-loop-01.txt`（5.655 秒）Open＋一次固定 Unicode、下一帧真实树完整匹配、非空与释放后 Type 均在确认前拒绝。后者产品 APK 为最终 `bd930027…`，前者各自版本绑定保存在证据目录，不冒充全部来自最终 APK。
+- Unicode 平台限定 PASS：`unicode-platform-04.txt`（2.251 秒）固定页空提示 `""`，无障碍文本明确存在且为空，selection=-1 不当作光标已知；一次 SET_TEXT 匹配 `中文🙂\n第二行`，主屏完整身份、原 IME／服务和读取标志不变、释放确认。此前 `unicode-platform-02.txt` 在空框选择信息 -1 的测试谓词拒绝、零提交；本地 SDK TextView 契约说明空文本不必携带选择信息，修正仅限整框平台探针，不开放未知光标插入。普通 null 空框仍不被产品假定为空；不是全部编辑框兼容证明。
+- 真实 Unicode 完成限定 PASS：`unicode-service-live-01.txt`，10.559 秒，run `557ae580-bfee-46de-a5d5-bfb428e1137e`，两次确认／执行（Open＋Type）、三次模型请求；后帧 UI_TREE 成功进入后续模型请求，Finish 完整报告保留真实换行。同实例／显示的固定匹配与生产结果帧 `unicode-service-live-01-result.jpg` 两行／emoji共同验证；结果回执不作为释放后的新观察。待确认停止 `unicode-service-stop-01.txt`，5.786 秒，run `6fc41f8c-9748-4632-ac6c-2ad8f00d0811`，仅执行 Open、两次模型请求，TYPE 实际停止监听器，零输入，停止后零新执行／模型／截图；确认前读取标志恢复、完整环境及配置收尾均通过。
+- 最终 APK 的只读栈与单步真实 Service 限定 PASS：`stack-service-readonly-live-02.txt`（5.410 秒，run `eb7f958a-fcd9-468b-a0a6-7ddbf69eaa62`）恰好一次排他 stack 成功与后续模型 Finish、仅 Open；`single-step-service-live-05.txt`（5.459 秒，run `c3f85bb8-35e4-4f02-88e2-e845f8972ddf`）Open＋Swipe、一次模型请求、零工具、本地非模型报告完成。两项与上述 Unicode 完成／停止均使用最终产品 `bd930027…`，实际副屏／悬浮监听器、实例效果与完整退出／配置／allowlist／API 密文／主屏／IME／服务 flags 核验通过；脚本点击不代表真人触摸。保留前置失败：`single-step-service-live-03.txt`（0.104 秒）以 `main_identity_unavailable` 拒绝，零创建／联网；只读布尔核验主屏既非 RootPilot 也非桌面、仍未锁定，暂停设备操作并询问占用。用户确认手机空闲后正常切回 RootPilot；`single-step-service-live-04.txt`（0.030 秒）又以前置 `fixture_initial_state` 拒绝，零创建／联网。显式前台准备固定页并经 `fixture-preparation-05.txt`（0.691 秒）收尾后完成最终回归；不增加生产重试或兜底，不将准备通过算作业务通过。
+- 保留失败与限制：完整 stack＋Swipe／BACK／ENTER 的 `stack-service-live-01.txt` 仅 Open，stack 和 UI_TREE 实际成功后以 INFORMATION_CALL_INVALID 结束；具体非法调用形态未知，不放宽工具协议、不自动重试或用只读成功替代组合。HOME `home-platform-02.txt` 在拥有显示发送 keycode 3 后未观察到副屏 HOME，主屏 Activity 身份不变且清理通过；只证明当前显示配置／小米的本次行为，不称 Android 官方绝对禁止，不改系统装饰或上传桌面。任务外截图没有存活的任务拥有会话，继续拒绝；更改此生命周期语义需另定范围。执行中死亡、主屏并行输入、更多 App／厂商、真实通知／真人确认仍未验。
+- 本地及审查：最终 `remaining-full-checks-03.txt`（32 秒）实际 606 项 JVM 单测零失败／错误／跳过，App／androidTest／fixture 构建和两模块 Lint、diff 检查通过；产品及验收入口独立静态复审 PASS。`remaining-full-checks-02.txt` 唯一失败是新增测试误读取 user 而非 system prompt，已改查实际 system message，不弱化主／副屏语义断言。`single-step-loop-01.txt` JUnit 初始化失败（0.004 秒，入口返回 String），已修正为 void；`single-step-service-live-01.txt` 前置失败（0.034 秒），零创建／联网。显式前台准备并收尾固定页后续验，不新增生产准备／重试兜底。原失败不改写为 PASS。
+- APK／产物：最终产品 SHA-256 `bd9300276aacb0fc1b22ee5018fbf681a79e7c8b53b809bfd2ea609aee1542c7`、测试 `39d2240331b79fd7c97db38b377da4f611b3300f9187eb2e4560313f7f7f4c11`、fixture `af8c23e22660c76f5e1560da0fb0d6ea2fdfe960a29bfadaffeb9740414316f4` 均与安装包匹配。当前证据在仓库外 `/tmp/rootpilot-remaining-capabilities.owtLOl/`，四项最终真实 Service 用例均保留同名前缀的 `metadata.json`／`history.json`，安装包绑定为 `apk-installed-final.txt`；本轮无主屏 API 上传、Token／模型原文／个人输入产物。收尾已通过正常系统设置关闭本轮临时开启的 RootPilot 服务，原 GKD／Cumulus 仍开启且绑定；核对临时息屏值未被外部改变后恢复原值 120000 ms，原 IME 不变，无专用副屏及任务／IME 恢复文件。回执为 `accessibility-final.txt`、`screen-timeout-final.txt`、`recovery-final.txt`，基线及恢复过程见 `device-baseline.md`。后续使用副屏控件树／Type 需手动启用 RootPilot 服务。
+
+- 既有 Swipe、BACK 和 ENTER 验收范围：私有协议、Transport、Session 与 helper 同步封闭动作集合；滑动两端限定 1080×1920 像素、时长 100–2000 ms，按键只接受 4／66。起始应用、点击、滑动及按键仍经原有确认，显示／会话／窗口校验和 `IME_POLICY_HIDE` 不变；不回退主屏、不开放任意 Shell。下面保留其原验收版本证据；当时拒绝 Type 的结论不代表上述新输入通道。
 - 平台探针限定证据 `platform-05.txt`（5.144 秒）PASS：一次固定 ASCII `RootPilot42` 实际写入、BACK 固定回调、ENTER 按下／抬起与滚动位置变化，键盘仍隐藏。主屏 ActivityRecord 不变，原默认／启用 IME 与无障碍列表不变，拥有副屏释放及测试页消失；此前探针及加强收尾检查也保留成功证据。ASCII 结果仅为底层能力观察；未实现中文或绕过现有生产输入目标／密码保护，也未证明所有应用的 BACK 导航去向或主屏同时输入。
 - 修正后的 `loop-02.txt`（7.755 秒）限定 PASS：真实 AgentLoop → 策略／确认 → DisplayRoutingRootExecutor → 私有传输 → Root helper，真实拥有截图；本地固定假模型、零网络。manual=false 下启动、滑动、BACK、ENTER 恰好四次确认／执行，四次本地模型调用且成功完成；逐次回读滚动／回调／按键计数，主屏执行器调用为零，Type／HOME 在生产路由拒绝。副屏释放后再次核对主屏完整 ActivityRecord、原默认／启用 IME 与无障碍列表，均通过。确认由测试批准，不代表生产 Service 悬浮窗、真人触摸或真实 API 规划新动作。
 - 真实 Service／DeepSeek／实际悬浮窗监听器闭环限定 PASS：`service-live-02.txt`，27.226 秒，run `57ae19c9-3ee1-4884-afc3-d1b470cf067a`。manual=false 下启动、向上滑动、BACK、ENTER 恰好四次确认与执行，十次模型请求；固定页真实滚动，BACK=1、ENTER down/up=1，最终 UI_TREE 成功回执进入后续成功模型请求，模型成功 Finish 并明确报告计数。最终效果用本实例／显示绑定的固定计数保留回执、最后生产帧及模型结果共同核验，不把释放后回执当成新鲜页面观察；`service-live-02-result.jpg` 可见计数及滚动后的固定行。测试页 Launcher 仍受签名权限保护，仅接入既有生产应用目录，本轮不改产品代码／APK，不增加应用特判。
@@ -112,11 +122,11 @@ RootPilot 是已 Root 的 Android 手机上的实验性 Agent：根据截图、�
 - 正式验收保留失败：`service-live-01.txt`（5.515 秒）仅启动，Swipe 被测试过窄的中央半区守卫拦截。绑定原失败 run 的零动作／零网络诊断 `rejected-swipe-inspection-01.txt`（0.003 秒）及保留私有帧确认 880→350 位于固定测试行；只改测试为本次可见行区 `[rowsTop, rowsBottom)` 校验，未补点、重放或改生产坐标。`service-stop-swipe-01.txt`（5.153 秒）仅启动，随后以 INFORMATION_CALL_INVALID 结束，未达到停止按钮；具体非法工具原因未保留，不认定协议问题已修复。两次失败均安全释放并恢复环境，不能改写为 PASS。成功完成用例仍出现一次既有 `PARSE_RETRY`／`PARSE_FAILED`，也不代表协议稳定性已解决；本轮未新增重试或放宽协议。
 - 本地验证：此前 `final-checks-04.txt` 的 570 项 JVM 单测零失败／错误／跳过；本轮 JVM 为 UP-TO-DATE，未重跑。`geometry-checks-01.txt`（77 秒）的 App／测试／fixture 构建及两模块 Lint、`stop-task-checks-01.txt`（26 秒）的最终测试构建／Lint、`git diff --check` 均通过；签名 View-only 离线准备 `geometry-fixture-prepare-01.txt`（1.100 秒）PASS。最终三个默认关闭入口按预期跳过（`default-disabled-final.txt`，0.006 秒），不计业务通过。正式 harness、实例计数保留、可见行区及停止任务的独立静态复审 PASS；Reviewer 只读源码／证据，未操作设备。
 - APK 绑定：产品始终为 `07968993124a5d8950d4e8b21b9ffeda0c38233d14fff4fc255a7281e375d412`，fixture 为 `266d092e3278fd62353bf9e60576e0cc335128ebba7df6c9cf850e15781c5ccd`。完成用例测试 APK 为 `0d2cd20bbf6f7b3be651aed752af6005a5e982ed35e8f58d83d87659c01e6115`；最后停止任务版测试 APK 为 `159c67f6ddadccdae952a94e2f831160445fe39995994ccbfed482ea0da8397e`，正常完成任务／逻辑未变，但未在最终测试 APK 重跑完成用例。对应产物与设备摘要、metadata、history、受控图片在 `/tmp/rootpilot-virtual-service-capabilities.CmCg3R/`；此前离线证据仍在 `/tmp/rootpilot-virtual-capabilities.DfEQ45/`。
-- 锁屏前置保护：`service-stop-back-01.txt`（0.004 秒）因 device_locked 拒绝，零创建／联网／输入；用户手动解锁后重新核对同一设备和 RootPilot 前台，BACK／ENTER 补验通过，旧前置失败不改写为 PASS。剩余未验：主屏并行输入、更多应用／厂商、执行中进程死亡。HOME 仍属未开放／未验证，不称平台绝对不可做；生产 Unicode 输入不能以 ASCII 探针替代。Activity 栈、任务外副屏截图和单步仍未接入；整体稳定性仍 PARTIAL。
+- 锁屏前置保护：`service-stop-back-01.txt`（0.004 秒）因 device_locked 拒绝，零创建／联网／输入；用户手动解锁后重新核对同一设备和 RootPilot 前台，BACK／ENTER 补验通过，旧前置失败不改写为 PASS。当前剩余项及新增 Activity 栈／Type／单步证据见本节首部；整体稳定性仍 PARTIAL。
 
 ### 副屏产品接入验证（2026-10-04，PARTIAL）
 
-- 默认关闭，显式选择允许启动列表中的起始应用。任务持有新会话，恢复只保存模式／起始应用，清除上传同意，不保存或复用副屏 ID。现支持启动、点击、滑动、BACK／ENTER、等待，非等待动作仍强制确认；Type、HOME、任务外截图及单步禁用。
+- 默认关闭，显式选择允许启动列表中的起始应用。任务持有新会话，恢复只保存模式／起始应用，清除上传同意，不保存或复用副屏 ID。当前动作及新增 Type／单步范围见上节；HOME／任务外截图禁用，副屏非等待动作仍强制确认。以下旧版本证据中的 unsupported 不代表后续能力未接入。
 - 每个 Root helper 使用私有匿名管道和固定协议，无外部监听端口、任意 shell 参数或凭据。截图来自自己持有的 ImageReader；输入和启动显式绑定显示 ID，不改变全局输入法，不绕过 `FLAG_SECURE`。EOF／取消／有界 watchdog 负责结束；只有释放回执、进程退出和专用显示消失核验完成后才能报告关闭成功。释放未确认不能被停止或放弃恢复记录绕过。
 - 独立静态审查 PASS。已修复审查确认的跨屏切换保留上传同意、释放异常未关闭全部管道、停止与收尾终态竞态；真机还确认副屏 IME 输出会包含独立 token 字段和重复 null，改为精确字段且全部一致才判隐藏，缺失或冲突仍未知。后者及 Service 验收脚本另经窄范围独立审查 PASS。`build-11.txt` 的单测 517 项零失败，Debug／androidTest APK 和 Lint 均通过，`git diff --check` 通过。静态通过不替代运行验收。
 - 不联网底层限定通过：创建／正常释放及幂等关闭（`transport-2.txt`）；取消后释放、会话失效（`cancellation.txt`）；Type／Swipe／Key 拒绝，UI_TREE 不支持，关闭后截图／点击拒绝，输入法不变，主屏执行代理调用数为 0。算式跨两次受控测试完成：首次仅执行数字 1，随后因历史行与当前行重复资源 ID 被测试拦截；只读检查确认当前行为 1 后，续跑核对原回执且仅执行其余六键，逐键状态匹配并在当前行读到 5535（`calculator-remaining-six-3.txt`、`calculator-offline-result.png`，11.438 秒）。不把分段续跑表述为一次完整七键闭环，也未清除历史。

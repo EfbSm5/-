@@ -5,6 +5,8 @@ import android.graphics.Color;
 import android.graphics.Rect;
 import android.os.Bundle;
 import android.text.InputType;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
@@ -18,6 +20,7 @@ import java.util.UUID;
 
 /** Fixed, offline content for display-targeted input acceptance. */
 public final class VirtualCapabilityActivity extends Activity {
+    private static final String UNICODE_SAMPLE = "中文🙂\n第二行";
     static VirtualCapabilityActivity current;
     static Bundle lastReceipt;
     private final String instance = UUID.randomUUID().toString();
@@ -47,11 +50,13 @@ public final class VirtualCapabilityActivity extends Activity {
         content.addView(title);
         editor = new EditText(this);
         editor.setId(android.R.id.edit);
-        editor.setHint("仅固定 ASCII 测试文本");
-        editor.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        editor.setHint("");
+        editor.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
         editor.setImeOptions(EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
         editor.setSaveEnabled(false);
         editor.setLongClickable(false);
+        editor.setSelection(0);
         content.addView(editor, new LinearLayout.LayoutParams(-1, 180));
         for (int row = 0; row < 30; row++) {
             TextView label = new TextView(this);
@@ -69,6 +74,11 @@ public final class VirtualCapabilityActivity extends Activity {
         receipt.setTextColor(Color.BLACK);
         receipt.setTextSize(22);
         renderReceipt();
+        editor.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence text, int start, int before, int count) { }
+            @Override public void afterTextChanged(Editable text) { recordReceipt(); }
+        });
         page.addView(receipt);
         page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(page);
@@ -96,13 +106,14 @@ public final class VirtualCapabilityActivity extends Activity {
         recordReceipt();
     }
 
-    // Retain only fixed counters from this instance, so release cannot race test readback.
+    // Retain only fixed outcomes from this instance, so release cannot race test readback.
     private void recordReceipt() {
         Bundle result = new Bundle();
         result.putString("instance", instance);
         result.putInt("displayId", getDisplay() == null ? -1 : getDisplay().getDisplayId());
         result.putInt("scrollY", scroll.getScrollY());
         result.putBoolean("empty", editor.getText().length() == 0);
+        result.putBoolean("unicodeMatches", UNICODE_SAMPLE.contentEquals(editor.getText()));
         result.putInt("backInvoked", backInvoked);
         result.putInt("enterDown", enterDown);
         result.putInt("enterUp", enterUp);
@@ -125,6 +136,7 @@ public final class VirtualCapabilityActivity extends Activity {
         result.putInt("scrollY", scroll.getScrollY());
         result.putBoolean("empty", editor.getText().length() == 0);
         result.putBoolean("asciiMatches", "RootPilot42".contentEquals(editor.getText()));
+        result.putBoolean("unicodeMatches", UNICODE_SAMPLE.contentEquals(editor.getText()));
         result.putBoolean("editorFocused", editor.isFocused());
         result.putInt("backInvoked", backInvoked);
         result.putInt("enterDown", enterDown); result.putInt("enterUp", enterUp);

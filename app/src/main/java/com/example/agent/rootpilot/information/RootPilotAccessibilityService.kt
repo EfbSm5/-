@@ -8,8 +8,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-/** Optional connection for on-demand semantics reads; it neither caches events nor executes actions. */
+/** Optional semantics reads and confirmed empty-editor input on an owned virtual display; no event cache. */
 class RootPilotAccessibilityService : AccessibilityService() {
+    @Volatile internal var connectionIdentity: Any? = null
+        private set
     private val treeQueries = UiTreeQueryScope(
         AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS,
         readFlags = { serviceInfo?.flags },
@@ -26,6 +28,7 @@ class RootPilotAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        connectionIdentity = Any()
         connectedService = this
         mutableConnected.value = true
     }
@@ -45,6 +48,7 @@ class RootPilotAccessibilityService : AccessibilityService() {
     }
 
     private fun clearConnection() {
+        connectionIdentity = null
         if (connectedService === this) {
             connectedService = null
             mutableConnected.value = false

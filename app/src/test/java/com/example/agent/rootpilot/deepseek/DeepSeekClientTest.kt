@@ -282,11 +282,19 @@ class DeepSeekClientTest {
                 .first { it.jsonObject["type"]?.jsonPrimitive?.content == "text" }
                 .jsonObject.getValue("text").jsonPrimitive.content
             assertTrue(prompt.contains("get_screen_context 和 get_ui_tree 可用于本次副屏"))
-            assertTrue(prompt.contains("get_activity_stack 在副屏返回 not_supported"))
+            assertTrue(prompt.contains("get_activity_stack 只读取本次拥有副屏当前前台任务的 Activity 组件"))
+            assertFalse(prompt.contains("get_activity_stack 在副屏返回 not_supported"))
             assertTrue(prompt.contains("不请求读取主屏"))
-            assertTrue(prompt.contains("不支持文字输入或 HOME"))
+            assertTrue(prompt.contains("不支持 HOME"))
             assertTrue(prompt.contains("key（仅 BACK、ENTER）"))
-            assertTrue(prompt.contains("所有点击、滑动和按键需确认"))
+            assertTrue(prompt.contains("所有点击、滑动、文字输入和按键需确认"))
+            assertTrue(prompt.contains("明确为空的普通输入框整段填入不超过 128 个 UTF-16 单元"))
+            assertTrue(prompt.contains("不替换已有内容、不在光标处插入"))
+            val systemPrompt = messages.first().jsonObject.getValue("content").jsonPrimitive.content
+            assertTrue(systemPrompt.contains("On the main display, Type inserts literal Unicode text at the cursor"))
+            assertTrue(systemPrompt.contains("On an owned virtual display, Type fills the whole"))
+            assertFalse(systemPrompt.contains("Type inserts literal Unicode text at the cursor, replacing only selected text, not the"))
+            assertFalse(prompt.contains("不支持文字输入或 HOME"))
             assertFalse(prompt.contains("仅 get_screen_context 可用"))
         }
     }

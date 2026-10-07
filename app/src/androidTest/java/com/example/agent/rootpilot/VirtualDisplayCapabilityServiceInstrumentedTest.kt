@@ -51,6 +51,31 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
         Acceptance(null).run()
     }
 
+    @Test fun realServiceReadsOwnedActivityStackAndCompletesCapabilities() = runBlocking {
+        assumeTrue(arguments().getString("liveVirtualStackServiceAcceptance") == "true")
+        Acceptance(null, requireStack = true).run()
+    }
+
+    @Test fun realServiceReadsOwnedActivityStackWithoutInputAndFinishes() = runBlocking {
+        assumeTrue(arguments().getString("liveVirtualStackReadOnlyAcceptance") == "true")
+        Acceptance(null, requireStack = true, readOnly = true).run()
+    }
+
+    @Test fun realServiceTypesFixedUnicodeAndObservesCompletion() = runBlocking {
+        assumeTrue(arguments().getString("liveVirtualUnicodeServiceAcceptance") == "true")
+        Acceptance(null, unicode = true).run()
+    }
+
+    @Test fun realServiceStopsAtUnicodeConfirmationWithoutInput() = runBlocking {
+        assumeTrue(arguments().getString("virtualUnicodeServiceStopAcceptance") == "true")
+        Acceptance("TYPE", unicode = true).run()
+    }
+
+    @Test fun realServiceSingleStepClosesAfterOnePlanningAction() = runBlocking {
+        assumeTrue(arguments().getString("liveVirtualSingleStepServiceAcceptance") == "true")
+        Acceptance(null, singleStep = true).run()
+    }
+
     @Test fun realServiceStopsBeforeRequestedCapability() = runBlocking {
         assumeTrue(arguments().getString("virtualCapabilityServiceStopAcceptance") == "true")
         val stop = arguments().getString("stopAction")
@@ -106,7 +131,9 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
         })
     }
 
-    private class Acceptance(private val stopAt: String?) {
+    private class Acceptance(private val stopAt: String?, private val requireStack: Boolean = false,
+        private val readOnly: Boolean = false, private val unicode: Boolean = false,
+        private val singleStep: Boolean = false) {
         private val instrumentation = InstrumentationRegistry.getInstrumentation()
         private val context = instrumentation.targetContext
         private val manager = context.getSystemService(DisplayManager::class.java)
@@ -143,6 +170,12 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
         private var stage = "preflight"
         private var failure: String? = null
         private val evidence = Bundle()
+        private val order = when {
+            readOnly -> ORDER.take(1)
+            unicode -> listOf("OPEN", "TYPE")
+            singleStep -> ORDER.take(2)
+            else -> ORDER
+        }
 
         suspend fun run() {
             try {
@@ -165,6 +198,7 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
 
         private suspend fun preflight() {
             gate(context.packageName == "com.example.agent", "target_package")
+            gate(listOf(readOnly, unicode, singleStep).count { it } <= 1 && (!readOnly || requireStack), "acceptance_mode")
             gate(!originalState.running && originalState.pendingAction == null && originalState.status in IDLE,
                 "service_busy")
             gate(noRecovery(), "recovery_pending")
@@ -178,7 +212,9 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                 context.packageManager.resolveContentProvider(uri.authority!!, 0)?.packageName == PACKAGE, "fixture_identity")
             gate(AndroidAppCatalog(context).listApps().singleOrNull { it.packageName == PACKAGE }?.activityName == ACTIVITY,
                 "fixture_launcher_identity")
+            stage = "fixture_initial_state"
             gate(call().isEmpty, "fixture_already_open")
+            stage = "preflight"
             originalIme = setting(Settings.Secure.DEFAULT_INPUT_METHOD)
             gate(!originalIme.isNullOrBlank(), "ime_unavailable")
             originalImes = enabledImes()
@@ -200,7 +236,14 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
             configChanged = true
             RootPilotService.updateApiConfig(saved)
             preparedConfig = RootPilotService.uiState.value.config
-            testConfig = saved!!.applyTo(RootPilotConfig(task = if (stopAt == null) TASK else STOP_TASK, manualConfirmation = false,
+            testConfig = saved!!.applyTo(RootPilotConfig(task = when {
+                unicode -> UNICODE_TASK
+                singleStep -> SINGLE_STEP_TASK
+                readOnly -> STACK_READ_ONLY_TASK
+                requireStack -> STACK_TASK
+                stopAt == null -> TASK
+                else -> STOP_TASK
+            }, manualConfirmation = false,
                 allowScreenUpload = true, executionDisplay = ExecutionDisplay.VIRTUAL,
                 virtualDisplayStartPackage = PACKAGE))
         }
@@ -209,7 +252,8 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
             stage = "start"
             requestedAt = System.currentTimeMillis()
             sent = true
-            RootPilotService.send(context, RootPilotService.ACTION_AUTO_EXECUTE, testConfig)
+            RootPilotService.send(context, if (singleStep) RootPilotService.ACTION_SINGLE_STEP
+                else RootPilotService.ACTION_AUTO_EXECUTE, testConfig)
             withTimeout(10_000) { while (record() == null) delay(25) }
             stage = "confirm"
             while (true) {
@@ -221,7 +265,7 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                     val session = owned ?: bindDisplay().also { owned = it }
                     validateDisplay(session)
                     val action = state.pendingAction ?: fail("pending_action_missing")
-                    gate(actionName(action) == ORDER.getOrNull(approvals), "action_outside_scope")
+                    gate(actionName(action) == order.getOrNull(approvals), "action_outside_scope")
                     stage = "confirm_${actionName(action).lowercase()}"
                     if (approvals == 0) {
                         gate(action is RootPilotAction.OpenApp && action.packageName == PACKAGE && call().isEmpty,
@@ -232,6 +276,14 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                         val fixture = sample(session)
                         verifyPrefix(fixture, approvals)
                         if (action is RootPilotAction.Swipe) verifySwipe(action, fixture)
+                        if (unicode) {
+                            gate(action is RootPilotAction.Type && action.text == UNICODE_SAMPLE &&
+                                fixture.getBoolean("editorFocused"), "unicode_action_scope")
+                            gate(RootPilotAccessibilityService.connectedService === originalAccessibilityService &&
+                                originalAccessibilityService?.serviceInfo?.flags == originalAccessibilityFlags,
+                                "flags_not_restored_before_confirmation")
+                            evidence.putBoolean("flagsRestoredBeforeConfirmation", true)
+                        }
                         gate(mainIdentity() == mainBaseline, "main_activity_changed")
                     }
                     val stopping = actionName(action) == stopAt
@@ -241,6 +293,10 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                         if (stopping) stopped = true else approvals++
                     }
                 }
+                if (readOnly && instance == null && approvals == 1 && state.running &&
+                    state.status == RootPilotStatus.REQUESTING_MODEL && captureReceiptReady(state)) {
+                    sample(owned ?: fail("display_identity"))
+                }
                 if (!state.running && state.status in TERMINAL) break
                 delay(25)
             }
@@ -248,7 +304,7 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
             gate(state.status == if (stopAt == null) RootPilotStatus.COMPLETED else RootPilotStatus.STOPPED,
                 "terminal_not_expected")
             gate(state.pendingAction == null && state.savedTodos.isEmpty(), "unexpected_side_effect")
-            gate(if (stopAt == null) approvals == 4 else stopped,
+            gate(if (stopAt == null) approvals == order.size else stopped,
                 "confirmation_boundary_not_reached")
             withTimeout(5_000) {
                 while (record()?.status == RunHistoryStatus.RUNNING ||
@@ -263,14 +319,21 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
             verifyPrefix(receipt, approvals)
             evidence.putBoolean("finalReceiptsObserved", true)
             evidence.putString("finalReceiptSource", "instance_bound_retained_fixture_counters")
-            if (stopAt == null) {
-                gate(state.step > approvedStep && captureReceiptReady(state), "final_capture_receipt_missing")
+            if (singleStep) {
+                gate(!state.modelReportedResult, "single_step_completion_source")
+                evidence.putBoolean("onePlanningActionCompleted", true)
+            } else if (stopAt == null) {
+                gate((readOnly || state.step > approvedStep) && captureReceiptReady(state), "final_capture_receipt_missing")
                 checkFrame(state)
                 directory!!.resolve("result.jpg").writeBytes(state.frame!!.bytes)
                 val message = state.errorMessage.orEmpty().replace(Regex("\\s+"), "")
-                gate(state.modelReportedResult && message.contains("BACK=1") && message.contains("ENTER=1/1"),
+                gate(state.modelReportedResult && when {
+                    readOnly -> message.contains("VirtualCapabilityActivity")
+                    unicode -> state.errorMessage.orEmpty().contains(UNICODE_SAMPLE)
+                    else -> message.contains("BACK=1") && message.contains("ENTER=1/1")
+                },
                     "model_receipts_not_reported")
-                evidence.putBoolean("modelReceiptsReported", true)
+                evidence.putBoolean(if (readOnly) "modelActivityReported" else "modelReceiptsReported", true)
             }
             evidence.putBoolean("bodyComplete", true)
         }
@@ -281,8 +344,13 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
             val events = record.events
             gate(record.status == if (stopAt == null) RunHistoryStatus.COMPLETED else RunHistoryStatus.STOPPED,
                 "history_terminal_mismatch")
-            val expected = ORDER.take(approvals).map {
-                when (it) { "OPEN" -> TraceActionType.OPEN_APP; "SWIPE" -> TraceActionType.SWIPE; else -> TraceActionType.KEY }
+            val expected = order.take(approvals).map {
+                when (it) {
+                    "OPEN" -> TraceActionType.OPEN_APP
+                    "SWIPE" -> TraceActionType.SWIPE
+                    "TYPE" -> TraceActionType.TYPE
+                    else -> TraceActionType.KEY
+                }
             }
             val executions = events.filter { it.stage == TraceStage.EXECUTION }
             gate(executions.size == expected.size * 2, "execution_count")
@@ -292,9 +360,35 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                     pair.map { it.status } == listOf(TraceStatus.STARTED, TraceStatus.SUCCESS), "execution_receipt")
             }
             gate(events.filter { it.event == TraceEvent.CONFIRMED }.map { it.actionType } == expected, "approval_receipt")
-            gate(events.none { it.event in listOf(TraceEvent.TODO_SAVED, TraceEvent.READ_ACTIVITY_STACK) }, "unsupported_tool")
+            gate(events.none { it.event == TraceEvent.TODO_SAVED || (!requireStack && it.event == TraceEvent.READ_ACTIVITY_STACK) }, "unsupported_tool")
+            if (requireStack) {
+                if (readOnly) {
+                    val queries = events.filter { it.stage == TraceStage.INFORMATION && it.event != TraceEvent.RESULT }
+                    gate(queries.size == 1 && queries.single().event == TraceEvent.READ_ACTIVITY_STACK &&
+                        queries.single().status == TraceStatus.STARTED, "readonly_stack_tools_not_exclusive")
+                    evidence.putBoolean("singleExclusiveStackQuery", true)
+                }
+                val queryIndex = events.indexOfFirst { it.event == TraceEvent.READ_ACTIVITY_STACK && it.status == TraceStatus.STARTED }
+                val query = events.getOrNull(queryIndex)
+                val resultIndex = if (query == null) -1 else (queryIndex + 1 until events.size).firstOrNull {
+                    events[it].stage == TraceStage.INFORMATION
+                } ?: -1
+                val result = events.getOrNull(resultIndex)
+                val followup = if (resultIndex >= 0) events.drop(resultIndex + 1).filter {
+                    it.stage == TraceStage.MODEL && it.step == query?.step
+                } else emptyList()
+                gate(query != null && result?.event == TraceEvent.RESULT && result.status == TraceStatus.SUCCESS &&
+                    result.step == query.step && followup.any { it.event == TraceEvent.START } &&
+                    followup.any { it.event == TraceEvent.RESULT && it.status == TraceStatus.SUCCESS }, "owned_stack_followup_missing")
+                evidence.putBoolean("ownedStackForwarded", true)
+                evidence.putInt("stackQueries", events.count { it.event == TraceEvent.READ_ACTIVITY_STACK })
+            }
             val tools = events.filter { it.event == TraceEvent.READ_UI_TREE }
-            if (stopAt == null) {
+            if (singleStep) {
+                gate(events.none { it.stage == TraceStage.INFORMATION } &&
+                    events.count { it.stage == TraceStage.MODEL && it.event == TraceEvent.START } == 1,
+                    "single_step_planning_count")
+            } else if (stopAt == null && !readOnly) {
                 val queryIndex = events.indexOfLast { it.event == TraceEvent.READ_UI_TREE &&
                     it.status == TraceStatus.STARTED && it.step > approvedStep }
                 val query = events.getOrNull(queryIndex)
@@ -311,7 +405,7 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                     followup.any { it.event == TraceEvent.RESULT && it.status == TraceStatus.SUCCESS },
                     "final_tree_followup_missing")
                 evidence.putBoolean("finalTreeForwarded", true)
-            } else {
+            } else if (stopAt != null) {
                 val stop = events.indexOfFirst { it.event == TraceEvent.STOP_REQUESTED }
                 gate(stop >= 0 && events.subList(0, stop).any { it.event == TraceEvent.WAITING && it.step == approvedStep } &&
                     events.drop(stop + 1).none { it.stage in listOf(TraceStage.EXECUTION, TraceStage.MODEL, TraceStage.SCREENSHOT) &&
@@ -341,6 +435,13 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
         }
 
         private fun verifyPrefix(fixture: Bundle, next: Int) {
+            if (unicode) {
+                gate((if (next >= 2) fixture.getBoolean("unicodeMatches") else fixture.getBoolean("empty")) &&
+                    fixture.getInt("scrollY", -1) == 0 && fixture.getInt("backInvoked", -1) == 0 &&
+                    fixture.getInt("enterDown", -1) == 0 && fixture.getInt("enterUp", -1) == 0, "unicode_fixture_prefix")
+                evidence.putBoolean(if (next >= 2) "unicodeMatches" else "zeroUnicodeInput", true)
+                return
+            }
             gate(fixture.getBoolean("empty") && fixture.getInt("scrollY", -1).let { if (next >= 2) it > 0 else it == 0 } &&
                 fixture.getInt("backInvoked", -1) == if (next >= 3) 1 else 0, "fixture_prefix")
             gate(fixture.getInt("enterDown", -1) == if (next >= 4) 1 else 0, "enter_down_count")
@@ -575,6 +676,10 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
             evidence.putInt("displayId", owned?.displayId ?: -1)
             evidence.putString("sessionId", owned?.sessionId.orEmpty())
             evidence.putString("stopAction", stopAt ?: "none")
+            evidence.putBoolean("requiresStack", requireStack)
+            evidence.putBoolean("readOnly", readOnly)
+            evidence.putBoolean("unicode", unicode)
+            evidence.putBoolean("singleStep", singleStep)
             evidence.putInt("approvals", approvals)
             evidence.putBoolean("stopOverlayInvoked", stopped)
             evidence.putString("executionSource", "production_service")
@@ -597,7 +702,12 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
     private companion object {
         const val PACKAGE = "com.example.rootpilot.fixture"
         const val ACTIVITY = "$PACKAGE.VirtualCapabilityActivity"
+        const val UNICODE_SAMPLE = "中文🙂\n第二行"
+        const val UNICODE_TASK = "只操作本次独立副屏中的签名固定测试页，不读取主屏。当前普通输入框已聚焦且为空。只执行一次 type，内容为中文🙂，接一个换行，再接第二行。完整内容必须精确为 中文🙂\n第二行，不添加空格或其他字符。不要点击、滑动、按键、再次启动应用、等待或创建待办，不重复输入。输入后必须调用 get_ui_tree 核对输入框中的完整文字，再 finish success=true，并在 message 中报告完整输入内容。"
+        const val SINGLE_STEP_TASK = "只操作本次独立副屏中的签名固定测试页。只规划一次向上滑动，位于固定测试行列表中央，从页面下半部到上半部，依据当前截图，不触碰上方计数栏和输入框。不调用任何信息工具，不点击、不输入、不按键、不等待、不再次启动、不创建待办。不要返回 finish，直接返回这一次 swipe 动作。"
         const val TASK = "当前是 RootPilot 签名专用副屏测试页，仅固定测试内容。只操作此页。先读取一次 get_ui_tree。然后依次执行一次向上滑动、一次 BACK、一次 ENTER；每个动作只做一次，不重复。滑动只在固定测试行列表中央，从页面下半部向上半部，坐标依据当前副屏截图；不触碰上方计数栏或输入框。BACK 由此测试页回调计数，不会导航离开；ENTER 由此页统计按下和抬起。每个动作后观察画面。ENTER 后必须再调用 get_ui_tree 确认最上方固定回执 BACK=1 ENTER=1/1，最后用 finish success=true 结束并在 message 中原样报告 BACK=1 ENTER=1/1。禁止点击、输入文字、HOME、再次启动应用、创建待办和 Activity 栈查询。"
+        const val STACK_TASK = "当前是 RootPilot 签名专用副屏测试页，仅固定非敏感测试内容。只操作本次副屏的此页，不读取主屏。先调用一次 get_activity_stack 核对当前前台 Activity，再调用 get_ui_tree 读取控件。然后依次执行一次向上滑动、一次 BACK、一次 ENTER，每个动作只做一次，不重复。滑动只在固定测试行列表中央，从页面下半部向上半部，依据当前副屏截图；不触碰上方计数栏或输入框。BACK 由此测试页回调计数，不会离开；ENTER 只统计按下和抬起。ENTER 后再调用 get_ui_tree 确认顶部固定回执 BACK=1 ENTER=1/1，最后 finish success=true，并在 message 中报告 BACK=1 ENTER=1/1。禁止点击、输入文字、HOME、再次启动应用、创建待办，不查询其他屏幕或历史任务。"
+        const val STACK_READ_ONLY_TASK = "仅验收本次独立副屏中已打开的 RootPilot 签名固定测试页。调用一次 get_activity_stack，读取其当前前台 Activity。只调用这个工具，参数为空对象 {}；不要查询主屏或其他任务，不调用其他工具。读取成功后直接返回 finish success=true，并在 message 中报告实际 Activity 的组件名。禁止所有点击、滑动、按键、文字输入、再次启动应用、等待动作和创建待办。"
         const val STOP_TASK = "只操作当前 RootPilot 签名专用副屏测试页。依次向上滑动一次、BACK 一次、ENTER 一次，每次一个动作，不重复。滑动仅在固定测试行列表中央，从页面下半部到上半部，以当前截图判断坐标，不触碰上方计数栏或输入框。BACK 与 ENTER 仅更新固定计数。不要调用任何信息工具，不点击、不输入、不按 HOME、不再次启动应用、不创建待办。只依据每步新截图提出下一个动作，完成后结束。"
         val ORDER = listOf("OPEN", "SWIPE", "BACK", "ENTER")
         val IDLE = setOf(RootPilotStatus.IDLE, RootPilotStatus.COMPLETED, RootPilotStatus.STOPPED, RootPilotStatus.FAILED)
@@ -608,6 +718,7 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
         fun actionName(action: RootPilotAction): String = when (action) {
             is RootPilotAction.OpenApp -> "OPEN"
             is RootPilotAction.Swipe -> "SWIPE"
+            is RootPilotAction.Type -> "TYPE"
             is RootPilotAction.Key -> action.key.name
             else -> "FORBIDDEN"
         }
