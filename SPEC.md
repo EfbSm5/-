@@ -1,6 +1,6 @@
 # RootPilot 当前状态
 
-更新日期：2026-10-08。副屏新增拥有 Activity 栈、临时单步及明确空框 Unicode 填写，专用页真实 Service 的只读栈、单步、Unicode 完成／输入待确认停止限定 PASS；原滑动及 BACK／ENTER 闭环保持已验范围。设备动作仍为 LOW／65536。HOME 在当前配置下平台探针失败，继续禁用；任务外副屏截图禁用。既有工具协议失败及广泛兼容仍为 PARTIAL；提交／推送状态以 Git 为准。
+更新日期：2026-10-08。副屏拥有 Activity 栈、临时单步及明确空框 Unicode 填写；专用页真实 Service 的综合“栈／树 → 滑动 → BACK／ENTER → 中文／emoji／换行 → 树／模型完成”和输入待确认停止回归均取得限定 PASS。新增工具调用非法的固定分类，旧协议失败无法追溯归因；保屏窗口失效和首帧异常仍保留，稳定性 PARTIAL。设备动作仍为 LOW／65536。HOME 在当前配置下平台探针失败，继续禁用；任务外副屏截图禁用。广泛兼容仍为 PARTIAL；提交／推送状态以 Git 为准。
 
 本文件只保存最新状态，直接更新对应条目，不追加开发过程、历次测试数字或补验流水。使用与构建说明见 [README.md](README.md)，协作规则见 [AGENTS.md](AGENTS.md)。
 
@@ -100,6 +100,16 @@ RootPilot 是已 Root 的 Android 手机上的实验性 Agent：根据截图、�
 - 用户确认的新只读标准已取得真实生产闭环限定 PASS：`live-current-zero-01.txt` 4.566 秒，run `683227ba-f9d8-403b-837f-36a1ceda0758`，两次模型请求均成功、唯一一次 UI_TREE available，并以成功 Finish 明确报告“当前行=0；历史123×45=5535”。实际当前行和非最低历史行的独立样本核验通过；一次固定启动、零 Tap，无额外工具或重算。`result5535Observed/modelReported5535` 保持 false，新当前／历史字段为 true，不将历史值冒充当前计算结果。记录状态 COMPLETED、事件未截断、RUN_END 成功；脚本确认不等于真人触摸。
 - 当前增量独立静态审查 PASS：共享查询锁、精确配置恢复、失败实例封禁与取消传播、预算及敏感／身份过滤，以及 READ_UI_TREE 与 FULL 的隔离均已核查。新增当前／历史样本及首／次模型回执的三项不联网合成检查 0.007 秒 PASS。最终仅测试 APK 更新为 `d1473e812f2ac2530283dae20a7925c1797c6790688a5c0f6be36af5d2ac272b` 并绑定设备，构建／Lint 28 秒成功；产品仍 `aef0f7c98ead31a1ca01257b813fb527307cc646fcbcda699e48f7cd45dc9a2c`。任务完成后原配置密文、启动列表原字节摘要、IME、三个原无障碍服务列表与基线一致，无 RootPilot 专用副屏及任务／IME 恢复记录。
 - 限定 PASS 不代表广泛应用或设备覆盖：本计算器仍 `truncated=true`，未证明全部节点完整；配置恢复失败封禁和异常回读已有 JVM 覆盖，但未做真机 Binder 故障注入。3 秒预算会拒绝超时数据，不代表同步框架调用可被硬中断。本轮不修改已有解析／输出超限问题结论，整体产品稳定性仍 PARTIAL。
+
+### 副屏综合续验与固定诊断（2026-10-08，限定 PASS；稳定性 PARTIAL）
+
+- 固定诊断：原 `INFORMATION_CALL_INVALID` 拒绝分支增加 `TOOL_CALL_CARDINALITY`、`TOOL_NOT_ALLOWED`、`TOOL_ARGUMENTS_INVALID`、`TOOL_ARGUMENTS_NOT_EMPTY`。失败 RESULT／RUN_END 和历史仅保存白名单字段，其他事件拒绝携带；单调用、固定工具、空对象参数、预算、重试、执行守卫均不变。不记录工具名、参数、模型原文、任务正文或 Token；旧失败没有新字段仍为未知，不称根因已定位或修复。
+- 综合真实 Service 限定 PASS：默认关闭入口 `realServiceCompletesCombinedStackSwipeKeysAndUnicode`，`composite-service-live-05.txt` 46.904 秒，run `1cfc373f-a797-4c54-96f1-0cca8883a4e7`。同一新副屏五次确认／执行依次 Open／Swipe／BACK／ENTER／Type；初始 stack → 树在 Swipe 前，Type 后新帧／树进入后续请求，成功 Finish 报告完整 `中文🙂\n第二行` 及 BACK=1／ENTER=1/1。70项完整历史、12次成功模型响应、7次成功工具（2 stack／5树）；实例／显示绑定的固定回执与生产结果图核对，全部退出／资源／配置／allowlist／API密文／主屏／IME／服务实例与flags收尾通过。fixture 编辑框固定在滚动区外，不增加生产导航特判或放宽输入条件；五次确认前检查flags。脚本点击实际悬浮监听器，不是真人触摸。
+- 新布局待确认停止回归 PASS：`unicode-stop-final-01.txt` 5.130秒，run `c37bca88-3d38-47c0-a925-3e46a6921849`，仅Open确认／执行及两次模型请求，TYPE待确认时停止。零Unicode输入，停止后零新执行／模型／截图；RUN_END及全部收尾通过，不覆盖提交中／提交后死亡。
+- 条件及未关闭异常：授权硬件 `12cd0365`／型号 `24129PN74C`；实体解锁、临时全局超时、不启用可选窗口保屏。离线首帧 `capture-after-physical-unlock-01.txt` 4.085秒PASS，ON→ON、124ms／82209字节、环境恢复，零模型／输入／电源请求。带窗口保屏的live03首帧失败／零模型；live04在两次模型及stack／树成功后因窗口存活失效取消第三请求，主屏恢复不匹配、整体cleanup失败。`capture-hold-diagnostic-01.txt` 存活／STARTED／可见／保屏均成立，但末尾锁定、副屏OFF／无首帧。固定布尔诊断不放宽守卫，具体来源未定位；不据成功抹除旧失败或归因为互联。宿主／编译前置失败亦保留外部记录，不计业务通过。
+- 验证及版本：独立代码静态、两项真实用例和收尾证据复核PASS。`diagnostic-checks-01.txt` 实际执行608项JVM，零失败／错误／跳过；最终完整门禁 `final-full-checks-01.txt` 9秒PASS，含App／androidTest／fixture构建及两模块Lint；JVM为UP-TO-DATE，回读67份报告仍为608项，不算再次执行。diff检查通过。产品SHA-256 `587d025b3a6ccc95e0324c37c1afc878aab7080e4bb6d6d6adab9a26e2d013ef`、测试 `23c8aa510c5589735d0d0fbc7ade0547d15526130944fd04bea206e0cffa9277`、fixture `b08c173ff03fcb3dc531b5a3c9d14ffc4d04c539c6db37bc39f15f2c282b07b1` 与安装包匹配，见 `apk-installed-final.json`。live03使用此前测试包 `3abcf8aa…`，最终成功／停止回归使用最终包，不混淆版本。
+- 临时设置恢复PASS：RootPilot页面结构服务经正常系统设置临时开启／关闭，最终enabled／bound均不含RootPilot；GKD／Cumulus原保持开启及绑定，Binding／Crashed空。Mac锁定后仅改用授权设备显式ADB的正常设置点击；新鲜UIAutomator dump137失败，不读旧XML，以本轮本地设置页截图确认，不绕过Mac或直接写服务列表。临时 `screen_off_timeout=2147483647` ms（约24.9天，不是真正无限）经Settings／PowerManager核验，结束比较仍匹配后恢复原120000ms。充电保屏原0、原IME不变，不改锁屏认证；无专用副屏、fixture Activity、任务或IME恢复文件。
+- 证据／剩余范围：仓库外 `/tmp/rootpilot-composite-acceptance.srYw4x/` 保留固定历史／元数据、授权副屏图、构建和失败记录；恢复见 `accessibility-final.txt`、`screen-timeout-final.txt`、`display-fixture-final.txt`、`recovery-final.txt`、`ime-final.txt`、`device-baseline.md`。无主屏API上传、模型原文或凭据。保屏失效、旧协议根因、主屏并行输入、提交中／后死亡、真人／通知、更多App／厂商仍PARTIAL；HOME、任务外截图、非空替换／光标插入未开放，不把广泛授权当作改变产品边界。
 
 ### 副屏动作与剩余能力（2026-10-08，限定 PASS；稳定性 PARTIAL）
 

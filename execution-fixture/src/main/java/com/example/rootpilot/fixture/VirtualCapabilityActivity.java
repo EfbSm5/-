@@ -57,7 +57,6 @@ public final class VirtualCapabilityActivity extends Activity {
         editor.setSaveEnabled(false);
         editor.setLongClickable(false);
         editor.setSelection(0);
-        content.addView(editor, new LinearLayout.LayoutParams(-1, 180));
         for (int row = 0; row < 30; row++) {
             TextView label = new TextView(this);
             label.setText("固定测试行 " + row);
@@ -80,6 +79,7 @@ public final class VirtualCapabilityActivity extends Activity {
             @Override public void afterTextChanged(Editable text) { recordReceipt(); }
         });
         page.addView(receipt);
+        page.addView(editor, new LinearLayout.LayoutParams(-1, 180));
         page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(page);
         scroll.setOnScrollChangeListener((view, x, y, oldX, oldY) -> recordReceipt());

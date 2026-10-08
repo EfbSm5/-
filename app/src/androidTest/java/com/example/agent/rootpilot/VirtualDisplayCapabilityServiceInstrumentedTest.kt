@@ -56,6 +56,13 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
         Acceptance(null, requireStack = true).run()
     }
 
+    @Test fun realServiceCompletesCombinedStackSwipeKeysAndUnicode() = runBlocking {
+        assumeTrue(arguments().getString("liveVirtualCompositeServiceAcceptance") == "true")
+        withRootPilotAcceptanceScreen {
+            Acceptance(null, requireStack = true, unicode = true, composite = true).run()
+        }
+    }
+
     @Test fun realServiceReadsOwnedActivityStackWithoutInputAndFinishes() = runBlocking {
         assumeTrue(arguments().getString("liveVirtualStackReadOnlyAcceptance") == "true")
         Acceptance(null, requireStack = true, readOnly = true).run()
@@ -133,7 +140,7 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
 
     private class Acceptance(private val stopAt: String?, private val requireStack: Boolean = false,
         private val readOnly: Boolean = false, private val unicode: Boolean = false,
-        private val singleStep: Boolean = false) {
+        private val singleStep: Boolean = false, private val composite: Boolean = false) {
         private val instrumentation = InstrumentationRegistry.getInstrumentation()
         private val context = instrumentation.targetContext
         private val manager = context.getSystemService(DisplayManager::class.java)
@@ -171,6 +178,7 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
         private var failure: String? = null
         private val evidence = Bundle()
         private val order = when {
+            composite -> ORDER + "TYPE"
             readOnly -> ORDER.take(1)
             unicode -> listOf("OPEN", "TYPE")
             singleStep -> ORDER.take(2)
@@ -199,6 +207,8 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
         private suspend fun preflight() {
             gate(context.packageName == "com.example.agent", "target_package")
             gate(listOf(readOnly, unicode, singleStep).count { it } <= 1 && (!readOnly || requireStack), "acceptance_mode")
+            gate(!composite || requireStack && unicode && !readOnly && !singleStep && stopAt == null,
+                "composite_mode")
             gate(!originalState.running && originalState.pendingAction == null && originalState.status in IDLE,
                 "service_busy")
             gate(noRecovery(), "recovery_pending")
@@ -237,6 +247,7 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
             RootPilotService.updateApiConfig(saved)
             preparedConfig = RootPilotService.uiState.value.config
             testConfig = saved!!.applyTo(RootPilotConfig(task = when {
+                composite -> COMPOSITE_TASK
                 unicode -> UNICODE_TASK
                 singleStep -> SINGLE_STEP_TASK
                 readOnly -> STACK_READ_ONLY_TASK
@@ -276,15 +287,17 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                         val fixture = sample(session)
                         verifyPrefix(fixture, approvals)
                         if (action is RootPilotAction.Swipe) verifySwipe(action, fixture)
-                        if (unicode) {
-                            gate(action is RootPilotAction.Type && action.text == UNICODE_SAMPLE &&
+                        if (unicode && action is RootPilotAction.Type) {
+                            gate(action.text == UNICODE_SAMPLE &&
                                 fixture.getBoolean("editorFocused"), "unicode_action_scope")
-                            gate(RootPilotAccessibilityService.connectedService === originalAccessibilityService &&
-                                originalAccessibilityService?.serviceInfo?.flags == originalAccessibilityFlags,
-                                "flags_not_restored_before_confirmation")
-                            evidence.putBoolean("flagsRestoredBeforeConfirmation", true)
                         }
                         gate(mainIdentity() == mainBaseline, "main_activity_changed")
+                    }
+                    if (composite || unicode && action is RootPilotAction.Type) {
+                        gate(RootPilotAccessibilityService.connectedService === originalAccessibilityService &&
+                            originalAccessibilityService?.serviceInfo?.flags == originalAccessibilityFlags,
+                            "flags_not_restored_before_confirmation")
+                        evidence.putBoolean("flagsRestoredBeforeConfirmation", true)
                     }
                     val stopping = actionName(action) == stopAt
                     if (overlay(state, session, if (stopping) "停止" else "确认")) {
@@ -329,6 +342,8 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                 val message = state.errorMessage.orEmpty().replace(Regex("\\s+"), "")
                 gate(state.modelReportedResult && when {
                     readOnly -> message.contains("VirtualCapabilityActivity")
+                    composite -> state.errorMessage.orEmpty().contains(UNICODE_SAMPLE) &&
+                        message.contains("BACK=1") && message.contains("ENTER=1/1")
                     unicode -> state.errorMessage.orEmpty().contains(UNICODE_SAMPLE)
                     else -> message.contains("BACK=1") && message.contains("ENTER=1/1")
                 },
@@ -380,6 +395,19 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                 gate(query != null && result?.event == TraceEvent.RESULT && result.status == TraceStatus.SUCCESS &&
                     result.step == query.step && followup.any { it.event == TraceEvent.START } &&
                     followup.any { it.event == TraceEvent.RESULT && it.status == TraceStatus.SUCCESS }, "owned_stack_followup_missing")
+                if (composite) {
+                    val firstSwipe = events.indexOfFirst { it.stage == TraceStage.EXECUTION &&
+                        it.event == TraceEvent.START && it.actionType == TraceActionType.SWIPE }
+                    val initialTree = events.indexOfFirst { it.event == TraceEvent.READ_UI_TREE &&
+                        it.status == TraceStatus.STARTED && it.step == 0 }
+                    val initialTreeResult = if (initialTree >= 0) (initialTree + 1 until events.size).firstOrNull {
+                        events[it].stage == TraceStage.INFORMATION
+                    } ?: -1 else -1
+                    gate(query?.step == 0 && initialTree > resultIndex && initialTreeResult > initialTree &&
+                        firstSwipe > initialTreeResult && events[initialTreeResult].event == TraceEvent.RESULT &&
+                        events[initialTreeResult].status == TraceStatus.SUCCESS && events[initialTreeResult].step == 0,
+                        "initial_stack_tree_not_before_swipe")
+                }
                 evidence.putBoolean("ownedStackForwarded", true)
                 evidence.putInt("stackQueries", events.count { it.event == TraceEvent.READ_ACTIVITY_STACK })
             }
@@ -435,17 +463,20 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
         }
 
         private fun verifyPrefix(fixture: Bundle, next: Int) {
-            if (unicode) {
+            if (unicode && !composite) {
                 gate((if (next >= 2) fixture.getBoolean("unicodeMatches") else fixture.getBoolean("empty")) &&
                     fixture.getInt("scrollY", -1) == 0 && fixture.getInt("backInvoked", -1) == 0 &&
                     fixture.getInt("enterDown", -1) == 0 && fixture.getInt("enterUp", -1) == 0, "unicode_fixture_prefix")
                 evidence.putBoolean(if (next >= 2) "unicodeMatches" else "zeroUnicodeInput", true)
                 return
             }
-            gate(fixture.getBoolean("empty") && fixture.getInt("scrollY", -1).let { if (next >= 2) it > 0 else it == 0 } &&
+            val unicodeComplete = composite && next == order.size
+            gate((if (unicodeComplete) fixture.getBoolean("unicodeMatches") else fixture.getBoolean("empty")) &&
+                fixture.getInt("scrollY", -1).let { if (next >= 2) it > 0 else it == 0 } &&
                 fixture.getInt("backInvoked", -1) == if (next >= 3) 1 else 0, "fixture_prefix")
             gate(fixture.getInt("enterDown", -1) == if (next >= 4) 1 else 0, "enter_down_count")
             gate(fixture.getInt("enterUp", -1) == if (next >= 4) 1 else 0, "enter_up_count")
+            if (unicodeComplete) evidence.putBoolean("unicodeMatches", true)
         }
 
         private fun verifySwipe(action: RootPilotAction.Swipe, fixture: Bundle) {
@@ -680,6 +711,7 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
             evidence.putBoolean("readOnly", readOnly)
             evidence.putBoolean("unicode", unicode)
             evidence.putBoolean("singleStep", singleStep)
+            evidence.putBoolean("composite", composite)
             evidence.putInt("approvals", approvals)
             evidence.putBoolean("stopOverlayInvoked", stopped)
             evidence.putString("executionSource", "production_service")
@@ -704,6 +736,7 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
         const val ACTIVITY = "$PACKAGE.VirtualCapabilityActivity"
         const val UNICODE_SAMPLE = "中文🙂\n第二行"
         const val UNICODE_TASK = "只操作本次独立副屏中的签名固定测试页，不读取主屏。当前普通输入框已聚焦且为空。只执行一次 type，内容为中文🙂，接一个换行，再接第二行。完整内容必须精确为 中文🙂\n第二行，不添加空格或其他字符。不要点击、滑动、按键、再次启动应用、等待或创建待办，不重复输入。输入后必须调用 get_ui_tree 核对输入框中的完整文字，再 finish success=true，并在 message 中报告完整输入内容。"
+        const val COMPOSITE_TASK = "只操作本次独立副屏中的签名固定测试页，不读取主屏。先用 get_activity_stack 核对当前 Activity，再用 get_ui_tree 读取本页；每次模型响应只调用一个工具，参数必须是空对象 {}。然后依次执行一次向上滑动、一次 BACK、一次 ENTER、一次 type，每个动作仅一次，不重复。滑动仅在固定行列表可见区域内，从下半部到上半部，不触碰顶部固定计数栏和输入框。BACK 仅更新测试计数，ENTER 仅更新按下与抬起计数，不导航、不编辑。type 只能填写顶部已聚焦空普通文本框，完整内容为 中文🙂\n第二行，必须保留一个真实换行，不添加其他字符。输入后调用一次 get_ui_tree，核对完整两行文本及 BACK=1 ENTER=1/1，再 finish success=true，message 同时报告完整输入内容和这两项计数。禁止点击、HOME、等待、再次启动、创建待办或其他输入，不查询其他屏幕。"
         const val SINGLE_STEP_TASK = "只操作本次独立副屏中的签名固定测试页。只规划一次向上滑动，位于固定测试行列表中央，从页面下半部到上半部，依据当前截图，不触碰上方计数栏和输入框。不调用任何信息工具，不点击、不输入、不按键、不等待、不再次启动、不创建待办。不要返回 finish，直接返回这一次 swipe 动作。"
         const val TASK = "当前是 RootPilot 签名专用副屏测试页，仅固定测试内容。只操作此页。先读取一次 get_ui_tree。然后依次执行一次向上滑动、一次 BACK、一次 ENTER；每个动作只做一次，不重复。滑动只在固定测试行列表中央，从页面下半部向上半部，坐标依据当前副屏截图；不触碰上方计数栏或输入框。BACK 由此测试页回调计数，不会导航离开；ENTER 由此页统计按下和抬起。每个动作后观察画面。ENTER 后必须再调用 get_ui_tree 确认最上方固定回执 BACK=1 ENTER=1/1，最后用 finish success=true 结束并在 message 中原样报告 BACK=1 ENTER=1/1。禁止点击、输入文字、HOME、再次启动应用、创建待办和 Activity 栈查询。"
         const val STACK_TASK = "当前是 RootPilot 签名专用副屏测试页，仅固定非敏感测试内容。只操作本次副屏的此页，不读取主屏。先调用一次 get_activity_stack 核对当前前台 Activity，再调用 get_ui_tree 读取控件。然后依次执行一次向上滑动、一次 BACK、一次 ENTER，每个动作只做一次，不重复。滑动只在固定测试行列表中央，从页面下半部向上半部，依据当前副屏截图；不触碰上方计数栏或输入框。BACK 由此测试页回调计数，不会离开；ENTER 只统计按下和抬起。ENTER 后再调用 get_ui_tree 确认顶部固定回执 BACK=1 ENTER=1/1，最后 finish success=true，并在 message 中报告 BACK=1 ENTER=1/1。禁止点击、输入文字、HOME、再次启动应用、创建待办，不查询其他屏幕或历史任务。"

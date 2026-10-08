@@ -68,14 +68,27 @@ class AgentLoopInformationTest {
     }
 
     @Test fun unknownMutatingExtraArgumentMalformedAndParallelCallsAreRejected() = runTest {
-        val invalid = listOf(query("shell"), query("click_node"), query(args = "{\"node_id\":\"n0\"}"),
-            query(args = "[]"), query(args = "{"), query().copy(toolCalls = query().toolCalls + ChatToolCall("call-2", "get_screen_context", "{}")))
-        invalid.forEach { response ->
+        val invalid = listOf(
+            query("SECRET_TOOL") to ModelProtocolReason.TOOL_NOT_ALLOWED,
+            query("click_node") to ModelProtocolReason.TOOL_NOT_ALLOWED,
+            query(args = "{\"node_id\":\"SECRET_NODE\"}") to ModelProtocolReason.TOOL_ARGUMENTS_NOT_EMPTY,
+            query(args = "[]") to ModelProtocolReason.TOOL_ARGUMENTS_INVALID,
+            query(args = "{SECRET_ARGUMENTS") to ModelProtocolReason.TOOL_ARGUMENTS_INVALID,
+            query().copy(toolCalls = query().toolCalls + ChatToolCall("SECRET_CALL_ID", "get_screen_context", "{}")) to
+                ModelProtocolReason.TOOL_CALL_CARDINALITY,
+        )
+        invalid.forEach { (response, protocolReason) ->
             val fixture = Fixture(listOf(response))
             fixture.run()
             assertEquals(TraceReason.INFORMATION_CALL_INVALID, fixture.trace.reason)
             assertEquals(0, fixture.queries)
             assertEquals(0, fixture.executions)
+            val diagnostic = ModelFailure(ModelFailureCategory.RESPONSE_PROTOCOL, protocolReason = protocolReason)
+            val failures = fixture.traceEvents.filter { it.reason == TraceReason.INFORMATION_CALL_INVALID }
+            assertEquals(listOf(TraceEvent.RESULT, TraceEvent.RUN_END), failures.map { it.event })
+            assertTrue(failures.all { it.modelFailure == diagnostic })
+            assertFalse(fixture.traceLines.joinToString().contains("SECRET"))
+            assertFalse(fixture.traceLines.joinToString().contains("private-reasoning"))
         }
     }
 

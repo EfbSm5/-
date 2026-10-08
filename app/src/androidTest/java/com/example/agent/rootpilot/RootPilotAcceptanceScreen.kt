@@ -87,11 +87,20 @@ internal suspend fun <T> withRootPilotAcceptanceScreen(block: suspend () -> T): 
         val guard = launch {
             while (isActive) {
                 withContext(Dispatchers.Main.immediate) {
-                    requireState(!held.isDestroyed && !held.isFinishing &&
-                        held.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) && held.window.decorView.isShown &&
-                        held.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0 &&
-                        context.getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == false,
-                        "screen_hold_lost")
+                    val alive = !held.isDestroyed && !held.isFinishing
+                    val started = held.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+                    val shown = held.window.decorView.isShown
+                    val keep = held.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0
+                    val unlocked = context.getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == false
+                    val valid = alive && started && shown && keep && unlocked
+                    if (!valid) instrumentation.sendStatus(0, Bundle().apply {
+                        putBoolean("screenHoldLostAlive", alive)
+                        putBoolean("screenHoldLostStarted", started)
+                        putBoolean("screenHoldLostShown", shown)
+                        putBoolean("screenHoldLostKeepFlag", keep)
+                        putBoolean("screenHoldLostUnlocked", unlocked)
+                    })
+                    requireState(valid, "screen_hold_lost")
                 }
                 delay(50)
             }

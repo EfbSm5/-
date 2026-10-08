@@ -92,7 +92,7 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 以 `runId` 关联任务，`step` 从 0 开始，`elapsedMs` 为累计耗时。`stop_requested` 是停止请求，`run_end` 才是协程结束证据；日志可能轮转，不是持久化审计记录。
 
-`MODEL_FAILED` 可包含白名单 `modelFailureCategory`、HTTP 失败的 `modelHttpStatus`，以及协议失败的 `modelProtocolReason`；同样的类型化字段进入任务历史。未提供字段代表未知，旧历史仍可读取。只按失败发生点分类，不分析原始消息、返回体或异常文本，也不据此自动重试。
+`MODEL_FAILED` 可包含白名单 `modelFailureCategory`、HTTP 失败的 `modelHttpStatus`，以及协议失败的 `modelProtocolReason`；同样的类型化字段进入任务历史。`INFORMATION_CALL_INVALID` 也可携带固定协议细分：`TOOL_CALL_CARDINALITY`（不是恰好一次调用）、`TOOL_NOT_ALLOWED`（非允许工具）、`TOOL_ARGUMENTS_INVALID`（参数不是可解析对象）、`TOOL_ARGUMENTS_NOT_EMPTY`（参数非空）。仅失败 RESULT 和 RUN_END 保留这些字段，不记录工具名、参数或模型原文。未提供字段代表未知，旧历史仍可读取，不能追溯归因。只按失败发生点分类，不分析原始消息、返回体或异常文本，也不据此自动重试。
 
 设备决策请求的模型结果事件还可包含 `modelUsage`：服务端输入／输出／思考／总 Token 数，以及已解析片段的思考／正文／空白 UTF-16 字符数和固定结束原因。成功和失败均可记录；缺失 Token 字段为未知，畸形或矛盾用量标记 `usageMalformed` 并清空 Token 数，不影响原响应判定。统计只绑定当前请求的 MODEL RESULT，进入现有脱敏日志和任务历史，不进入任务恢复快照；旧历史缺少此字段仍可读。中断时的字符数可能不完整，不能据一次正常请求的用量解释另一次失败。纯聊天、文件 Agent 和旧单步动作路径不采集这些统计。
 
@@ -157,6 +157,8 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 `VirtualDisplayCapabilityServiceInstrumentedTest` 使用真实 Service、已保存的 DeepSeek 配置和实际悬浮窗监听器。单独运行 `realServiceConfirmsSwipeBackEnterAndObservesReceipts`（`liveVirtualCapabilityServiceAcceptance=true`），仅批准签名专用页的一次启动、向上滑动、BACK 和 ENTER；要求固定计数、本次执行回执、结果树进入后续请求及模型成功结束。停止用例单独运行 `realServiceStopsBeforeRequestedCapability`（`virtualCapabilityServiceStopAcceptance=true`），另传 `stopAction=SWIPE`、`BACK` 或 `ENTER`，仅依据固定副屏截图规划，在对应动作待确认时点击实际停止监听器，核对之后零执行。两个开关默认关闭，均会联网，必须先取得固定副屏画面／控件树上传授权并使用 `--no-restart`，不向整类开启 live 开关。测试临时选择专用页为唯一允许应用，退出与副屏释放确认后恢复原配置及启动列表字节，核对 API 密文、主屏 Activity、IME 和无障碍服务实例／标志不变。最终效果回读使用实例／显示绑定的固定计数保留回执，不把释放后的回执当成新鲜页面观察；新建实例会清空旧回执。fixture 的 Launcher 声明仍受签名权限保护，只用于既有生产应用目录发现；不在生产目录中增加特判。脚本确认不代表真人触摸；固定 BACK 回调不代表应用导航、主屏身份不变不代表主屏并行输入通过。
 
 该类另有独立入口：`realServiceReadsOwnedActivityStackWithoutInputAndFinishes`（`liveVirtualStackReadOnlyAcceptance=true`）只允许一次 stack 查询及 Finish；`realServiceReadsOwnedActivityStackAndCompletesCapabilities`（`liveVirtualStackServiceAcceptance=true`）为 stack＋滑动／按键组合，不能用前者替代。`realServiceSingleStepClosesAfterOnePlanningAction`（`liveVirtualSingleStepServiceAcceptance=true`）核对一次规划动作后本地完成并释放；`realServiceTypesFixedUnicodeAndObservesCompletion`（`liveVirtualUnicodeServiceAcceptance=true`）核对一次固定 Type、输入后树查询及完整文本完成；`realServiceStopsAtUnicodeConfirmationWithoutInput`（`virtualUnicodeServiceStopAcceptance=true`）核对待确认停止、零输入及停止后零新执行。均默认关闭、单方法执行；联网入口沿用相同上传授权和收尾门槛。
+
+综合入口 `realServiceCompletesCombinedStackSwipeKeysAndUnicode`（`liveVirtualCompositeServiceAcceptance=true`）限定同一新副屏完成 Open → stack／UI 树 → Swipe → BACK → ENTER → 一次 `中文🙂\n第二行` 输入 → 新帧／树 → 模型 Finish。编辑框固定在滚动区外，必须原本明确为空且已聚焦；五次确认前均核验本服务实例及读取 flags，逐动作／固定计数／完整文本和退出收尾不可用分项历史成功替代。当前综合真机取得限定 PASS，条件是实体解锁、临时全局息屏超时及不启用测试窗口保屏，详见 `SPEC.md`；不表示所有环境稳定。可选 `holdRootPilotScreen=true` 只设置本测试窗口的可恢复保屏标志，收到本次 `screenHoldReadyForActivity=true` 后才显式启动 RootPilot 新任务（`am start -W -f 0x18000000 -n com.example.agent/.rootpilot.RootPilotActivity`）；不解锁或改全局电源设置。保屏守卫失效时仅输出固定窗口存活／STARTED／可见／标志／未锁定布尔值并停止；投屏亮着或保屏标志存在不证明系统未锁定，其旧失败仍保留，不宣称已修复。
 
 `inspectRejectedSwipeWithoutActionsOrNetwork` 是同类默认关闭的诊断入口，需 `inspectRejectedVirtualCapabilitySwipe=true`、`failedCapabilityDirectory` 和 `failedCapabilityRunId`。仅在原失败回执、最近同 run 历史和当前进程保留私有帧全部匹配时，导出固定数值坐标和原帧；不把它当作新鲜截图，不回读或归属 fixture 计数，不执行动作、联网或修改配置。原现场不匹配即拒绝，不补采冒充原失败证据。
 

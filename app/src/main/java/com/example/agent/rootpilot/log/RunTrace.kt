@@ -83,7 +83,9 @@ class RunTrace(
     fun fail(code: TraceReason, diagnostic: ModelFailure? = null, usage: ModelUsage? = null) {
         outcome = TraceStatus.FAILED
         reason = code
-        modelFailure = diagnostic.takeIf { code == TraceReason.MODEL_FAILED }
+        modelFailure = diagnostic.takeIf {
+            code == TraceReason.MODEL_FAILED || code == TraceReason.INFORMATION_CALL_INVALID
+        }
         record(TraceEvent.RESULT, TraceStatus.FAILED, code, modelUsage = usage)
     }
 
@@ -106,7 +108,9 @@ class RunTrace(
         stage: TraceStage = this.stage,
         modelUsage: ModelUsage? = null,
     ) {
-        val diagnostic = modelFailure.takeIf { reasonCode == TraceReason.MODEL_FAILED }
+        val diagnostic = modelFailure.takeIf {
+            reasonCode == TraceReason.MODEL_FAILED || reasonCode == TraceReason.INFORMATION_CALL_INVALID
+        }
         val usage = modelUsage.takeIf { stage == TraceStage.MODEL && event == TraceEvent.RESULT }
         val typed = RunTraceEvent(runId, step, elapsedMs, actionType, stage, event, status, reasonCode, diagnostic, usage)
         try { observer(typed) } catch (_: Exception) { }

@@ -12,6 +12,25 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class RunTraceTest {
+    @Test fun informationFailureDiagnosticIsFixedAndDoesNotLeakToOtherEvents() {
+        val lines = mutableListOf<String>()
+        val events = mutableListOf<RunTraceEvent>()
+        val trace = RunTrace(observer = { events += it }, sink = { lines += it })
+        val diagnostic = ModelFailure(ModelFailureCategory.RESPONSE_PROTOCOL,
+            protocolReason = ModelProtocolReason.TOOL_CALL_CARDINALITY)
+        trace.stage = TraceStage.INFORMATION
+        trace.fail(TraceReason.INFORMATION_CALL_INVALID, diagnostic)
+        trace.record(TraceEvent.RUN_END, trace.outcome, trace.reason)
+        assertEquals(listOf(diagnostic, diagnostic), events.map { it.modelFailure })
+        assertEquals("tool_call_cardinality",
+            Json.parseToJsonElement(lines.first()).jsonObject["modelProtocolReason"]!!.jsonPrimitive.content)
+        trace.record(TraceEvent.START, TraceStatus.STARTED)
+        trace.fail(TraceReason.POLICY_REJECTED, diagnostic)
+        trace.record(TraceEvent.RUN_END, trace.outcome, trace.reason)
+        assertEquals(listOf(null, null, null), events.drop(2).map { it.modelFailure })
+        assertFalse(lines.drop(2).any { it.contains("modelProtocolReason") })
+    }
+
     @Test fun usageIsRequestScopedSerializableAndAbsentInOldEvents() {
         val lines = mutableListOf<String>()
         val events = mutableListOf<RunTraceEvent>()

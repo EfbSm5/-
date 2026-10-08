@@ -4,6 +4,9 @@ import com.example.agent.rootpilot.log.*
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.deepseek.ModelUsage
 import com.example.agent.rootpilot.deepseek.ModelFinishReason
+import com.example.agent.rootpilot.deepseek.ModelFailure
+import com.example.agent.rootpilot.deepseek.ModelFailureCategory
+import com.example.agent.rootpilot.deepseek.ModelProtocolReason
 import kotlinx.serialization.json.*
 import java.util.UUID
 import org.junit.Assert.*
@@ -13,6 +16,24 @@ import org.junit.rules.TemporaryFolder
 
 class RunHistoryStoreTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test fun informationProtocolReasonsRoundTripAndOldInvalidCallsRemainReadable() {
+        val file = temporary.root.resolve("runs.json")
+        val store = RunHistoryStore(file)
+        val id = UUID.randomUUID().toString()
+        val reasons = listOf(ModelProtocolReason.TOOL_CALL_CARDINALITY, ModelProtocolReason.TOOL_NOT_ALLOWED,
+            ModelProtocolReason.TOOL_ARGUMENTS_INVALID, ModelProtocolReason.TOOL_ARGUMENTS_NOT_EMPTY)
+        val events = reasons.map { reason ->
+            RunTraceEvent(id, 0, 10, TraceActionType.NONE, TraceStage.INFORMATION,
+                TraceEvent.RESULT, TraceStatus.FAILED, TraceReason.INFORMATION_CALL_INVALID,
+                ModelFailure(ModelFailureCategory.RESPONSE_PROTOCOL, protocolReason = reason))
+        } + RunTraceEvent(id, 0, 10, TraceActionType.NONE, TraceStage.INFORMATION,
+            TraceEvent.RESULT, TraceStatus.FAILED, TraceReason.INFORMATION_CALL_INVALID)
+        val records = listOf(RunHistoryRecord(id, 1, events = events))
+        store.write(records)
+        assertEquals(records, store.read())
+        assertNull(store.read().single().events.last().modelFailure)
+    }
 
     @Test fun usageRoundTripsOnDiskAndLegacyEventsRemainReadable() {
         val file = temporary.root.resolve("runs.json")

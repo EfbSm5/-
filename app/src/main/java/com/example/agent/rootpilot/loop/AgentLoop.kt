@@ -12,6 +12,9 @@ import com.example.agent.rootpilot.deepseek.ToolChatResult
 import com.example.agent.rootpilot.deepseek.ToolChatTurn
 import com.example.agent.rootpilot.information.DeviceInfoTool
 import com.example.agent.rootpilot.deepseek.ModelStreamSnapshot
+import com.example.agent.rootpilot.deepseek.ModelFailure
+import com.example.agent.rootpilot.deepseek.ModelFailureCategory
+import com.example.agent.rootpilot.deepseek.ModelProtocolReason
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotConfig
 import com.example.agent.rootpilot.model.ScreenSize
@@ -268,7 +271,14 @@ class AgentLoop(
                         try { Json.parseToJsonElement(it.arguments) as? JsonObject } catch (_: IllegalArgumentException) { null }
                     }
                     if (call == null || tool == null || args == null || args.isNotEmpty()) {
-                        trace.fail(TraceReason.INFORMATION_CALL_INVALID)
+                        val invalidCall = when {
+                            call == null -> ModelProtocolReason.TOOL_CALL_CARDINALITY
+                            tool == null -> ModelProtocolReason.TOOL_NOT_ALLOWED
+                            args == null -> ModelProtocolReason.TOOL_ARGUMENTS_INVALID
+                            else -> ModelProtocolReason.TOOL_ARGUMENTS_NOT_EMPTY
+                        }
+                        trace.fail(TraceReason.INFORMATION_CALL_INVALID, ModelFailure(
+                            ModelFailureCategory.RESPONSE_PROTOCOL, protocolReason = invalidCall))
                         onEvent(AgentLoopEvent.Failed("只接受已提供的单个只读信息工具及空参数，未执行动作"))
                         return
                     }
