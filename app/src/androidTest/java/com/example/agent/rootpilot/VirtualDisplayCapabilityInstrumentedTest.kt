@@ -233,11 +233,11 @@ class VirtualDisplayCapabilityInstrumentedTest {
                                 evidence.putBoolean("unicodeMatches", true)
                                 evidence.putBoolean("inputTreeObserved", true)
                                 var repeatApprovals = 0
-                                check(backend.executeConfirmed(ExecutableRootAction.Type(UNICODE_SAMPLE)) {
+                                check(backend.executeConfirmed(ExecutableRootAction.Type("a".repeat(129))) {
                                     repeatApprovals++; false
-                                } is RootExecutionResult.Failure && repeatApprovals == 0) { "nonempty_input_not_rejected" }
+                                } is RootExecutionResult.Failure && repeatApprovals == 0) { "invalid_nonempty_input_not_rejected" }
                                 check(call(context, uri, "virtual_state").getBoolean("unicodeMatches")) { "nonempty_input_changed" }
-                                evidence.putBoolean("nonemptyInputRejectedBeforeApproval", true)
+                                evidence.putBoolean("invalidNonemptyInputRejectedBeforeApproval", true)
                                 """{"action":"finish","success":true,"message":"fixed"}"""
                             }
                             else -> error("unexpected_model_call")

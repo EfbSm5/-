@@ -78,6 +78,21 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
         Acceptance("TYPE", unicode = true).run()
     }
 
+    @Test fun realServiceInsertsAtKnownNonemptyCaretAndFinishes() = runBlocking {
+        assumeTrue(arguments().getString("liveVirtualPlainCursorServiceAcceptance") == "true")
+        Acceptance(null, unicode = true, editMode = "CURSOR").run()
+    }
+
+    @Test fun realServiceReplacesKnownSelectionAndFinishes() = runBlocking {
+        assumeTrue(arguments().getString("liveVirtualPlainSelectionServiceAcceptance") == "true")
+        Acceptance(null, unicode = true, editMode = "SELECTION").run()
+    }
+
+    @Test fun realServiceStopsAtNonemptyInputConfirmation() = runBlocking {
+        assumeTrue(arguments().getString("virtualPlainServiceStopAcceptance") == "true")
+        Acceptance("TYPE", unicode = true, editMode = "SELECTION").run()
+    }
+
     @Test fun realServiceSingleStepClosesAfterOnePlanningAction() = runBlocking {
         assumeTrue(arguments().getString("liveVirtualSingleStepServiceAcceptance") == "true")
         Acceptance(null, singleStep = true).run()
@@ -140,7 +155,8 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
 
     private class Acceptance(private val stopAt: String?, private val requireStack: Boolean = false,
         private val readOnly: Boolean = false, private val unicode: Boolean = false,
-        private val singleStep: Boolean = false, private val composite: Boolean = false) {
+        private val singleStep: Boolean = false, private val composite: Boolean = false,
+        private val editMode: String? = null) {
         private val instrumentation = InstrumentationRegistry.getInstrumentation()
         private val context = instrumentation.targetContext
         private val manager = context.getSystemService(DisplayManager::class.java)
@@ -174,9 +190,16 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
         private var approvedStep = -1
         private var approvals = 0
         private var stopped = false
+        private var seedPreparationAttempted = false
         private var stage = "preflight"
         private var failure: String? = null
         private val evidence = Bundle()
+        private val inputSample get() = if (editMode == "CURSOR") "🙂" else UNICODE_SAMPLE
+        private val expectedInput get() = when (editMode) {
+            "CURSOR" -> "甲🙂乙"
+            "SELECTION" -> "甲${UNICODE_SAMPLE}丙"
+            else -> UNICODE_SAMPLE
+        }
         private val order = when {
             composite -> ORDER + "TYPE"
             readOnly -> ORDER.take(1)
@@ -209,6 +232,8 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
             gate(listOf(readOnly, unicode, singleStep).count { it } <= 1 && (!readOnly || requireStack), "acceptance_mode")
             gate(!composite || requireStack && unicode && !readOnly && !singleStep && stopAt == null,
                 "composite_mode")
+            gate(editMode == null || editMode in listOf("CURSOR", "SELECTION") && unicode &&
+                !composite && !readOnly && !singleStep && !requireStack, "plain_edit_mode")
             gate(!originalState.running && originalState.pendingAction == null && originalState.status in IDLE,
                 "service_busy")
             gate(noRecovery(), "recovery_pending")
@@ -247,6 +272,8 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
             RootPilotService.updateApiConfig(saved)
             preparedConfig = RootPilotService.uiState.value.config
             testConfig = saved!!.applyTo(RootPilotConfig(task = when {
+                editMode == "CURSOR" -> PLAIN_CURSOR_TASK
+                editMode == "SELECTION" -> PLAIN_SELECTION_TASK
                 composite -> COMPOSITE_TASK
                 unicode -> UNICODE_TASK
                 singleStep -> SINGLE_STEP_TASK
@@ -281,6 +308,17 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                     if (approvals == 0) {
                         gate(action is RootPilotAction.OpenApp && action.packageName == PACKAGE && call().isEmpty,
                             "bootstrap_scope")
+                        if (editMode != null && !seedPreparationAttempted) {
+                            seedPreparationAttempted = true
+                            val receipt = context.contentResolver.call(uri,
+                                if (editMode == "CURSOR") "virtual_prepare_cursor" else "virtual_prepare_selection", null,
+                                Bundle().apply { putInt("displayId", session.displayId); putString("sessionId", session.sessionId) })
+                                ?: fail("seed_preparation_unavailable")
+                            gate(receipt.getBoolean("prepared") && receipt.getInt("displayId", -1) == session.displayId &&
+                                receipt.getString("sessionId") == session.sessionId, "seed_preparation_identity")
+                            validateDisplay(session)
+                            evidence.putBoolean("seedPreparedBeforeOpen", true)
+                        }
                     } else {
                         if (!captureReceiptReady(state)) { delay(25); continue }
                         checkFrame(state)
@@ -288,7 +326,7 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                         verifyPrefix(fixture, approvals)
                         if (action is RootPilotAction.Swipe) verifySwipe(action, fixture)
                         if (unicode && action is RootPilotAction.Type) {
-                            gate(action.text == UNICODE_SAMPLE &&
+                            gate(action.text == inputSample &&
                                 fixture.getBoolean("editorFocused"), "unicode_action_scope")
                         }
                         gate(mainIdentity() == mainBaseline, "main_activity_changed")
@@ -329,6 +367,18 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                 ?: fail("final_receipt_unavailable")
             gate(instance != null && receipt.getString("instance") == instance && owned != null &&
                 receipt.getInt("displayId", -1) == owned!!.displayId, "final_receipt_identity")
+            // The retained receipt is the decisive quantity of the gates below: record its fields so a
+            // mismatch reads as "receipt says X" instead of a bare code (a stale fixture build once
+            // looked identical to a production defect here).
+            evidence.putString("retainedReceiptMode", receipt.getString("preparedInputMode"))
+            evidence.putInt("retainedReceiptSelectionStart", receipt.getInt("selectionStart", -1))
+            evidence.putInt("retainedReceiptSelectionEnd", receipt.getInt("selectionEnd", -1))
+            evidence.putBoolean("retainedReceiptCursorSampleMatches", receipt.getBoolean("cursorSampleMatches"))
+            evidence.putBoolean("retainedReceiptSelectionSampleMatches", receipt.getBoolean("selectionSampleMatches"))
+            evidence.putBoolean("retainedReceiptCursorSeedMatches", receipt.getBoolean("cursorSeedMatches"))
+            evidence.putBoolean("retainedReceiptSelectionSeedMatches", receipt.getBoolean("selectionSeedMatches"))
+            evidence.putBoolean("retainedReceiptEmpty", receipt.getBoolean("empty"))
+            evidence.putBoolean("retainedReceiptTyped", approvals >= 2)
             verifyPrefix(receipt, approvals)
             evidence.putBoolean("finalReceiptsObserved", true)
             evidence.putString("finalReceiptSource", "instance_bound_retained_fixture_counters")
@@ -344,7 +394,7 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                     readOnly -> message.contains("VirtualCapabilityActivity")
                     composite -> state.errorMessage.orEmpty().contains(UNICODE_SAMPLE) &&
                         message.contains("BACK=1") && message.contains("ENTER=1/1")
-                    unicode -> state.errorMessage.orEmpty().contains(UNICODE_SAMPLE)
+                    unicode -> state.errorMessage.orEmpty().contains(expectedInput)
                     else -> message.contains("BACK=1") && message.contains("ENTER=1/1")
                 },
                     "model_receipts_not_reported")
@@ -464,10 +514,23 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
 
         private fun verifyPrefix(fixture: Bundle, next: Int) {
             if (unicode && !composite) {
-                gate((if (next >= 2) fixture.getBoolean("unicodeMatches") else fixture.getBoolean("empty")) &&
+                val typed = next >= 2
+                val matches = when (editMode) {
+                    "CURSOR" -> fixture.getBoolean(if (typed) "cursorSampleMatches" else "cursorSeedMatches")
+                    "SELECTION" -> fixture.getBoolean(if (typed) "selectionSampleMatches" else "selectionSeedMatches")
+                    else -> fixture.getBoolean(if (typed) "unicodeMatches" else "empty")
+                }
+                if (editMode != null) {
+                    val caret = if (typed) 1 + inputSample.length else 1
+                    gate(fixture.getString("preparedInputMode") == editMode && fixture.getInt("selectionStart", -1) == caret &&
+                        fixture.getInt("selectionEnd", -1) == if (typed) caret else if (editMode == "SELECTION") 2 else 1,
+                        "plain_edit_caret_or_seed")
+                    evidence.putBoolean(if (typed) "plainTextAndCaretObserved" else "zeroPlainTextInput", true)
+                }
+                gate(matches &&
                     fixture.getInt("scrollY", -1) == 0 && fixture.getInt("backInvoked", -1) == 0 &&
                     fixture.getInt("enterDown", -1) == 0 && fixture.getInt("enterUp", -1) == 0, "unicode_fixture_prefix")
-                evidence.putBoolean(if (next >= 2) "unicodeMatches" else "zeroUnicodeInput", true)
+                if (editMode == null) evidence.putBoolean(if (typed) "unicodeMatches" else "zeroUnicodeInput", true)
                 return
             }
             val unicodeComplete = composite && next == order.size
@@ -589,6 +652,15 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
                             record()?.events?.lastOrNull()?.event != TraceEvent.RUN_END) delay(25)
                     }
                     settled = true
+                    if (seedPreparationAttempted && owned != null) {
+                        val session = owned!!
+                        val receipt = context.contentResolver.call(uri, "virtual_clear_prepared_input", null,
+                            Bundle().apply { putInt("displayId", session.displayId); putString("sessionId", session.sessionId) })
+                            ?: fail("seed_cleanup_unavailable")
+                        gate(!receipt.getBoolean("prepared") && receipt.getInt("displayId", -1) == session.displayId &&
+                            receipt.getString("sessionId") == session.sessionId, "seed_cleanup_identity")
+                        evidence.putBoolean("preparedSeedCleared", true)
+                    }
                     gate(call().isEmpty && noRecovery(), "fixture_or_recovery_remaining")
                     evidence.putBoolean("fixtureGone", true)
                     evidence.putBoolean("runEnd", true)
@@ -710,6 +782,7 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
             evidence.putBoolean("requiresStack", requireStack)
             evidence.putBoolean("readOnly", readOnly)
             evidence.putBoolean("unicode", unicode)
+            evidence.putString("plainEditMode", editMode ?: "none")
             evidence.putBoolean("singleStep", singleStep)
             evidence.putBoolean("composite", composite)
             evidence.putInt("approvals", approvals)
@@ -735,6 +808,8 @@ class VirtualDisplayCapabilityServiceInstrumentedTest {
         const val PACKAGE = "com.example.rootpilot.fixture"
         const val ACTIVITY = "$PACKAGE.VirtualCapabilityActivity"
         const val UNICODE_SAMPLE = "中文🙂\n第二行"
+        const val PLAIN_CURSOR_TASK = "只验收本次独立副屏的签名固定测试页，不读取主屏。普通输入框已聚焦，完整旧文是甲乙，光标位于甲和乙之间。仅执行一次 type，text精确为🙂，不可再次输入，不点击、滑动、按键、再次打开应用、等待或创建待办。输入后必须调用get_ui_tree确认完整结果甲🙂乙，再finish success=true并在message中原样报告甲🙂乙。"
+        const val PLAIN_SELECTION_TASK = "只验收本次独立副屏的签名固定测试页，不读取主屏。普通输入框已聚焦，完整旧文是甲乙丙，只有乙被选中。仅执行一次type，内容为中文🙂、一个换行、第二行；text精确为中文🙂\n第二行，不添加空格或其他字符。不重复输入，不点击、滑动、按键、再次打开应用、等待或创建待办。输入后必须调用get_ui_tree确认完整结果甲中文🙂\n第二行丙，再finish success=true并在message中报告这个完整结果，保留真实换行。"
         const val UNICODE_TASK = "只操作本次独立副屏中的签名固定测试页，不读取主屏。当前普通输入框已聚焦且为空。只执行一次 type，内容为中文🙂，接一个换行，再接第二行。完整内容必须精确为 中文🙂\n第二行，不添加空格或其他字符。不要点击、滑动、按键、再次启动应用、等待或创建待办，不重复输入。输入后必须调用 get_ui_tree 核对输入框中的完整文字，再 finish success=true，并在 message 中报告完整输入内容。"
         const val COMPOSITE_TASK = "只操作本次独立副屏中的签名固定测试页，不读取主屏。先用 get_activity_stack 核对当前 Activity，再用 get_ui_tree 读取本页；每次模型响应只调用一个工具，参数必须是空对象 {}。然后依次执行一次向上滑动、一次 BACK、一次 ENTER、一次 type，每个动作仅一次，不重复。滑动仅在固定行列表可见区域内，从下半部到上半部，不触碰顶部固定计数栏和输入框。BACK 仅更新测试计数，ENTER 仅更新按下与抬起计数，不导航、不编辑。type 只能填写顶部已聚焦空普通文本框，完整内容为 中文🙂\n第二行，必须保留一个真实换行，不添加其他字符。输入后调用一次 get_ui_tree，核对完整两行文本及 BACK=1 ENTER=1/1，再 finish success=true，message 同时报告完整输入内容和这两项计数。禁止点击、HOME、等待、再次启动、创建待办或其他输入，不查询其他屏幕。"
         const val SINGLE_STEP_TASK = "只操作本次独立副屏中的签名固定测试页。只规划一次向上滑动，位于固定测试行列表中央，从页面下半部到上半部，依据当前截图，不触碰上方计数栏和输入框。不调用任何信息工具，不点击、不输入、不按键、不等待、不再次启动、不创建待办。不要返回 finish，直接返回这一次 swipe 动作。"

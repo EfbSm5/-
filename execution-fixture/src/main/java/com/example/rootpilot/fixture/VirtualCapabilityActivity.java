@@ -9,7 +9,9 @@ import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -28,8 +30,19 @@ public final class VirtualCapabilityActivity extends Activity {
     private EditText editor;
     private boolean resumed;
     private int backInvoked, enterDown, enterUp;
+    private int probeFrameTick;
+    private String preparedInputMode;
     private TextView receipt;
     private TextView firstRow;
+    private boolean receiptReady;
+    private final class ReceiptEditText extends EditText {
+        ReceiptEditText(Activity context) { super(context); }
+        @Override protected void onSelectionChanged(int start, int end) {
+            super.onSelectionChanged(start, end);
+            // SET_SELECTION does not touch the text watcher, so the retained receipt follows the caret here.
+            if (receiptReady) recordReceipt();
+        }
+    }
     private final OnBackInvokedCallback backCallback = () -> { backInvoked++; renderReceipt(); };
 
     @Override public void onCreate(Bundle saved) {
@@ -48,7 +61,7 @@ public final class VirtualCapabilityActivity extends Activity {
         title.setTextColor(Color.BLACK);
         title.setTextSize(22);
         content.addView(title);
-        editor = new EditText(this);
+        editor = new ReceiptEditText(this);
         editor.setId(android.R.id.edit);
         editor.setHint("");
         editor.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
@@ -83,8 +96,21 @@ public final class VirtualCapabilityActivity extends Activity {
         page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(page);
         scroll.setOnScrollChangeListener((view, x, y, oldX, oldY) -> recordReceipt());
+        preparedInputMode = PreparedVirtualInput.consume(getDisplay());
+        if ("CURSOR".equals(preparedInputMode)) {
+            editor.setText("甲乙");
+            editor.setSelection(1);
+        } else if ("SELECTION".equals(preparedInputMode)) {
+            editor.setText("甲乙丙");
+            editor.setSelection(1, 2);
+        }
         editor.requestFocus();
         getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
+        // The seed text and selection above happen before the guard opens, so the receipt
+        // captured by the text watcher still shows the transient (0,0) selection. Record once
+        // more so the retained receipt describes the settled seeded state.
+        receiptReady = true;
+        recordReceipt();
     }
 
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
@@ -102,7 +128,8 @@ public final class VirtualCapabilityActivity extends Activity {
     }
 
     private void renderReceipt() {
-        receipt.setText("BACK=" + backInvoked + " ENTER=" + enterDown + "/" + enterUp);
+        receipt.setText("BACK=" + backInvoked + " ENTER=" + enterDown + "/" + enterUp
+                + (probeFrameTick == 0 ? "" : " FRAME=" + probeFrameTick));
         recordReceipt();
     }
 
@@ -113,7 +140,16 @@ public final class VirtualCapabilityActivity extends Activity {
         result.putInt("displayId", getDisplay() == null ? -1 : getDisplay().getDisplayId());
         result.putInt("scrollY", scroll.getScrollY());
         result.putBoolean("empty", editor.getText().length() == 0);
+        result.putBoolean("asciiMatches", "RootPilot42".contentEquals(editor.getText()));
         result.putBoolean("unicodeMatches", UNICODE_SAMPLE.contentEquals(editor.getText()));
+        result.putBoolean("cursorSampleMatches", "甲🙂乙".contentEquals(editor.getText()));
+        result.putBoolean("selectionSampleMatches", ("甲" + UNICODE_SAMPLE + "丙").contentEquals(editor.getText()));
+        result.putBoolean("cursorSeedMatches", "甲乙".contentEquals(editor.getText()));
+        result.putBoolean("changedCursorSeedMatches", "甲丁".contentEquals(editor.getText()));
+        result.putBoolean("selectionSeedMatches", "甲乙丙".contentEquals(editor.getText()));
+        result.putInt("selectionStart", editor.getSelectionStart());
+        result.putInt("selectionEnd", editor.getSelectionEnd());
+        result.putString("preparedInputMode", preparedInputMode);
         result.putInt("backInvoked", backInvoked);
         result.putInt("enterDown", enterDown);
         result.putInt("enterUp", enterUp);
@@ -137,7 +173,22 @@ public final class VirtualCapabilityActivity extends Activity {
         result.putBoolean("empty", editor.getText().length() == 0);
         result.putBoolean("asciiMatches", "RootPilot42".contentEquals(editor.getText()));
         result.putBoolean("unicodeMatches", UNICODE_SAMPLE.contentEquals(editor.getText()));
+        result.putBoolean("cursorSampleMatches", "甲🙂乙".contentEquals(editor.getText()));
+        result.putBoolean("selectionSampleMatches", ("甲" + UNICODE_SAMPLE + "丙").contentEquals(editor.getText()));
+        result.putBoolean("cursorSeedMatches", "甲乙".contentEquals(editor.getText()));
+        result.putBoolean("changedCursorSeedMatches", "甲丁".contentEquals(editor.getText()));
+        result.putBoolean("selectionSeedMatches", "甲乙丙".contentEquals(editor.getText()));
+        result.putInt("selectionStart", editor.getSelectionStart());
+        result.putInt("selectionEnd", editor.getSelectionEnd());
+        result.putInt("viewWidth", getWindow().getDecorView().getWidth());
+        result.putInt("viewHeight", getWindow().getDecorView().getHeight());
+        result.putInt("rotation", getDisplay() == null ? -1 : getDisplay().getRotation());
+        result.putInt("probeFrameTick", probeFrameTick);
         result.putBoolean("editorFocused", editor.isFocused());
+        result.putString("preparedInputMode", preparedInputMode);
+        WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
+        result.putBoolean("imeInsetsAvailable", insets != null);
+        if (insets != null) result.putBoolean("imeInsetsVisible", insets.isVisible(WindowInsets.Type.ime()));
         result.putInt("backInvoked", backInvoked);
         result.putInt("enterDown", enterDown); result.putInt("enterUp", enterUp);
         Rect bounds = new Rect();
@@ -156,6 +207,51 @@ public final class VirtualCapabilityActivity extends Activity {
                 result.putInt("rowsBottom", bounds.bottom);
             }
         }
+        return result;
+    }
+
+    Bundle probe(String command, String expectedInstance, int expectedDisplay) {
+        if (!instance.equals(expectedInstance) || expectedDisplay <= 0 || getDisplay() == null
+                || getDisplay().getDisplayId() != expectedDisplay || !resumed || !hasWindowFocus()
+                || !editor.isShown() || !editor.isFocused()) {
+            throw new IllegalStateException("virtual_probe_target_unavailable");
+        }
+        if ("virtual_redraw".equals(command)) {
+            if (probeFrameTick >= 3) throw new IllegalStateException("virtual_probe_redraw_budget");
+            probeFrameTick++;
+            renderReceipt();
+            return state();
+        }
+        if ("virtual_change_cursor_source".equals(command)) {
+            if (!"甲乙".contentEquals(editor.getText()) || editor.getSelectionStart() != 1 || editor.getSelectionEnd() != 1) {
+                throw new IllegalStateException("virtual_probe_source_changed");
+            }
+            editor.setText("甲丁");
+            editor.setSelection(1);
+            return state();
+        }
+        if ("virtual_seed_cursor".equals(command) || "virtual_seed_selection".equals(command)) {
+            if (editor.getText().length() != 0) throw new IllegalStateException("virtual_probe_editor_not_empty");
+            if ("virtual_seed_cursor".equals(command)) {
+                editor.setText("甲乙");
+                editor.setSelection(1);
+            } else {
+                editor.setText("甲乙丙");
+                editor.setSelection(1, 2);
+            }
+            return state();
+        }
+        InputMethodManager manager = getSystemService(InputMethodManager.class);
+        Bundle result = new Bundle();
+        if ("virtual_show_keyboard".equals(command)) {
+            result.putBoolean("requestAccepted", manager.showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT));
+        } else if ("virtual_hide_keyboard".equals(command)) {
+            result.putBoolean("requestAccepted", manager.hideSoftInputFromWindow(editor.getWindowToken(), 0));
+        } else {
+            throw new IllegalArgumentException("virtual_probe_command_not_allowed");
+        }
+        result.putString("instance", instance);
+        result.putInt("displayId", getDisplay().getDisplayId());
         return result;
     }
 }

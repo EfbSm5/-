@@ -6,6 +6,8 @@ import com.example.agent.rootpilot.screen.ScreenObservation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -21,11 +23,15 @@ class VirtualDisplayTextInputPolicyTest {
         var queries = 0
         var targetReads = 0
         var submissions = 0
+        var selections = 0
+        var submittedText: String? = null
+        var submittedCaret: Int? = null
         var accepted = true
         var failRestoreAt = 0
         var targetDelay = 0L
         var afterTarget: () -> Unit = {}
         var afterSubmit: () -> Unit = {}
+        var selectionAccepted = true
         override fun connection(): Any? = connection.takeIf { connected }
         override fun connected(connection: Any) = connected && connection === this.connection
         override suspend fun <T> query(connection: Any, collect: suspend () -> T): T {
@@ -48,12 +54,22 @@ class VirtualDisplayTextInputPolicyTest {
             afterTarget()
             return result
         }
-        override suspend fun setText(target: VirtualTextTarget, text: String, stillBound: () -> Boolean): Boolean {
+        override suspend fun setText(target: VirtualTextTarget, text: String, plan: VirtualTextEditPlan?,
+            stillBound: () -> Boolean, validateBinding: suspend () -> Boolean): Boolean {
             assertTrue(querying)
             assertEquals(SAMPLE, text)
             if (!stillBound()) return false
             submissions++
+            submittedText = plan?.replacement ?: text
             afterSubmit()
+            if (plan != null) {
+                currentCoroutineContext().ensureActive()
+                if (!accepted || !validateBinding() || !stillBound()) return false
+                currentCoroutineContext().ensureActive()
+                selections++
+                submittedCaret = plan.caret
+                if (!selectionAccepted) return false
+            }
             return accepted
         }
     }
@@ -136,10 +152,116 @@ class VirtualDisplayTextInputPolicyTest {
         }
     }
 
+    @Test fun hintShownEditorIsNeverReadAsSourceText() = runBlocking {
+        for (editor in listOf(EDITOR.copy(hintShown = true), NONEMPTY.copy(hintShown = true))) {
+            val access = Access().apply { this.editor = editor }
+            assertTrue(execute(access, confirm = { fail("unexpected_approval"); true }) is RootExecutionResult.Failure)
+            assertEquals(0, access.submissions)
+            assertEquals(1, access.queries)
+        }
+    }
+
     @Test fun nonemptyEditorAfterApprovalIsNotOverwritten() = runBlocking {
         val access = Access()
         assertTrue(execute(access, confirm = { access.editor = EDITOR.copy(empty = false); true }) is RootExecutionResult.Failure)
         assertEquals(0, access.submissions)
+    }
+
+    @Test fun nonemptyCaretInsertsOnceAndRestoresResultCaretAfterUnlockedApproval() = runBlocking {
+        val access = Access().apply { editor = NONEMPTY.copy(sourceText = "甲乙", selectionStart = 1, selectionEnd = 1) }
+        var approvals = 0
+        assertTrue(execute(access, confirm = { assertFalse(access.querying); approvals++; true }) is RootExecutionResult.Success)
+        assertEquals(1, approvals)
+        assertEquals(1, access.submissions)
+        assertEquals(1, access.selections)
+        assertEquals("甲${SAMPLE}乙", access.submittedText)
+        assertEquals(1 + SAMPLE.length, access.submittedCaret)
+    }
+
+    @Test fun nonemptySelectionReplacesOnlySelectedSource() = runBlocking {
+        val access = Access().apply { editor = NONEMPTY }
+        assertTrue(execute(access) is RootExecutionResult.Success)
+        assertEquals("甲${SAMPLE}丙", access.submittedText)
+        assertEquals(1 + SAMPLE.length, access.submittedCaret)
+        assertEquals(1, access.submissions)
+        assertEquals(1, access.selections)
+    }
+
+    @Test fun nonemptyUnknownAndOversizedSourcesNeverConfirm() = runBlocking {
+        for (editor in listOf(NONEMPTY.copy(sourceText = null), NONEMPTY.copy(sourceText = ""),
+            NONEMPTY.copy(sourceText = "a".repeat(129)), NONEMPTY.copy(setSelectionSupported = false))) {
+            val access = Access().apply { this.editor = editor }
+            val result = execute(access, confirm = { fail("unexpected_approval"); true }) as RootExecutionResult.Failure
+            assertTrue(result.message.contains("目标不可用"))
+            assertEquals(0, access.submissions)
+            assertEquals(0, access.selections)
+        }
+    }
+
+    @Test fun nonemptyMalformedSourceOrSelectionReportsRuleMismatchNotDrift() = runBlocking {
+        for (editor in listOf(NONEMPTY.copy(sourceText = "a".repeat(128), selectionStart = 0, selectionEnd = 0),
+            NONEMPTY.copy(selectionStart = -1), NONEMPTY.copy(selectionEnd = 4),
+            NONEMPTY.copy(sourceText = "甲🙂乙", selectionStart = 2, selectionEnd = 2),
+            NONEMPTY.copy(sourceText = "\uD83D"), NONEMPTY.copy(sourceText = "甲\u0000乙"))) {
+            val access = Access().apply { this.editor = editor }
+            val result = execute(access, confirm = { fail("unexpected_approval"); true }) as RootExecutionResult.Failure
+            assertTrue(result.message.contains("符合规则"))
+            assertFalse(result.message.contains("目标不可用"))
+            assertEquals(0, access.submissions)
+            assertEquals(0, access.selections)
+        }
+    }
+
+    @Test fun confirmedNonemptySourceOrSelectionChangesNeverOverwrite() = runBlocking {
+        for (fresh in listOf(NONEMPTY.copy(sourceText = "甲丁丙"), NONEMPTY.copy(selectionStart = 0),
+            NONEMPTY.copy(selectionEnd = 3), NONEMPTY.copy(empty = true, sourceText = ""),
+            NONEMPTY.copy(sourceText = null), NONEMPTY.copy(nodeIdentity = Any()), NONEMPTY.copy(rootIdentity = Any()))) {
+            val access = Access().apply { editor = NONEMPTY }
+            assertTrue(execute(access, confirm = { access.editor = fresh; true }) is RootExecutionResult.Failure)
+            assertEquals(0, access.submissions)
+            assertEquals(0, access.selections)
+        }
+    }
+
+    @Test fun nonemptySourceChangesDuringFreshReadRejectBeforeSubmission() = runBlocking {
+        val access = Access().apply {
+            editor = NONEMPTY
+            afterTarget = { if (targetReads == 1) editor = NONEMPTY.copy(sourceText = "甲丁丙") }
+        }
+        assertTrue(execute(access) is RootExecutionResult.Failure)
+        assertEquals(0, access.submissions)
+    }
+
+    @Test fun nonemptyBindingChangesAfterTextNeverReceiveSelectionOrReplay() = runBlocking {
+        for (change in listOf<(Access) -> Unit>({ it.valid = false }, { it.current = false },
+            { it.connected = false }, { it.screen = SCREEN.copy(focusedWindowId = "changed") })) {
+            val access = Access().apply { editor = NONEMPTY; afterSubmit = { change(this) } }
+            val result = execute(access) as RootExecutionResult.Failure
+            assertTrue(result.message.contains("可能已生效"))
+            assertEquals(1, access.submissions)
+            assertEquals(0, access.selections)
+        }
+    }
+
+    @Test fun nonemptySelectionFailureReportsPossibleEffectAndDoesNotReplay() = runBlocking {
+        val access = Access().apply { editor = NONEMPTY; selectionAccepted = false }
+        val result = execute(access) as RootExecutionResult.Failure
+        assertTrue(result.message.contains("可能已生效"))
+        assertEquals(1, access.submissions)
+        assertEquals(1, access.selections)
+    }
+
+    @Test fun nonemptyCancellationAfterTextDoesNotSendSelection() = runBlocking {
+        val access = Access().apply { editor = NONEMPTY }
+        val policy = VirtualDisplayTextInputPolicy(OWN, access)
+        access.afterSubmit = { policy.cancel() }
+        var cancelled = false
+        try { policy.type(SAMPLE, SESSION, { true }, { true }, { SCREEN }) { true } }
+        catch (_: CancellationException) { cancelled = true }
+        assertTrue(cancelled)
+        assertEquals(1, access.submissions)
+        assertEquals(0, access.selections)
+        assertFalse(access.querying)
     }
 
     @Test fun sessionReplacementAfterApprovalRejects() = runBlocking {
@@ -242,5 +364,7 @@ class VirtualDisplayTextInputPolicyTest {
         val ANCESTOR = VirtualTextAncestor(PACKAGE, 9, false, false)
         val EDITOR = VirtualTextTarget(Any(), Any(), PACKAGE, 9, true, true, true, true, true, true,
             true, listOf(ANCESTOR), true)
+        val NONEMPTY = EDITOR.copy(empty = false, sourceText = "甲乙丙", selectionStart = 1, selectionEnd = 2,
+            setSelectionSupported = true)
     }
 }
