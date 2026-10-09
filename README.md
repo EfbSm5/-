@@ -146,9 +146,30 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 副屏信息工具提供屏幕上下文、当前前台任务的 `get_activity_stack` 和可选 `get_ui_tree`。Activity 栈只解析拥有显示的独立区段，不包含主屏、其他任务、全局等待队列或 Intent extras；控件树只从该显示上的唯一焦点应用窗口采集。两者均绑定显示／会话／窗口，失效返回 unavailable，不借用主屏结果。沿用主屏的脱敏与容量限制，节点位置是该副屏的物理像素。既有应用页面可能迁入副屏，不是应用实例、账号或数据隔离。结束会关闭副屏页面；释放未确认时保留恢复记录并禁止新任务，不自动回退主屏。恢复只保留执行模式和起始应用，不复用旧副屏，也不恢复截图上传同意。
 
-副屏 `type` 依赖已启用的页面结构服务，只向已聚焦、可见、启用且文本明确为空的普通文本框整段填写，最多 128 个 UTF-16 单元，支持中文、emoji、换行。它不切换输入法，也不提供主屏 `commitText` 的光标插入语义；非空、null／未知文本、非空提示造成的歧义、密码／敏感节点、未知祖先或服务／会话／目标变化均拒绝，不自动清空、替换或重试。确认前释放查询锁并恢复读取标志，确认后重新绑定同一节点及窗口；提交后仍需观察实际结果。该限定行为已通过专用页真实 Service／模型完成和输入待确认停止，不代表所有 App 编辑框兼容。
+副屏 `type` 依赖已启用的页面结构服务，只处理已聚焦、可见、启用且文本可确定的普通文本框，单次最多 128 个 UTF-16 单元，支持中文、emoji、换行。空框整段填写已验收；非空编辑也已接入生产 Type：仅在旧文与选区完整明确时按一次 `SET_TEXT` 重建纯文本、至多一次 `SET_SELECTION` 恢复最终光标，不切换输入法，也不提供主屏 `commitText` 的逐字插入语义。`null`／未知文本、非空提示造成的歧义、超限旧文（超过 128 个 UTF-16 单元视为不可绑定目标）、密码／敏感节点、未知祖先或服务／会话／目标变化均拒绝，不自动清空、替换或重试。确认前释放查询锁并恢复读取标志，确认后重新绑定同一节点及窗口；提交后仍需观察实际结果。空框版本已通过专用页真实 Service／模型完成和输入待确认停止；非空版本已完成独立复审（FAIL 低，无高／中缺陷）与四项离线＋三项真实 Service 真机验收（7/7 限定 PASS），仍不代表富文本、IME composing、撤销栈或所有 App 编辑框兼容。
 
 副屏树查询期间，本服务临时开启包含布局节点的读取标志；本服务的主、副屏树查询串行执行，结束或取消时恢复原标志。恢复无法确认时，当前服务实例拒绝后续树读取，不把扩展配置带入主屏查询；需要服务重新连接。不启用 `isAccessibilityTool`，不改变其他无障碍服务或敏感文字过滤。
+
+#### 剩余能力探针（小米限定真机验收，默认关闭）
+
+`VirtualDisplayParityInstrumentedTest` 使用测试 APK 内的独立 Root helper，不修改产品副屏配置或生产动作白名单，不调用模型、不导出屏幕像素。当前探针仅接受物理 device 0／系统 user 0 的已解锁、可交互环境，其他或未知用户／设备上下文拒绝；每项只创建自己的 `rootpilot-parity-<UUID>` 显示，拒绝主屏回退、已有任务／恢复记录、锁屏／息屏及非 RootPilot 主屏前台。结束核对显示释放、helper 退出、固定测试页消失，以及主屏 Activity／旋转、输入法、配置和本服务实例／读取标志不变。
+
+| 单独运行的方法 | 必须显式开启的参数 |
+| --- | --- |
+| `homeWithSystemDecorationsTargetsOnlyOwnedDisplay` | `virtualParityHomeProbe=true` |
+| `localKeyboardAppearsWithoutChangingDefaultIme` | `virtualParityImeProbe=true` |
+| `displayResizesAndRendersInBothGeometries` | `virtualParityResizeProbe=true` |
+| `displayRotatesWithoutChangingMainRotation` | `virtualParityRotationProbe=true` |
+| `repeatedCapturesKeepTheSameOwnedPageAndSession` | `virtualParityRetainedCaptureProbe=true` |
+| `insertsAtKnownNonemptyCaretAndReadsBackContentAndSelection` | `virtualParityCursorProbe=true` |
+| `replacesOnlyKnownSelectionAndReadsBackContentAndSelection` | `virtualParitySelectionProbe=true` |
+| `cancellationBeforeNonemptySubmitRestoresFlagsAndLeavesSeedUntouched` | `virtualParityCancelledInputProbe=true` |
+
+键盘及三个输入探针需要已正常启用的 RootPilot 页面结构服务；输入只向签名固定页的已绑定实例提交固定样本。探针经 Debug 源集 typealias 复用生产 `input.VirtualTextEditPlan` 检查完整旧文／选区、128 UTF-16 总量、Unicode 边界和结果光标；这是整框 SET_TEXT＋SET_SELECTION 的写入方案，不等同 IME 的 composing／Span／撤销栈语义；该路径已接入生产 Type，非空编辑的独立复审与真机验收已完成（7/7 限定 PASS，见上文副屏 `type` 说明），但探针本身仍只证明所列测试条件下的平台可行。文字或选区变化不自动覆盖，动作失败或取消不重放。键盘探针使用严格绑定拥有显示／会话的 IME 窗口元数据区分可见、隐藏、未知；隐藏还可由前后两次自有固定页 Insets 明确不可见且窗口列表可用、为空共同确认，未知不计通过。不读取键盘文本或在 LOCAL IME 模式采集 PNG，不切换全局输入法，不放宽生产观察器的隐藏键盘守卫。
+
+所有入口必须按单个方法运行，使用 `--no-restart`；不要给整类批量开启参数。小米 15 的八项探针已取得限定真机 PASS，具体版本、失败对照与证据见 `SPEC.md`。HOME 通过条件是带系统装饰的测试显示；键盘通过入口需额外传入 `virtualParityImeTiming=before_open`，在启动固定页前选择 LOCAL。默认启动后切 LOCAL 的路径仍未观察到键盘，不自动重试或把失败改判为通过；其他 timing 值拒绝。
+
+这些结果仅证明对应测试条件下平台可行，不是生产能力已开放。重复截图只证明探针显式保留同一会话，不代表产品已支持任务外截图或跨单步页面保留；PNG 元数据不证明画面内容／布局正确。HOME、LOCAL 键盘、横竖尺寸／旋转尚未接入产品；非空输入已接入生产 Type 且已完成独立复审与真机验收（7/7 限定 PASS），但仍受上述语义与兼容范围限制。真实模型组合、主屏并行输入、执行中／提交后死亡与更多 App 仍待验收。验收需实体解锁，投屏亮着不代表未锁；授权的充电保屏与长息屏超时不会关闭锁屏认证，也不能阻止手动或系统主动锁定。
 
 `VirtualDisplayCapabilityInstrumentedTest` 在签名专用 `VirtualCapabilityActivity` 上离线验证，不用真实模型或 UiAutomation。`platformDeliversSwipeKeysAndAsciiWithHiddenIme`（`virtualCapabilityPlatformProbe=true`）是显示定向平台探针；`productionLoopConfirmsSwipeBackAndEnterWithoutNetwork`（`virtualCapabilityLoopAcceptance=true`）核对四次确认／执行及未确认 Type／HOME 拒绝。新入口 `productionLoopReadsOnlyOwnedActivityStackWithoutNetwork`（`virtualActivityStackAcceptance=true`）验证拥有栈及错屏／错会话拒绝；`twoIndependentSingleStepsUseFreshOwnedSessionsWithoutNetwork`（`virtualSingleStepLoopAcceptance=true`）核对两轮各一个规划动作、独立创建／关闭；`productionLoopTypesFixedUnicodeAndObservesCompletionWithoutNetwork`（`virtualUnicodeLoopAcceptance=true`）验证真实产品 Type、后帧树回读、非空及释放后的拒绝。另有 `platformSetsFixedUnicodeInEmptyOwnedEditorWithoutImeChange`（`virtualUnicodePlatformProbe=true`）和 `platformHomeTargetsOwnedDisplayWithoutChangingMain`（`virtualHomePlatformProbe=true`），不等同产品支持。所有开关默认关闭，按方法单独执行，使用 `--no-restart`；均核验环境和释放后主屏身份。首次后台访问可能未就绪，显式启动固定页后用 `closesOnlyExplicitlyLaunchedMainDisplayFixtureWithoutNetwork`（`closeExplicitVirtualFixture=true`）收尾，再打开 RootPilot；不添加生产等待或重试。限定结果见 `SPEC.md`。
 
@@ -156,7 +177,7 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 `VirtualDisplayCapabilityServiceInstrumentedTest` 使用真实 Service、已保存的 DeepSeek 配置和实际悬浮窗监听器。单独运行 `realServiceConfirmsSwipeBackEnterAndObservesReceipts`（`liveVirtualCapabilityServiceAcceptance=true`），仅批准签名专用页的一次启动、向上滑动、BACK 和 ENTER；要求固定计数、本次执行回执、结果树进入后续请求及模型成功结束。停止用例单独运行 `realServiceStopsBeforeRequestedCapability`（`virtualCapabilityServiceStopAcceptance=true`），另传 `stopAction=SWIPE`、`BACK` 或 `ENTER`，仅依据固定副屏截图规划，在对应动作待确认时点击实际停止监听器，核对之后零执行。两个开关默认关闭，均会联网，必须先取得固定副屏画面／控件树上传授权并使用 `--no-restart`，不向整类开启 live 开关。测试临时选择专用页为唯一允许应用，退出与副屏释放确认后恢复原配置及启动列表字节，核对 API 密文、主屏 Activity、IME 和无障碍服务实例／标志不变。最终效果回读使用实例／显示绑定的固定计数保留回执，不把释放后的回执当成新鲜页面观察；新建实例会清空旧回执。fixture 的 Launcher 声明仍受签名权限保护，只用于既有生产应用目录发现；不在生产目录中增加特判。脚本确认不代表真人触摸；固定 BACK 回调不代表应用导航、主屏身份不变不代表主屏并行输入通过。
 
-该类另有独立入口：`realServiceReadsOwnedActivityStackWithoutInputAndFinishes`（`liveVirtualStackReadOnlyAcceptance=true`）只允许一次 stack 查询及 Finish；`realServiceReadsOwnedActivityStackAndCompletesCapabilities`（`liveVirtualStackServiceAcceptance=true`）为 stack＋滑动／按键组合，不能用前者替代。`realServiceSingleStepClosesAfterOnePlanningAction`（`liveVirtualSingleStepServiceAcceptance=true`）核对一次规划动作后本地完成并释放；`realServiceTypesFixedUnicodeAndObservesCompletion`（`liveVirtualUnicodeServiceAcceptance=true`）核对一次固定 Type、输入后树查询及完整文本完成；`realServiceStopsAtUnicodeConfirmationWithoutInput`（`virtualUnicodeServiceStopAcceptance=true`）核对待确认停止、零输入及停止后零新执行。均默认关闭、单方法执行；联网入口沿用相同上传授权和收尾门槛。
+该类另有独立入口：`realServiceReadsOwnedActivityStackWithoutInputAndFinishes`（`liveVirtualStackReadOnlyAcceptance=true`）只允许一次 stack 查询及 Finish；`realServiceReadsOwnedActivityStackAndCompletesCapabilities`（`liveVirtualStackServiceAcceptance=true`）为 stack＋滑动／按键组合，不能用前者替代。`realServiceSingleStepClosesAfterOnePlanningAction`（`liveVirtualSingleStepServiceAcceptance=true`）核对一次规划动作后本地完成并释放；`realServiceTypesFixedUnicodeAndObservesCompletion`（`liveVirtualUnicodeServiceAcceptance=true`）核对一次固定 Type、输入后树查询及完整文本完成；`realServiceStopsAtUnicodeConfirmationWithoutInput`（`virtualUnicodeServiceStopAcceptance=true`）核对待确认停止、零输入及停止后零新执行。均默认关闭、单方法执行；联网入口沿用相同上传授权和收尾门槛。非空编辑另有三个入口：`realServiceInsertsAtKnownNonemptyCaretAndFinishes`（`liveVirtualPlainCursorServiceAcceptance=true`）、`realServiceReplacesKnownSelectionAndFinishes`（`liveVirtualPlainSelectionServiceAcceptance=true`）和 `realServiceStopsAtNonemptyInputConfirmation`（`virtualPlainServiceStopAcceptance=true`），分别核对非空光标插入、明确选区替换与 Type 待确认停止；它们与 `VirtualDisplayPlainTextInstrumentedTest` 的四项离线入口一并取得限定 PASS，结果回读使用实例／显示绑定的保留回执。
 
 综合入口 `realServiceCompletesCombinedStackSwipeKeysAndUnicode`（`liveVirtualCompositeServiceAcceptance=true`）限定同一新副屏完成 Open → stack／UI 树 → Swipe → BACK → ENTER → 一次 `中文🙂\n第二行` 输入 → 新帧／树 → 模型 Finish。编辑框固定在滚动区外，必须原本明确为空且已聚焦；五次确认前均核验本服务实例及读取 flags，逐动作／固定计数／完整文本和退出收尾不可用分项历史成功替代。当前综合真机取得限定 PASS，条件是实体解锁、临时全局息屏超时及不启用测试窗口保屏，详见 `SPEC.md`；不表示所有环境稳定。可选 `holdRootPilotScreen=true` 只设置本测试窗口的可恢复保屏标志，收到本次 `screenHoldReadyForActivity=true` 后才显式启动 RootPilot 新任务（`am start -W -f 0x18000000 -n com.example.agent/.rootpilot.RootPilotActivity`）；不解锁或改全局电源设置。保屏守卫失效时仅输出固定窗口存活／STARTED／可见／标志／未锁定布尔值并停止；投屏亮着或保屏标志存在不证明系统未锁定，其旧失败仍保留，不宣称已修复。
 
