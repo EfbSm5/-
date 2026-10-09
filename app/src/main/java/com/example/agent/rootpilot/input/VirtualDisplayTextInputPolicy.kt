@@ -14,7 +14,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 internal data class VirtualTextAncestor(val packageName: String?, val windowId: Int, val password: Boolean, val sensitive: Boolean)
 
-/** Opaque node identities and eligibility only; field contents are not copied into this snapshot. */
+/** Opaque identities with a bounded runtime-only source for nonempty plain-text edits. */
 internal data class VirtualTextTarget(
     val nodeIdentity: Any,
     val rootIdentity: Any,
@@ -29,9 +29,16 @@ internal data class VirtualTextTarget(
     val empty: Boolean?,
     val ancestors: List<VirtualTextAncestor>,
     val rootReached: Boolean,
+    val sourceText: String? = null,
+    val selectionStart: Int = -1,
+    val selectionEnd: Int = -1,
+    val setSelectionSupported: Boolean = false,
+    val hintShown: Boolean = false,
 ) {
     fun accepts(packageName: String): Boolean = this.packageName == packageName && windowId >= 0 &&
-        visible && enabled && editable && focused && ordinaryText && setTextSupported && empty == true &&
+        visible && enabled && editable && focused && ordinaryText && setTextSupported && !hintShown &&
+        (empty == true || empty == false && !sourceText.isNullOrEmpty() && sourceText.length <= InputText.MAX_LENGTH &&
+            setSelectionSupported) &&
         rootReached && ancestors.size in 1..33 && ancestors.all {
             it.packageName == packageName && it.windowId == windowId && !it.password && !it.sensitive
         }
@@ -48,7 +55,8 @@ internal interface VirtualTextInputAccess {
     fun connected(connection: Any): Boolean
     suspend fun <T> query(connection: Any, collect: suspend () -> T): T
     suspend fun target(connection: Any, session: DisplaySession, packageName: String): VirtualTextTarget?
-    suspend fun setText(target: VirtualTextTarget, text: String, stillBound: () -> Boolean): Boolean
+    suspend fun setText(target: VirtualTextTarget, text: String, plan: VirtualTextEditPlan?,
+        stillBound: () -> Boolean, validateBinding: suspend () -> Boolean): Boolean
 }
 
 internal class VirtualDisplayTextInputPolicy(
@@ -75,7 +83,8 @@ internal class VirtualDisplayTextInputPolicy(
         val operation = currentCoroutineContext().job
         synchronized(lock) { operations.add(operation) }
         var attempted = false
-        fun failed() = RootExecutionResult.Failure(if (attempted)
+        var rejected: String? = null
+        fun failed(reason: String? = null) = RootExecutionResult.Failure(reason ?: if (attempted)
             "副屏输入可能已生效，但提交或目标／服务状态未确认；请核对结果，勿直接重放"
             else "副屏输入目标不可用或已变化，未提交文本")
         try {
@@ -101,10 +110,19 @@ internal class VirtualDisplayTextInputPolicy(
                 val target = access.query(connection) {
                     access.target(connection, session, packageName)?.takeIf { it.accepts(packageName) }
                 } ?: return@withTimeoutOrNull null
+                val plan = if (target.empty == false) {
+                    val created = VirtualTextEditPlan.create(target.sourceText,
+                        target.selectionStart, target.selectionEnd, text)
+                    if (created == null) {
+                        rejected = "副屏输入旧文／选区或结果文本不符合规则，未提交文本"
+                        return@withTimeoutOrNull null
+                    }
+                    created
+                } else null
                 if (observation(expected) == null) return@withTimeoutOrNull null
-                expected to target
-            } ?: return@coroutineScope failed()
-            val (expected, original) = prepared
+                Triple(expected, target, plan)
+            } ?: return@coroutineScope failed(rejected)
+            val (expected, original, plan) = prepared
             currentCoroutineContext().ensureActive()
             if (!bound()) return@coroutineScope failed()
             // The query scope has restored its flags and released its mutex before approval.
@@ -116,15 +134,20 @@ internal class VirtualDisplayTextInputPolicy(
                     val packageName = requireNotNull(original.packageName)
                     val fresh = access.target(connection, session, packageName) ?: return@query false
                     if (!fresh.accepts(packageName) || !original.sameBinding(fresh) || !bound()) return@query false
+                    if (plan == null) {
+                        if (fresh.empty != true) return@query false
+                    } else if (fresh.empty != false ||
+                        !plan.matchesSource(fresh.sourceText, fresh.selectionStart, fresh.selectionEnd)) return@query false
                     if (observation(expected) == null) return@query false
                     currentCoroutineContext().ensureActive()
                     attempted = true
-                    access.setText(fresh, text, ::bound)
+                    access.setText(fresh, text, plan, ::bound) { observation(expected) != null }
                 }
             } ?: return@coroutineScope failed()
             currentCoroutineContext().ensureActive()
             if (!accepted || withTimeoutOrNull(timeoutMillis) { observation(expected) } == null) return@coroutineScope failed()
-            RootExecutionResult.Success("已向空副屏输入框提交文本，仍需观察确认实际内容")
+            RootExecutionResult.Success(if (plan == null) "已向空副屏输入框提交文本，仍需观察确认实际内容"
+                else "已向副屏输入框提交文本并核对光标，仍需观察确认实际内容")
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {

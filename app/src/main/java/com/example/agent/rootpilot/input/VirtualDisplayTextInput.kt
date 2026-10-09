@@ -13,7 +13,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
-/** Confirmed, whole-field SET_TEXT for a known-empty ordinary editor on an owned display. */
+/** Confirmed plain-text edits bound to one owned-display editor, with no IME change or replay. */
 internal class VirtualDisplayTextInput(ownPackage: String) {
     private val policy = VirtualDisplayTextInputPolicy(ownPackage, AndroidAccess())
 
@@ -68,11 +68,16 @@ internal class VirtualDisplayTextInput(ownPackage: String) {
             val currentWindow = node.window ?: return null
             if (currentWindow.id != window.id || currentWindow.displayId != session.displayId ||
                 currentWindow.type != AccessibilityWindowInfo.TYPE_APPLICATION || !currentWindow.isFocused) return null
+            val source = node.text
+            val boundedSource = source?.takeIf { it.length <= InputText.MAX_LENGTH }?.toString()
             return VirtualTextTarget(
                 identity(node, session.displayId), identity(root, session.displayId), node.packageName?.toString(), node.windowId,
                 node.isVisibleToUser, node.isEnabled, node.isEditable, node.isFocused,
                 ordinaryText(node), node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT },
-                node.text?.isEmpty(), path, true,
+                source?.isEmpty(), path, true, boundedSource, node.textSelectionStart, node.textSelectionEnd,
+                node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_SELECTION },
+                // A node showing its hint exposes the hint as text, so the visible text is not the real content.
+                node.isShowingHintText,
             )
         }
 
@@ -92,26 +97,51 @@ internal class VirtualDisplayTextInput(ownPackage: String) {
             return null
         }
 
-        override suspend fun setText(target: VirtualTextTarget, text: String, stillBound: () -> Boolean): Boolean {
+        override suspend fun setText(target: VirtualTextTarget, text: String, plan: VirtualTextEditPlan?,
+            stillBound: () -> Boolean, validateBinding: suspend () -> Boolean): Boolean {
             val boundNode = target.nodeIdentity as NodeIdentity
             val boundRoot = target.rootIdentity as NodeIdentity
             val node = boundNode.node
             val root = boundRoot.node
             val packageName = target.packageName ?: return false
-            // Observation can suspend; refresh the bound editor and its ancestry again before the action.
-            if (!stillBound() || safePath(node, root, packageName, target.windowId) == null ||
-                identity(root, boundRoot.displayId) != boundRoot || !node.refresh() ||
-                identity(node, boundNode.displayId) != boundNode || node.packageName?.toString() != packageName ||
-                node.windowId != target.windowId || !node.isVisibleToUser || !node.isEnabled || !node.isEditable ||
-                !node.isFocused || node.isPassword || node.isAccessibilityDataSensitive || !ordinaryText(node) ||
-                node.text?.isEmpty() != true || node.actionList.none { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }) return false
-            val window = node.window ?: return false
-            if (window.id != target.windowId || window.displayId != boundNode.displayId ||
-                window.type != AccessibilityWindowInfo.TYPE_APPLICATION || !window.isFocused) return false
-            val arguments = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) }
+            suspend fun eligible(): Boolean {
+                if (!stillBound() || safePath(node, root, packageName, target.windowId) == null ||
+                    identity(root, boundRoot.displayId) != boundRoot || !node.refresh() ||
+                    identity(node, boundNode.displayId) != boundNode || node.packageName?.toString() != packageName ||
+                    node.windowId != target.windowId || !node.isVisibleToUser || !node.isEnabled || !node.isEditable ||
+                    !node.isFocused || node.isPassword || node.isAccessibilityDataSensitive || !ordinaryText(node) ||
+                    node.isShowingHintText ||
+                    node.actionList.none { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }) return false
+                val window = node.window ?: return false
+                return window.id == target.windowId && window.displayId == boundNode.displayId &&
+                    window.type == AccessibilityWindowInfo.TYPE_APPLICATION && window.isFocused && stillBound()
+            }
+            // Observation can suspend; refresh the source and ancestry immediately before submission.
+            if (!eligible()) return false
+            if (plan == null) {
+                if (node.text?.isEmpty() != true) return false
+            } else if (!plan.matchesSource(node.text, node.textSelectionStart, node.textSelectionEnd) ||
+                node.actionList.none { it.id == AccessibilityNodeInfo.ACTION_SET_SELECTION }) return false
+            val arguments = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, plan?.replacement ?: text)
+            }
             if (!stillBound()) return false
             currentCoroutineContext().ensureActive()
-            return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+            if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)) return false
+            if (plan == null) return true
+            currentCoroutineContext().ensureActive()
+            // A filtered edit or a changed target must not receive a selection action or another SET_TEXT.
+            if (!validateBinding() || !eligible() || !plan.matchesResultText(node.text) ||
+                node.actionList.none { it.id == AccessibilityNodeInfo.ACTION_SET_SELECTION }) return false
+            val selection = Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, plan.caret)
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, plan.caret)
+            }
+            if (!stillBound()) return false
+            currentCoroutineContext().ensureActive()
+            if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection)) return false
+            currentCoroutineContext().ensureActive()
+            return eligible() && plan.matchesResult(node.text, node.textSelectionStart, node.textSelectionEnd)
         }
 
         private fun ordinaryText(node: AccessibilityNodeInfo) =

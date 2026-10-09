@@ -109,7 +109,7 @@ internal class DisplayRoutingRootExecutor(
 
     override suspend fun execute(action: ExecutableRootAction): RootExecutionResult {
         if (!virtualRequested) return main.execute(action)
-        if (action is ExecutableRootAction.Type) return RootExecutionResult.Failure("副屏文字输入必须绑定空输入框并确认")
+        if (action is ExecutableRootAction.Type) return RootExecutionResult.Failure("副屏文字输入必须绑定输入框及旧文／选区并确认")
         if (!supports(action)) return RootExecutionResult.Failure("副屏不支持 HOME 按键")
         val owned = session ?: return RootExecutionResult.Failure("副屏会话不存在，未执行动作")
         if (!owned.validate()) return RootExecutionResult.Failure("副屏会话已失效，未执行动作")

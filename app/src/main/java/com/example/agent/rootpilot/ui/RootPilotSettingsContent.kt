@@ -161,7 +161,7 @@ internal fun RootPilotSettingsContent(
                 )
                 Text("每次任务新建副屏，退出会关闭其中页面；已有应用可能被迁到副屏，不提供账号或数据隔离。",
                     style = MaterialTheme.typography.bodySmall)
-                Text("支持应用启动、点击、滑动、BACK／ENTER，以及向已聚焦且明确为空的普通输入框整段填写。文字输入需开启页面结构读取，不替换已有文字、不支持密码／敏感字段或 HOME。起始应用需确认打开；同意上传后，副屏截图仍发送至所配置的 API。",
+                Text("支持应用启动、点击、滑动、BACK／ENTER及普通文本输入。文字输入需开启页面结构读取：空框整段填写，非空框仅按明确旧文和光标／选区插入或替换选中内容；旧文和最终整框均最多128 UTF-16。输入会重建纯文本，不保证格式、撤销或 composing；不支持密码／敏感字段或 HOME，目标变化即拒绝且不重放。起始应用需确认打开；同意上传后，副屏截图仍发送至所配置的 API。",
                     style = MaterialTheme.typography.bodySmall)
                 if (recoveryRequired) {
                     Text("请先恢复或放弃上次任务，再修改执行屏幕和起始应用。", style = MaterialTheme.typography.bodySmall)
