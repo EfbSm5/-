@@ -15,3 +15,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# 机器相关的 direnv 配置（ANDROID_SERIAL 等），不入库
+.envrc
+.envrc.local
