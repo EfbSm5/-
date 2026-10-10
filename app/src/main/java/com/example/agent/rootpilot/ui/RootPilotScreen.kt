@@ -1,6 +1,5 @@
 package com.example.agent.rootpilot.ui
 
-import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -18,7 +17,6 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.geometry.Offset
@@ -48,7 +46,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -377,19 +374,22 @@ fun RootPilotScreen(
 @Composable
 private fun VirtualDisplayFramePreview(state: RootPilotUiState) {
     val frame = state.frame
-    val image = remember(frame?.bytes) {
-        frame?.let { BitmapFactory.decodeByteArray(it.bytes, 0, it.bytes.size)?.asImageBitmap() }
-    }
+    val imageState = rememberFrameImageState(frame?.bytes)
     Text("副屏截图（最近采集，非实时）", style = MaterialTheme.typography.titleSmall)
-    if (image == null) {
-        Text(if (frame == null) "暂无副屏截图；起始应用仍需确认后才会启动。" else "副屏截图无法显示，请停止任务后检查。",
-            style = MaterialTheme.typography.bodySmall)
-    } else {
-        Image(
-            bitmap = image,
+    when (imageState) {
+        is FrameImageState.Ready -> Image(
+            bitmap = imageState.image,
             contentDescription = "当前任务的副屏截图",
             modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).testTag("virtual_display_frame"),
         )
+
+        FrameImageState.Empty -> Text("暂无副屏截图；起始应用仍需确认后才会启动。",
+            style = MaterialTheme.typography.bodySmall)
+
+        FrameImageState.Undecodable -> Text("副屏截图无法显示，请停止任务后检查。",
+            style = MaterialTheme.typography.bodySmall)
+
+        FrameImageState.Decoding -> Text("副屏截图解码中…", style = MaterialTheme.typography.bodySmall)
     }
 }
 

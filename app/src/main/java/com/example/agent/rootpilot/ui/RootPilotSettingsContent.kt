@@ -1,6 +1,5 @@
 package com.example.agent.rootpilot.ui
 
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -30,7 +29,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.platform.testTag
@@ -221,20 +219,23 @@ internal fun RootPilotSettingsContent(
             }
             Text("最近动作：${state.lastAction?.describe() ?: "无"}")
             val frame = state.frame?.takeIf { !virtualDisplay }
-            val image = frame?.let {
-                remember(frame.bytes) {
-                    BitmapFactory.decodeByteArray(frame.bytes, 0, frame.bytes.size)?.asImageBitmap()
-                }
-            }
-            if (image != null && frame != null) {
+            val imageState = rememberFrameImageState(frame?.bytes)
+            if (frame != null) {
                 Text("当前截图：${frame.width}x${frame.height}")
-                Image(
-                    bitmap = image,
-                    contentDescription = "当前手机屏幕截图",
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 420.dp),
-                )
+                when (imageState) {
+                    is FrameImageState.Ready -> Image(
+                        bitmap = imageState.image,
+                        contentDescription = "当前手机屏幕截图",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 420.dp),
+                    )
+
+                    FrameImageState.Undecodable -> Text("截图无法显示，请重新截取或检查任务状态。",
+                        style = MaterialTheme.typography.bodySmall)
+
+                    FrameImageState.Empty, FrameImageState.Decoding -> Unit
+                }
             }
 
             HorizontalDivider()
