@@ -1,0 +1,15 @@
+# 预期跳过名单：每行一个 `包名.类名.方法名`，# 之后为注释。
+#
+# 名单内的用例在没有对应 `-e` 开关时会由 assumeTrue 跳过，属于显式 opt-in 的探针，
+# 跳过不算失败；名单外的任何跳过都会被 dev/check-test-results.py 判为 FAIL(2)。
+#
+# 显式运行示例（需真机 + 已安装 debug 与 androidTest APK）：
+#   adb shell am instrument -w -e liveVirtualUsageProbe true \
+#     com.example.agent.test/androidx.test.runner.AndroidJUnitRunner
+#
+# 平台探针：副屏使用量保留（-e liveVirtualUsageProbe=true）
+com.example.agent.rootpilot.VirtualCalculatorUsageProbeInstrumentedTest.diagnosesRetainedResultWithoutDeviceActions
+# 平台探针：三档预算对比（-e liveVirtualBudgetComparison=true）
+com.example.agent.rootpilot.VirtualCalculatorModelBudgetProbeInstrumentedTest.comparesThreeBudgetsWithoutExecutingModelOutput
+# 平台探针：保留等值失败（-e liveEqualityEffortProbe=true）
+com.example.agent.rootpilot.VirtualCalculatorEqualityEffortProbeInstrumentedTest.comparesRetainedEqualityFailureWithoutDeviceActions
