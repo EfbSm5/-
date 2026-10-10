@@ -1,6 +1,6 @@
 # RootPilot 当前状态
 
-更新日期：2026-10-09。副屏既有 Activity 栈、临时单步及空框 Unicode 输入的专用页真实 Service 验收限定 PASS；八项剩余差异平台探针也已限定 PASS。非空光标插入／选区替换已按限定纯文本语义接入生产源码，首轮审查指出的三处问题已修改，本地单测／构建／Lint 通过；独立复审结论为 FAIL（低，无高／中缺陷，两项 P3 残留见 `TASKS.md`），四项离线真机与三项真实 Service 入口在重建夹具后 7/7 限定 PASS（手机已安装的三个 APK 哈希与本机构建一致），故该限定范围可称闭环 PASS；富文本／IME composing／撤销栈、hint 与真实内容区分、主屏并行输入及厂商兼容仍未验证。HOME 在带系统装饰的探针配置下可行，产品仍禁用；LOCAL 键盘、尺寸／旋转与跨单步页面保留仍未开放。任务外副屏截图禁用，设备动作仍为 LOW／65536；协议、保屏及广泛兼容的稳定性仍 PARTIAL。当前接手顺序见下方“当前工作：副屏非空输入与剩余能力”；提交／推送状态以 Git 为准。
+更新日期：2026-10-10。副屏既有 Activity 栈、临时单步及空框 Unicode 输入的专用页真实 Service 验收限定 PASS；八项剩余差异平台探针也已限定 PASS。非空光标插入／选区替换已按限定纯文本语义接入生产源码，首轮审查指出的三处问题已修改，本地单测／构建／Lint 通过；独立复审结论为 FAIL（低，无高／中缺陷，两项 P3 残留见 `TASKS.md`），四项离线真机与三项真实 Service 入口在重建夹具后 7/7 限定 PASS（手机已安装的三个 APK 哈希与本机构建一致），故该限定范围可称闭环 PASS；富文本／IME composing／撤销栈、hint 与真实内容区分、主屏并行输入及厂商兼容仍未验证。HOME 在带系统装饰的探针配置下可行，产品仍禁用；LOCAL 键盘、尺寸／旋转与跨单步页面保留仍未开放。任务外副屏截图禁用，设备动作仍为 LOW／65536；协议、保屏及广泛兼容的稳定性仍 PARTIAL。当前接手顺序见下方“当前工作：副屏非空输入与剩余能力”；提交／推送状态以 Git 为准。
 
 本文件只保存最新状态，直接更新对应条目，不追加开发过程、历次测试数字或补验流水。使用与构建说明见 [README.md](README.md)，协作规则见 [AGENTS.md](AGENTS.md)，下一步任务与评审待办见 [TASKS.md](TASKS.md)。
 
@@ -96,7 +96,7 @@ adb -P "$rootpilot_adb_server_port" -s "$rootpilot_device_serial" shell am instr
 
 离线四项不调用模型、不导出像素。真实 Service 入口会使用手机已配置 API 并产生费用，上传范围仅限专用副屏固定非敏感测试页、截图及控件树，遵守现有上传授权与动作确认边界；不读取或输出 Token，不读取凭据输入画面。连接／锁定／授权／目标不明时保留明确缺口，不借主屏或旧页面补验。
 
-本阶段剩余：`TASKS.md` 评审待办 #16（`app/src/androidTest/java/com/example/agent/rootpilot/VirtualDisplayPlainTextInstrumentedTest.kt:227` 的 finally 清理段仍吞 6 个清理 check 的断言消息）；独立复审未证实项仍需各自定范围＝真机 node.text／选区读取时序、hint 与真实内容区分、富文本／IME composing／撤销栈及 `input/VirtualDisplayTextInputPolicy.kt` 兜底 catch 的触发率。之后分别接入并验收 HOME、LOCAL 键盘、尺寸／旋转及跨单步会话／任务外截图。主屏并行输入、提交中／提交后死亡、真人／通知和更多 App／厂商仍为未验证项，不由本轮七项通过自动覆盖。
+本阶段剩余：独立复审未证实项仍需各自定范围＝真机 node.text／选区读取时序、hint 与真实内容区分、富文本／IME composing／撤销栈及 `input/VirtualDisplayTextInputPolicy.kt` 兜底 catch 的触发率（`TASKS.md` 评审待办 #16 的两处 finally 清理段已改为保留主体失败原因，待真机复跑）。之后分别接入并验收 HOME、LOCAL 键盘、尺寸／旋转及跨单步会话／任务外截图。主屏并行输入、提交中／提交后死亡、真人／通知和更多 App／厂商仍为未验证项，不由本轮七项通过自动覆盖。
 
 ## 只读手机信息工具
 
