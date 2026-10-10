@@ -85,7 +85,7 @@ internal class VirtualDisplayTextInputPolicy(
         var attempted = false
         var rejected: String? = null
         fun failed(reason: String? = null) = RootExecutionResult.Failure(reason ?: if (attempted)
-            "副屏输入可能已生效，但提交或目标／服务状态未确认；请核对结果，勿直接重放"
+            "副屏输入已写入，但提交或目标／服务状态未确认；请核对结果，勿直接重放"
             else "副屏输入目标不可用或已变化，未提交文本")
         try {
             currentCoroutineContext().ensureActive()

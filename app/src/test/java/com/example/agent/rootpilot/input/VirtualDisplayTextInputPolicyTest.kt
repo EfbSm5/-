@@ -237,16 +237,16 @@ class VirtualDisplayTextInputPolicyTest {
             { it.connected = false }, { it.screen = SCREEN.copy(focusedWindowId = "changed") })) {
             val access = Access().apply { editor = NONEMPTY; afterSubmit = { change(this) } }
             val result = execute(access) as RootExecutionResult.Failure
-            assertTrue(result.message.contains("可能已生效"))
+            assertTrue(result.message.contains("已写入"))
             assertEquals(1, access.submissions)
             assertEquals(0, access.selections)
         }
     }
 
-    @Test fun nonemptySelectionFailureReportsPossibleEffectAndDoesNotReplay() = runBlocking {
+    @Test fun nonemptySelectionFailureReportsWrittenButUnconfirmedAndDoesNotReplay() = runBlocking {
         val access = Access().apply { editor = NONEMPTY; selectionAccepted = false }
         val result = execute(access) as RootExecutionResult.Failure
-        assertTrue(result.message.contains("可能已生效"))
+        assertTrue(result.message.contains("已写入"))
         assertEquals(1, access.submissions)
         assertEquals(1, access.selections)
     }
@@ -304,10 +304,10 @@ class VirtualDisplayTextInputPolicyTest {
         assertFalse(access.querying)
     }
 
-    @Test fun failedPostSubmitRestoreReportsPossibleEffectWithoutReplay() = runBlocking {
+    @Test fun failedPostSubmitRestoreReportsWrittenButUnconfirmedWithoutReplay() = runBlocking {
         val access = Access().apply { failRestoreAt = 2 }
         val result = execute(access) as RootExecutionResult.Failure
-        assertTrue(result.message.contains("可能已生效"))
+        assertTrue(result.message.contains("已写入"))
         assertEquals(1, access.submissions)
     }
 
