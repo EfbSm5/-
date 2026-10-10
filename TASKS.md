@@ -8,14 +8,16 @@
 
 2026-10-10 深夜更新：#5 逐条取证后核心证据不成立（dueAt 的日历校验早在 `071432f` 就已在解码层生效，且解析失败映射为固定原因码），已补一条针对日历非法值的解析层回归测试；剩余仅为 `create_todo` 双重解码的维护性改动，并入架构三步，不再单列。随后取建议推进顺序第 3 条做完 #16（两处 finally 清理段不再吞断言消息），同条仅剩 #12 主线程解码整屏 PNG 未动。
 
-2026-10-10 收尾更新：#12 已完成（副屏预览与设置页诊断面板的整屏 PNG 解码移出主线程，独立复审 PASS，见该条）；本轮 `dev/` 三个脚本、#5 回归测试、#16 修复与本文档已提交并推送（提交／推送状态以 Git 为准），#12 本条改动尚未提交，也未在真机上看解码时序。
+2026-10-10 收尾更新：#12 已完成（副屏预览与设置页诊断面板的整屏 PNG 解码移出主线程，独立复审 PASS，见该条）；本轮 `dev/` 三个脚本、#5 回归测试、#16 修复与本文档已提交并推送（提交／推送状态以 Git 为准），#12 本条改动也已提交并推送（`d826a13`），但未在真机上看解码时序。
+
+2026-10-10 文件 Agent 更新：#9 已实施——只读工具（`list_files`／`read_file`／`stat_file`／`search_files`）的失败不再结束该轮文件任务，改为把固定原因码作为工具结果回传模型自纠；写入类（`create_file`／`edit_file`，含拒绝与冲突）与“参数在进入存储前就不可解析”仍按原样终止（能解析但键集合不匹配时，只读工具按只读失败回传、写入工具仍终止）。`./dev/verify.sh` 通过（82 tasks 含 App／测试 APK 与 Lint），71 个结果文件／667 项 JVM 单测零失败／错误／跳过，核心行为增量独立静态复审 PASS，其两条 P3（写入工具键集合不匹配的终止断言、本边界措辞）已处理；README 与 SPEC 已同步。本条改动尚未提交，也未在真机上重跑文件 Agent。
 
 ## 建议推进顺序（2026-10-10）
 
 1. **#2 与 #14／#13 合并做一小步**：先让验收脚本对 `skipped > 0` 报警，再把平台探针类移出默认集合，同时补 `dev/verify.sh`（四连命令 + `git diff --check` + skipped 报警）与构建配置小项。理由：本轮真机验收已实测到“4 个 assumption failure 仍显示 `OK (4 tests)`”，它直接决定“以为通过”的可信度；改动面小、当天可见效。（进度 2026-10-10：`dev/verify.sh`、`dev/check-test-results.py`、`dev/expected-skips.txt` 已落地；#13 构建配置小项与探针类移出仍待办。）
 2. ~~**#5 create_todo 双重解码与 dueAt 语义校验**~~：2026-10-10 逐条取证后**核心证据不成立**（见该条），已补回归测试；剩余只有“双重解码”这一维护性改动，并入第 6 条架构三步。
 3. **#16 与 #12**：均为低风险小修（清理断言消息丢失／主线程解码整屏 PNG），可顺手并入下一次改动。（进度 2026-10-10：~~#16~~ 已完成（两处 finally 清理段已不再吞断言消息，待真机复跑）；~~#12~~ 已完成（独立复审 PASS；尚未提交，也未在真机上看解码时序）。）
-4. **#7、#9**：#9 语义已确认，可与 #7 一起实施（#7 只剩终态用词拍板）；两者都需补单测，改“任务是否继续”的行为要独立复审。
+4. **#7、#9**：~~#9~~ 已实施并独立复审 PASS（只读失败以原因码回传模型自纠、写入类维持终止，见该条）；#7 只剩终态用词拍板。
 5. **功能 #5 真机生命周期补测**：需真机在线（2026-10-10 无线已断联），恢复连接后再约。
 6. **架构三步**（[docs/architecture-notes.md](docs/architecture-notes.md)）：AppContainer → 拆 RunController／runSteps → 去 create_todo 双重解码；不单独立项，按改动顺手推进。
 
@@ -68,12 +70,14 @@
 - 建议：进度只覆盖 content，保留 reasoning。
 - 状态：待处理
 
-### #9（中）只读工具失败复用“写入可能不完整”文案并终止任务 · 语义已确认（2026-10-10）
+### #9（中）只读工具失败复用“写入可能不完整”文案并终止任务 · 已完成 2026-10-10
 
-- 证据：FileAgentController.kt:115-117 catch FileStorageException 统一返回“文件操作失败，已停止；如已开始写入，结果可能不完整，请检查文件与备份”并终止整个任务。
-- 已确认语义：只读工具（`list_files`／`read_file`／`stat_file`／`search_files`）失败**不终止任务**，失败原因作为 tool result 回传模型自纠（可改路径或换文件继续），且不外溢“写入可能不完整”文案；写入类（`create_file`／`edit_file`，含审批拒绝）维持现状，停止任务并保留现有终态文案。
-- 改法：`chat/FileAgentController.kt` 的 catch（:113-117）按工具类别分流，只读失败改走 tool result；补单测，改“任务是否继续”的行为需独立复审。
-- 状态：待实施
+- 证据（原）：FileAgentController.kt:115-117 catch FileStorageException 统一返回“文件操作失败，已停止；如已开始写入，结果可能不完整，请检查文件与备份”并终止整个任务。
+- 已确认语义（2026-10-10）：只读工具（`list_files`／`read_file`／`stat_file`／`search_files`）失败**不终止任务**，失败原因作为 tool result 回传模型自纠（可改路径或换文件继续），且不外溢“写入可能不完整”文案；写入类（`create_file`／`edit_file`，含审批拒绝）维持现状，停止任务并保留现有终态文案。
+- 已实施：`chat/FileAgentController.kt` 新增 `executeTool`（run 循环改调它）按工具名 `READ_ONLY_TOOLS` 分流 `FileStorageException`——只读失败返回 `{tool_error, tool, task_continues, note}` 固定形状结果并 `report("读取失败（<原因码>），已把原因回传给模型")`（只含固定原因码，不含路径／查询词／正文），写入类与未知工具继续抛给原有 catch 终止；`FILE_INSTRUCTIONS` 增加一行要求模型在收到 `tool_error` 时改路径／查询／范围而不是重复同一调用。参数在进入存储前不可解析（非 JSON、非字符串值、键数 > 3）仍在 `run` 内终止，未改动。
+- 单测（`app/src/test/java/com/example/agent/rootpilot/chat/FileAgentReadOnlyToolsTest.kt`／`FileAgentControllerTest.kt`）：解析层失败仍 `Failure` 且零存储调用；`INVALID_CHANGE`（多余键、缺参、非法 scope、空查询、129 单元查询）与 `INVALID_PATH`（`..`／绝对路径／URI／双斜杠／`%`／反斜杠）逐条断言“任务继续、2 次模型请求、tool_error 原因码、零存储调用”；写入工具键集合不匹配（`create_file` 缺 `content`、`edit_file` 缺 `new_text`）断言“1 次模型请求、Failure、无 tool_error、零存储调用”；`NOT_SELECTED`／`STORAGE_FAILED`／`CONFLICT`／`NOT_FOUND`／`TOO_LARGE`／`NOT_TEXT` 断言不产生 `untrusted_search_results`／`cannot_prove_no_match`（不会被当成无匹配）；`read_file` 多余参数不再终止任务。
+- 验证：`./dev/verify.sh` 通过（82 tasks，含 `assembleDebugAndroidTest`／`lintDebug`）、71 个结果文件／667 项 JVM 单测 0 失败／0 错误／0 跳过、`git diff --check` 干净；独立静态复审 PASS，其两条 P3 已处理——补了写入工具键集合不匹配（`create_file` 缺 `content`、`edit_file` 缺 `new_text`）仍终止且不产生 `tool_error` 的断言，并在 README／SPEC／本条写明“能解析但键集合不匹配时只读回传、写入终止”的边界。
+- 状态：已完成 2026-10-10（尚未提交；未真机重跑文件 Agent 场景）。
 
 ### #11（低）busy 三套状态分散，`check(!busy)` 崩溃面
 
