@@ -102,7 +102,7 @@ class FileAgentController(
                             calls++
                             val args = parseArguments(call.arguments)
                                 ?: return DeepSeekActionResult.Failure("文件工具参数无效，已停止")
-                            val text = execute(call.name, args, onUpdate)
+                            val text = executeTool(call.name, args, onUpdate)
                             currentCoroutineContext().ensureActive()
                             turns += ToolChatTurn("tool", text, toolCallId = call.id)
                         }
@@ -229,6 +229,27 @@ class FileAgentController(
         }
     }
 
+    /**
+     * A read-only failure is evidence for the model and does not end the task: no write happened, so the task can
+     * continue with another path, query or scope. Write failures keep stopping the task because the result may be partial.
+     */
+    private suspend fun executeTool(
+        name: String,
+        args: Map<String, String>,
+        onUpdate: suspend (ModelStreamSnapshot) -> Unit,
+    ): String = try {
+        execute(name, args, onUpdate)
+    } catch (error: FileStorageException) {
+        if (name !in READ_ONLY_TOOLS) throw error
+        report("读取失败（${error.code.name}），已把原因回传给模型")
+        buildJsonObject {
+            put("tool_error", error.code.name)
+            put("tool", name)
+            put("task_continues", true)
+            put("note", "Read-only tool failed; the task continues. Change the path, query or scope instead of repeating the same call.")
+        }.toString()
+    }
+
     private class WriteDeclined : Exception()
 
     private fun parseArguments(raw: String): Map<String, String>? { return try {
@@ -252,8 +273,11 @@ Use read_file before edit_file; old_text must match exactly once. Do not claim a
 Writes always require a separate local user confirmation; do not claim that chat text bypasses it.
 There is no delete, shell, network, device control or permission-management tool.
 If a write is rejected, do not ask for that write again. If a write fails or is interrupted, do not replay it.
+If a read-only tool returns tool_error, the task continues: change the path, query or scope instead of repeating the same call.
 Explain that backups are local and can be exported from the workspace panel. Stop cannot undo completed writes.
 """
+
+private val READ_ONLY_TOOLS = setOf("list_files", "read_file", "stat_file", "search_files")
 
 internal val FILE_TOOLS: List<JsonObject> = listOf(
     fileTool("list_files", "List up to 100 entries in a directory; empty path means the workspace root.", "path"),

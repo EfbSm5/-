@@ -9,7 +9,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -105,12 +105,36 @@ class FileAgentControllerTest {
         assertFalse(agent.state.value.busy); assertEquals(1, model.requests.size)
     }
 
-    @Test fun unknownToolsAndExtraArgumentsNeverReachStorage() = runTest {
-        listOf(ChatToolCall("1", "shell", """{"path":"x"}"""),
-            ChatToolCall("1", "read_file", """{"path":"x","extra":"y"}""")).forEach { call ->
-            val files = Files(); val agent = controller(files, Model(listOf(ToolChatResult.Success("", "", listOf(call)))))
+    @Test fun unknownToolsNeverReachStorageAndStopTheRun() = runTest {
+        val files = Files()
+        val agent = controller(files, Model(listOf(ToolChatResult.Success("", "", listOf(ChatToolCall("1", "shell", """{"path":"x"}"""))))))
+        assertTrue(agent.run(RootPilotConfig(), listOf(ToolChatTurn("user", "test")), ThinkingEffort.HIGH) {} is DeepSeekActionResult.Failure)
+        assertEquals(0, files.reads); assertEquals(0, files.commits)
+    }
+
+    @Test fun writeToolsWithMissingOrExtraArgumentKeysStillStopWithoutToolError() = runTest {
+        for (call in listOf(
+            ChatToolCall("1", "create_file", """{"path":"x"}"""),
+            ChatToolCall("1", "edit_file", """{"path":"x","old_text":"a"}"""),
+        )) {
+            val files = Files(); val model = Model(listOf(ToolChatResult.Success("", "", listOf(call))))
+            val agent = controller(files, model)
             assertTrue(agent.run(RootPilotConfig(), listOf(ToolChatTurn("user", "test")), ThinkingEffort.HIGH) {} is DeepSeekActionResult.Failure)
+            assertEquals(1, model.requests.size)
+            assertFalse(model.requests.last().last().content.contains("tool_error"))
             assertEquals(0, files.reads); assertEquals(0, files.commits)
         }
+    }
+
+    @Test fun readOnlyExtraArgumentsReachTheModelWithoutStorageAndDoNotStopTheRun() = runTest {
+        val files = Files(); val model = Model(listOf(
+            ToolChatResult.Success("", "", listOf(ChatToolCall("1", "read_file", """{"path":"x","extra":"y"}"""))), done()))
+        val agent = controller(files, model)
+        assertTrue(agent.run(RootPilotConfig(), listOf(ToolChatTurn("user", "test")), ThinkingEffort.HIGH) {} is DeepSeekActionResult.Success)
+        assertEquals(2, model.requests.size)
+        val result = Json.parseToJsonElement(model.requests.last().last().content).jsonObject
+        assertEquals("INVALID_CHANGE", result.getValue("tool_error").jsonPrimitive.content)
+        assertTrue(result.getValue("task_continues").jsonPrimitive.boolean)
+        assertEquals(0, files.reads); assertEquals(0, files.commits)
     }
 }

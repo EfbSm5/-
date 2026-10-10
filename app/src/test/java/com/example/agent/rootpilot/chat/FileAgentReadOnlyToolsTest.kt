@@ -124,25 +124,27 @@ class FileAgentReadOnlyToolsTest {
         assertEquals(1, properties.getValue("query").jsonObject.getValue("minLength").jsonPrimitive.int)
         assertEquals(128, properties.getValue("query").jsonObject.getValue("maxLength").jsonPrimitive.int)
         val prompt = model.requests.single().first().content
-        listOf("untrusted DATA", "literal", "cannot prove no match", "null", "256 KiB", "non-atomic").forEach {
+        listOf("untrusted DATA", "literal", "cannot prove no match", "null", "256 KiB", "non-atomic", "tool_error").forEach {
             assertTrue(prompt.contains(it))
         }
         assertEquals(0, files.writes)
     }
 
-    @Test fun strictParameterWhitelistAndStringTypesRejectBeforeStorage() = runTest {
+    /** Runs one call that must fail read-only and asserts the task continued with a tool-error turn for the model. */
+    private suspend fun terminatedByToolError(files: Files, model: Model, controller: FileAgentController): JsonObject {
+        assertTrue(run(controller) is DeepSeekActionResult.Success)
+        assertEquals(2, model.requests.size)
+        assertEquals(0, files.writes); assertEquals(0, files.oldReads)
+        assertFalse(controller.state.value.busy); assertNull(controller.state.value.pending)
+        return Json.parseToJsonElement(model.requests.last().last().content).jsonObject
+    }
+
+    @Test fun unparseableOrNonStringArgumentsStillStopBeforeStorage() = runTest {
         listOf(
-            call("stat_file", """{"path":"a","extra":"x"}"""),
-            call("stat_file", "{}"),
             call("stat_file", """{"path":null}"""),
-            call("search_files", """{"path":"","query":"q","scope":"name","limit":"99"}"""),
-            call("search_files", """{"path":"","query":"q"}"""),
             call("search_files", """{"path":"","query":1,"scope":"name"}"""),
             call("search_files", """{"path":"","query":"q","scope":["name"]}"""),
-            call("search_files", """{"path":"","query":"q","scope":"NAME"}"""),
-            call("search_files", """{"path":"","query":"q","scope":"regex"}"""),
-            call("search_files", """{"path":"","query":"","scope":"name"}"""),
-            call("search_files", buildJsonObject { put("path", ""); put("query", "q".repeat(129)); put("scope", "name") }.toString()),
+            call("search_files", """{"path":"","query":"q","scope":"name","limit":"99"}"""),
             call("search_files", "not json"),
         ).forEach { tool ->
             val files = Files(); val model = Model(listOf(tool))
@@ -152,29 +154,56 @@ class FileAgentReadOnlyToolsTest {
         }
     }
 
-    @Test fun invalidRelativePathsNeverReachStatOrSearchStorage() = runTest {
+    @Test fun readOnlySchemaViolationsReachTheModelAsToolErrorsAndTheTaskContinues() = runTest {
+        listOf(
+            call("stat_file", """{"path":"a","extra":"x"}"""),
+            call("stat_file", "{}"),
+            call("search_files", """{"path":"","query":"q"}"""),
+            call("search_files", """{"path":"","query":"q","scope":"NAME"}"""),
+            call("search_files", """{"path":"","query":"q","scope":"regex"}"""),
+            call("search_files", """{"path":"","query":"","scope":"name"}"""),
+            call("search_files", buildJsonObject { put("path", ""); put("query", "q".repeat(129)); put("scope", "name") }.toString()),
+        ).forEach { tool ->
+            val files = Files(); val model = Model(listOf(tool)); val controller = agent(files, model)
+            val result = terminatedByToolError(files, model, controller)
+            assertEquals("INVALID_CHANGE", result.getValue("tool_error").jsonPrimitive.content)
+            assertEquals(tool.name, result.getValue("tool").jsonPrimitive.content)
+            assertTrue(result.getValue("task_continues").jsonPrimitive.boolean)
+            assertTrue(files.stats.isEmpty()); assertTrue(files.searches.isEmpty())
+            assertEquals("读取失败（INVALID_CHANGE），已把原因回传给模型", controller.state.value.status)
+        }
+    }
+
+    @Test fun invalidRelativePathsNeverReachStatOrSearchStorageAndContinue() = runTest {
         listOf("../secret", "/absolute", "content://outside/tree", "a//b", "a%2fb", "a\\b").forEach { path ->
             listOf("stat_file", "search_files").forEach { name ->
                 val args = buildJsonObject {
                     put("path", path)
                     if (name == "search_files") { put("query", "q"); put("scope", "name") }
                 }.toString()
-                val files = Files(); val model = Model(listOf(call(name, args)))
-                assertTrue(run(agent(files, model)) is DeepSeekActionResult.Failure)
-                assertTrue(files.stats.isEmpty()); assertTrue(files.searches.isEmpty()); assertEquals(0, files.writes)
+                val files = Files(); val model = Model(listOf(call(name, args))); val controller = agent(files, model)
+                val result = terminatedByToolError(files, model, controller)
+                assertEquals("INVALID_PATH", result.getValue("tool_error").jsonPrimitive.content)
+                assertTrue(files.stats.isEmpty()); assertTrue(files.searches.isEmpty())
+                assertEquals("读取失败（INVALID_PATH），已把原因回传给模型", controller.state.value.status)
             }
         }
     }
 
-    @Test fun storageSelectionAndConflictErrorsStopWithoutReportingNoMatchOrCallingModelAgain() = runTest {
-        listOf(FileErrorCode.NOT_SELECTED, FileErrorCode.STORAGE_FAILED, FileErrorCode.CONFLICT).forEach { code ->
-            listOf(call("stat_file", """{"path":"a.txt"}"""),
-                call("search_files", """{"path":"","query":"q","scope":"name"}""")).forEach { tool ->
-                val files = Files().apply { error = code }; val model = Model(listOf(tool))
-                val controller = agent(files, model)
-                assertTrue(run(controller) is DeepSeekActionResult.Failure)
-                assertEquals(1, model.requests.size); assertEquals(0, files.writes)
-                assertNull(controller.state.value.pending); assertFalse(controller.state.value.busy)
+    @Test fun readOnlyStorageErrorsReachTheModelWithoutLookingLikeAMatchOrProvingNoMatch() = runTest {
+        listOf(FileErrorCode.NOT_SELECTED, FileErrorCode.STORAGE_FAILED, FileErrorCode.CONFLICT,
+            FileErrorCode.NOT_FOUND, FileErrorCode.TOO_LARGE, FileErrorCode.NOT_TEXT).forEach { code ->
+            listOf(call("stat_file", """{"path":"a.txt"}""", "stat"),
+                call("search_files", """{"path":"","query":"q","scope":"name"}""", "search")).forEach { tool ->
+                val files = Files().apply { error = code }; val model = Model(listOf(tool)); val controller = agent(files, model)
+                val result = terminatedByToolError(files, model, controller)
+                assertEquals(code.name, result.getValue("tool_error").jsonPrimitive.content)
+                assertEquals(tool.name, result.getValue("tool").jsonPrimitive.content)
+                assertNull(result["untrusted_file_metadata"]); assertNull(result["untrusted_search_results"])
+                assertNull(result["cannot_prove_no_match"]); assertNull(result["complete"])
+                if (tool.name == "stat_file") assertEquals(listOf("a.txt"), files.stats) else
+                    assertEquals(listOf(Triple("", "q", FileSearchScope.NAME)), files.searches)
+                assertEquals("读取失败（${code.name}），已把原因回传给模型", controller.state.value.status)
             }
         }
     }
