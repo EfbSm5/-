@@ -362,8 +362,10 @@ class VirtualDisplayParityInstrumentedTest {
                         guard!!.environment()
                         evidence.putBoolean("environmentUnchanged", true)
                     }
-                } catch (_: Exception) {
-                    failure = "parity_cleanup_unconfirmed"
+                } catch (e: Exception) {
+                    val detail = e.message?.filter { it.isLetterOrDigit() || it == '_' || it == '-' }?.take(48)
+                    val cleanup = "parity_cleanup_unconfirmed" + (detail?.takeIf { it.isNotEmpty() }?.let { "_$it" } ?: "")
+                    failure = failure?.let { "$it|$cleanup" } ?: cleanup
                 }
                 evidence.putString("stage", guard?.stage ?: stage)
                 evidence.putString("failure", failure)

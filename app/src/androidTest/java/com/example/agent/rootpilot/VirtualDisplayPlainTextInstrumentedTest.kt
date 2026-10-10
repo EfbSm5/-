@@ -224,7 +224,11 @@ class VirtualDisplayPlainTextInstrumentedTest {
                             RootExecutionResult.Failure && releasedApprovals == 0) { "released_input_not_rejected" }
                         evidence.putBoolean("releasedInputRejected", true)
                     }
-                } catch (_: Exception) { failure = "plain_edit_cleanup_unconfirmed" }
+                } catch (e: Exception) {
+                    val detail = e.message?.filter { it.isLetterOrDigit() || it == '_' || it == '-' }?.take(48)
+                    val cleanup = "plain_edit_cleanup_unconfirmed" + (detail?.takeIf { it.isNotEmpty() }?.let { "_$it" } ?: "")
+                    failure = failure?.let { "$it|$cleanup" } ?: cleanup
+                }
                 evidence.putInt("typeApprovals", typeApprovals)
                 evidence.putInt("mainExecutorCalls", main.calls)
                 evidence.putString("stage", stage)

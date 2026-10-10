@@ -39,6 +39,22 @@ class ActionParserTest {
         }
     }
 
+    /** 评审 #5 提到的日历非法值必须在解析层就被拦住，不能走到 AgentLoop 的 dedup 解析。 */
+    @Test
+    fun createTodo_rejectsCalendarInvalidDeadlineAtParseLayer() {
+        for (due in listOf(
+            "2026-13-45T99:99:99Z",
+            "2026-02-30T09:00:00Z",
+            "2026-02-29T00:00:00Z",
+        )) {
+            val failure = parser.parse(
+                """{"action":"create_todo","title":"事项","due_at":"$due","reason":"记录"}""",
+            ) as ActionParseResult.Failure
+            assertEquals(due, ActionParseFailureKind.INVALID_PROTOCOL, failure.kind)
+            assertTrue(due, failure.message.contains("due_at"))
+        }
+    }
+
     @Test
     fun parsesAllActionKinds() {
         assertTrue(parser.parse("""{"action":"tap","x":1,"y":2,"reason":"点击"}""") is ActionParseResult.Success)
