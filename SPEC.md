@@ -49,6 +49,8 @@ RootPilot 是已 Root 的 Android 手机上的实验性 Agent：根据截图、�
 
 本轮主机侧检查 `BUILD SUCCESSFUL`（`:app:testDebugUnitTest`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`、`:app:lintDebug`、`:execution-fixture:assembleDebug`，均 `--no-daemon`）；`:app:testDebugUnitTest` 在本轮无 JVM 源码变更时为 UP-TO-DATE，沿用 71 份 JVM XML 合计 662 项零失败／错误／跳过（输入策略 29 项）。真机七项入口在重建夹具后全部限定 PASS，证据文本位于仓库外 `/tmp/rootpilot-acceptance/31…37_*_final.txt`。
 
+2026-10-10 在同一台小米 15（当时无线地址 `10.93.133.110:39365`，硬件 serial `12cd0365`）复跑同一七项：逐项 `OK (1 test)`、零 `FAILURES!!`；离线四项与 Service 三项的通过键全部为 true，保留回执分别为 `mode=CURSOR selection=(3,3) cursorSampleMatches=true`、`mode=SELECTION selection=(9,9) selectionSampleMatches=true`，停止项为种子态 `mode=SELECTION selection=(1,2) selectionSeedMatches=true`、`typed=false`、`stopOverlayInvoked=true`、`approvals=executions=modelRequests=1`；离线四项的证据文本在仓库外 `/tmp/rootpilot-acceptance-20261010/10-*.txt`，Service 三项在 `30-*.txt`／`31-*.txt`／`32-*.txt`。同一轮另按单个方法跑非空输入 parity 三探针（`20-parity-*.txt`：游标／选区各 `setTextCalls=1`／`setSelectionCalls=1`、取消 `setTextCalls=0`／`setSelectionCalls=0`，均 `failure=null passed=true`），用于确认评审待办 #16 修复后的 finally 清理段在真机正常路径无回归。该轮的安装包核对与清数据陷阱见下节前置 ⑤。
+
 ```sh
 ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug :execution-fixture:assembleDebug --no-daemon
 ```
@@ -65,7 +67,7 @@ RootPilot 是已 Root 的 Android 手机上的实验性 Agent：根据截图、�
 
 ### 入口、前置与执行结果
 
-下表七项入口均已按单个方法、显式开关、`--no-restart` 执行并取得限定 PASS；离线入口在 `VirtualDisplayPlainTextInstrumentedTest`，Service 入口在 `VirtualDisplayCapabilityServiceInstrumentedTest`，二者包名均为 `com.example.agent.rootpilot`。不要给整类或整个测试套件打开 live 开关：本轮实测不给开关跑整类，四个用例都以 assumption failure（`INSTRUMENTATION_STATUS_CODE: -4`）结束，报告却仍显示 `OK (4 tests)`。
+下表七项入口均已按单个方法、显式开关、`--no-restart` 执行并取得限定 PASS；离线入口在 `VirtualDisplayPlainTextInstrumentedTest`，Service 入口在 `VirtualDisplayCapabilityServiceInstrumentedTest`，二者包名均为 `com.example.agent.rootpilot`。不要给整类或整个测试套件打开 live 开关：本轮实测不给开关跑整类，四个用例都以 assumption failure（`INSTRUMENTATION_STATUS_CODE: -4`）结束，报告却仍显示 `OK (4 tests)`。2026-10-10 另用 AGP 取到同一类的真机 XML（`app/build/outputs/androidTest-results/connected/debug/TEST-*_app-.xml` 为 `tests="4" failures="0" errors="0" skipped="4"`，含四个 `<skipped/>`），`dev/check-test-results.py` 据此判 FAIL 并以退出码 2 结束；只有 AGP 产物会记录 skipped，`am instrument` 控制台不会，所以验收报告以 XML＋脚本为准，不看控制台的 `OK`。
 
 | 阶段 | 单独运行的方法 | 显式参数 | 核心通过要求与本轮结果 |
 | --- | --- | --- | --- |
@@ -79,7 +81,7 @@ RootPilot 是已 Root 的 Android 手机上的实验性 Agent：根据截图、�
 
 每项仍须记录独立结果，并核验显示释放、helper 退出、专用页消失、任务／IME 恢复记录、主屏身份、原 IME、配置／启动列表及无障碍服务／读取标志。构建成功、默认跳过、安装成功或平台探针通过均不能代替这些结果。
 
-真机前置（任一项不满足即出现固定失败码，不重试、不改判）：①加 `--no-restart`，否则 instrumentation 结束会杀掉 app 进程，已绑定的页面结构服务被系统记为崩溃且不再重绑，preflight 停在 `accessibility_unavailable`；②页面结构服务已连接，必要时在进程存活时把 `enabled_accessibility_services` 去掉 RootPilot 项再写回并回读，避免依赖已崩溃实例；③主屏 resumed 恰为 `com.example.agent/.rootpilot.RootPilotActivity`（`mainIdentity` 门），MIUI 关联启动会拦后台启动，需经 Root 显式启动并保持前台；④夹具进程存活，重装夹具 APK 会杀死它，之后 provider 调用返回 null，失败码 `acceptance_failed_fixture_initial_state`，需先用 Root 启动夹具页预热（`VirtualCapabilityActivity.current` 为空时 `virtual_state` 仍返回空 Bundle，预热不污染判定）。离线四项必须按方法传各自开关，缺参数的 assumption failure 报告为 `OK`。
+真机前置（任一项不满足即出现固定失败码，不重试、不改判）：①加 `--no-restart`，否则 instrumentation 结束会杀掉 app 进程，已绑定的页面结构服务被系统记为崩溃且不再重绑，preflight 停在 `accessibility_unavailable`；②页面结构服务已连接，必要时在进程存活时把 `enabled_accessibility_services` 去掉 RootPilot 项再写回并回读，避免依赖已崩溃实例（2026-10-10 实测：写入时整串要带引号，否则静默不生效）；③主屏 resumed 恰为 `com.example.agent/.rootpilot.RootPilotActivity`（`mainIdentity` 门），MIUI 关联启动会拦后台启动，需经 Root 显式启动并保持前台；④夹具进程存活，重装夹具 APK 会杀死它，之后 provider 调用返回 null，失败码 `acceptance_failed_fixture_initial_state`，需先用 Root 启动夹具页预热（夹具预热必须显式启动 `com.example.rootpilot.fixture/.VirtualCapabilityActivity`：`virtual_state`／`virtual_finish` 读的是它的 `current`，改启动 `ExecutionFixtureActivity` 会让收尾用例以 `fixture_preparation_unconfirmed` 失败）；⑤不要用会卸载三件套的方式跑 instrumentation：`./gradlew :app:connectedDebugAndroidTest` 结束时会卸载 app 与 test APK 并清空其数据，已保存的 DeepSeek 配置、启动白名单和运行历史都会丢失（2026-10-10 实测），真实模型验收前必须重新配置；如确需 Gradle connected，加 `-Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true` 保留安装。2026-10-10 复跑前用设备端 `sha256sum` 核对到的安装包前缀为 app-debug `aa166eb39abd7579`、androidTest `1dd96c54f2002263`、fixture `3d9dddeb3d41ba0f`，此后 Gradle 重打包的 app-debug 前缀为 `e2a5979c`；重跑前应完整记录三个 APK 的哈希，只对前缀不足以绑定证据。离线四项必须按方法传各自开关，缺参数的 assumption failure 报告为 `OK`。
 
 本轮修掉两个夹具侧缺陷：手机上的夹具 APK 早于工作区改动（保留回执里没有 mode／selection／匹配字段），重建并安装后前两项 Service 入口由 FAIL 转 PASS；`execution-fixture/src/main/java/com/example/rootpilot/fixture/VirtualCapabilityActivity.java` 的种子写入发生在 `receiptReady` 打开之前，保留回执停在 `(0,0)`，在种子之后补记一次后停止项通过。保留回执的关键字段已作为稳定 evidence 键写入产物，避免再次把陈旧夹具或陈旧回执误判成生产缺陷。
 
@@ -96,7 +98,7 @@ adb -P "$rootpilot_adb_server_port" -s "$rootpilot_device_serial" shell am instr
 
 离线四项不调用模型、不导出像素。真实 Service 入口会使用手机已配置 API 并产生费用，上传范围仅限专用副屏固定非敏感测试页、截图及控件树，遵守现有上传授权与动作确认边界；不读取或输出 Token，不读取凭据输入画面。连接／锁定／授权／目标不明时保留明确缺口，不借主屏或旧页面补验。
 
-本阶段剩余：独立复审未证实项仍需各自定范围＝真机 node.text／选区读取时序、hint 与真实内容区分、富文本／IME composing／撤销栈及 `input/VirtualDisplayTextInputPolicy.kt` 兜底 catch 的触发率（`TASKS.md` 评审待办 #16 的两处 finally 清理段已改为保留主体失败原因，待真机复跑）。之后分别接入并验收 HOME、LOCAL 键盘、尺寸／旋转及跨单步会话／任务外截图。主屏并行输入、提交中／提交后死亡、真人／通知和更多 App／厂商仍为未验证项，不由本轮七项通过自动覆盖。
+本阶段剩余：独立复审未证实项仍需各自定范围＝真机 node.text／选区读取时序、hint 与真实内容区分、富文本／IME composing／撤销栈及 `input/VirtualDisplayTextInputPolicy.kt` 兜底 catch 的触发率（`TASKS.md` 评审待办 #16 的两处 finally 清理段已改为保留主体失败原因，并已于 2026-10-10 用非空输入 parity 三探针在真机复跑确认无回归）。之后分别接入并验收 HOME、LOCAL 键盘、尺寸／旋转及跨单步会话／任务外截图。主屏并行输入、提交中／提交后死亡、真人／通知和更多 App／厂商仍为未验证项，不由本轮七项通过自动覆盖。进程死亡后的恢复验收有专门的 `TypeProcessRecoveryInstrumentedTest` 两阶段入口（`prepareServiceAtUnapprovedType` 需要真实模型与已保存的 DeepSeek 配置，主机在 45s 窗口内杀死进程后再跑 `verifyAfterHostKillAndNormalActivityReopen` 核对 `RECOVERY_REQUIRED`、历史 `INTERRUPTED` 与“不自动重放”）；2026-10-10 已核对该流程与参数，但因设备上已保存配置被 Gradle 卸载清空，本轮未执行。
 
 ## 只读手机信息工具
 
@@ -397,6 +399,7 @@ adb -P "$rootpilot_adb_server_port" -s "$rootpilot_device_serial" shell am instr
 - 限定当前授权目录，指定路径空表示根；深度 4、遍历 500 项、总读取 256 KiB、结果 20 项、查询 128 UTF-16 单元、片段 160 单元、遗漏明细 20 项。每文件取首个匹配；保留遗漏总数与固定原因，显式 complete／truncated／cannot_prove_no_match，不完整结果不能证明无匹配。
 - 每次重新扫描，无内存或持久化索引；沿用受保护的 SAF 操作和取消检查，内容读取前重验路径归属，结果返回前重验目录选择。目录外、身份改变、撤销或取消不会返回旧结果。供应商变化与扫描不是原子快照，不承诺并发期间目录内容不变。
 - 2026-10-10：只读工具失败不再结束该轮文件任务。`chat/FileAgentController.kt` 新增的 `executeTool` 按工具类别分流 `FileStorageException`：`list_files`／`read_file`／`stat_file`／`search_files` 的失败（含路径／参数校验、`TOO_LARGE`、`NOT_TEXT`、`NOT_SELECTED`、`NOT_FOUND`、`STORAGE_FAILED`／`CONFLICT` 等）改为返回固定形状的工具结果 `tool_error`（原因码）＋`tool`＋`task_continues`，由模型自行改路径、收窄范围或换文件，UI 状态只显示 `读取失败（<原因码>），已把原因回传给模型`，不写入路径、查询词或正文；失败的检索不产生 `untrusted_search_results` 或 `cannot_prove_no_match`，因此不会被当成无匹配。参数在进入存储前就不可解析（非 JSON、非字符串值、键数超过 3）仍按原样终止；参数能解析但键集合与所需不匹配（`args.keys != required`，缺参或多参）时，只读工具也以 `tool_error` 回传并继续，写入工具仍终止。写入类（`create_file`／`edit_file`，含拒绝、冲突与提交失败）保持终止与“已停止；如已开始写入，结果可能不完整”的现有语义，因为写入可能已部分生效。验证：`./dev/verify.sh` 通过（82 tasks，含 App／测试 APK 与 Lint），71 个结果文件／667 项 JVM 单测零失败／错误／跳过，`git diff --check` 干净；核心行为增量已独立静态复审 PASS（其两条 P3 已处理：写入工具键集合不匹配仍终止已补断言，本条边界已在本文件与 README 写明）。未在真机上重跑文件 Agent 场景。
+- 2026-10-10：副屏输入终态用语按用户拍板调整。`input/VirtualDisplayTextInputPolicy.kt:88` 的“SET_TEXT 已调用但回读未确认”一档，由“副屏输入可能已生效，但提交或目标／服务状态未确认；请核对结果，勿直接重放”改为“副屏输入已写入，但提交或目标／服务状态未确认；请核对结果，勿直接重放”；未提交一档（`:89`）与旧文／选区被规则拒绝一档（`:117`）不变，不重放、不清空、不读回正文的语义不变。该档在 `:143` 置位后即生效（含 `access.setText` 返回 false 或抛异常的情形），因此“已写入”是保守上界，不等于回读证据。主屏 `input/ImeTextInput.kt:53` 与恢复提示 `ui/TaskResultCard.kt:46` 仍用“可能已生效”，两者不一致属本轮有意区分（副屏输入没有 IME composing／撤销栈兜底）。三条相关单测断言同步改为 `已写入`；`./dev/verify.sh` 通过（82 tasks 含 App／测试 APK 与 Lint，71 个结果文件／667 项 JVM 单测零失败／错误／跳过）。
 - 前一基线的隔离检索用例 PASS：本地 Provider 0.018 秒、真实 DeepSeek 3.345 秒；回执进入后续请求且检索没有写入，证据为 `/tmp/rootpilot-search-and-model.CiWxqs/files-search-{synthetic,live}.txt`，未在本轮重跑。所有用例默认关闭，不用隔离 Provider 充作系统授权验收。
 - 实际 SAF：严格核对用户已授权的 `RootPilot-Acceptance-20260924-1700` URI、pointer、标签及读写 grant；本机 external-storage provider 上多级中文 name／content／stat、UTF-8 字面量、深度 4／读取 256 KiB／结果 20 项的截断断言 PASS（1.523 秒）。仅在唯一 UUID 子树准备 29 个合成文件，无既有文件改写、selection／grant 变更或删除；证据为新目录的 `saf-search.txt`。
 - 取消 PASS（0.165 秒）：另一个唯一子目录中一个合成文件，真实 FD 打开后通过只读 metadata forwarder 取消，要求流关闭且无结果；不是 provider IPC 硬实时取消。私有 pointer 版本模拟 PASS（0.241 秒）：再一个合成文件、实际 SAF IO 与私有 cache pointer，要求 IO 回派前版本改变导致 `CONFLICT`；实际用户 selection／grant 未改，不能当作 UI 切目录。三项共保留 31 个非敏感合成文件及少量私有 pointer 数据，没有删除；证据为 `saf-cancel.txt`／`saf-private-pointer.txt`。
@@ -452,6 +455,7 @@ adb -P "$rootpilot_adb_server_port" -s "$rootpilot_device_serial" shell am instr
 - **界面**：最新聊天布局的大字体＋键盘＋生成中停止、键盘收起恢复、设置二级页状态恢复、生产凭据编辑防截图生命周期、长 Markdown 与历史非空列表视觉尚未完整覆盖；旧页面通过结果不自动覆盖新布局。
 - **文件与网络**：实际 external-storage SAF 的多级检索已有限定证据；其他 DocumentsProvider、文件浏览 UI、多级大文件性能、并发修改／部分写入、真实模型拒绝／取消组合及真实 DNS／TLS／服务端故障尚未完整验证。
 - **技术边界**：Miuix 使用实验性依赖；悬浮窗、输入法面板及旧 Agent 未迁移。聊天进程死亡不保留会话；待办无跨进程 exactly-once 保证，也不是离线规划能力。
+- **默认 androidTest 集合里的 4 个 Compose 用例类已被门控跳过**：`RootPilotAppLaunchPickerInstrumentedTest`、`RootPilotScreenNavigationInstrumentedTest`、`RunHistoryScreenInstrumentedTest`、`TaskResultCardInstrumentedTest` 共 25 个 `@Test` 依赖 `createComposeRule` 启动宿主 Activity，在真机会撞上两个独立成因（①coroutines 1.9.0 的 `CoroutineExceptionHandlerImplKt.ensurePlatformExceptionHandlerLoaded` 只在 app classloader 上做一次 `ServiceLoader` 收集，看不到 androidTest APK 的 `kotlinx.coroutines.test.internal.ExceptionCollectorAsService`，抛 `java.lang.IllegalStateException: Exception handler was not found via a ServiceLoader`；②MIUI 拦截同一类里第二个宿主 Activity 启动，`Instrumentation.startActivitySync` 永久等待、约 15 分钟后 `Process crashed`），而单独跑任一用例都能通过。它们现在由 `app/src/androidTest/java/com/example/agent/rootpilot/ComposeUiTestGate.kt` 在 compose rule 启动 Activity 之前 `assumeTrue` 跳过（默认不跑），并逐个列入 `dev/expected-skips.txt`，因此默认 `connectedDebugAndroidTest` 不再出现 `Process crashed`：真机实测 25/25 为 assumption failure、控制台 `OK (25 tests)`，AGP XML 为 `tests="25" skipped="25"` 且 `dev/check-test-results.py` 判 PASS。要显式运行需加 `-e composeUiTests=true`，并先按 `TASKS.md` 评审待办 #17 的 A 配方把 `kotlinx-coroutines-test` 加进 debug 依赖（否则仍会失败／挂死）。两个成因的完整证据与取舍见 `TASKS.md` #17。
 
 ## 下一步
 

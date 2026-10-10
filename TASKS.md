@@ -2,7 +2,7 @@
 
 更新日期：2026-10-10。本文件自 [SPEC.md](SPEC.md) 拆出，统一维护“下一步做什么”：功能推进方向与代码评审待办。`SPEC.md` 只保留当前状态、验收证据与未验证项；任务完成或结论变化后回写 `SPEC.md` 对应条目，并在本文件更新状态。评审编号沿用 2026-10-09 全库评审清单；#1、#3、#6、#10 已按决定移出范围，不在本文件维护。
 
-2026-10-10 更新：#9 产品语义已确认（只读失败不终止任务、改回传模型自纠）；#7 补充“已提交未确认”的机制说明并仍待用词拍板；功能 #5 标注真机离线前置；新增「建议推进顺序」。
+2026-10-10 更新：#9 产品语义已确认（只读失败不终止任务、改回传模型自纠）；#7 补充“已提交未确认”的机制说明（终态用语已于同日拍板，见该条）；功能 #5 标注真机离线前置；新增「建议推进顺序」。
 
 2026-10-10 晚更新：`dev/verify.sh`（四连命令 + `git diff --check` + 单测汇总）与 `dev/check-test-results.py`（`skipped > 0` 报警，含 `dev/expected-skips.txt` 预期跳过名单）已落地并离线自测通过，#14 完成、#2 的“报警”部分完成；平台探针类移出默认集合待真机在线确认 runner 收集行为后再动。
 
@@ -12,13 +12,17 @@
 
 2026-10-10 文件 Agent 更新：#9 已实施——只读工具（`list_files`／`read_file`／`stat_file`／`search_files`）的失败不再结束该轮文件任务，改为把固定原因码作为工具结果回传模型自纠；写入类（`create_file`／`edit_file`，含拒绝与冲突）与“参数在进入存储前就不可解析”仍按原样终止（能解析但键集合不匹配时，只读工具按只读失败回传、写入工具仍终止）。`./dev/verify.sh` 通过（82 tasks 含 App／测试 APK 与 Lint），71 个结果文件／667 项 JVM 单测零失败／错误／跳过，核心行为增量独立静态复审 PASS，其两条 P3（写入工具键集合不匹配的终止断言、本边界措辞）已处理；README 与 SPEC 已同步。本条改动尚未提交，也未在真机上重跑文件 Agent。
 
+2026-10-10 副屏输入更新：#7 已拍板并实施——`SET_TEXT` 已调用但回读未确认的那一档终态文案，由“副屏输入可能已生效，但提交或目标／服务状态未确认；请核对结果，勿直接重放”改为“副屏输入已写入，但提交或目标／服务状态未确认；请核对结果，勿直接重放”（`input/VirtualDisplayTextInputPolicy.kt:88`），三条相关单测断言同步改为 `已写入` 并给两个用例改名；未提交一档与旧文／选区拒绝一档、不重放语义均未变，主屏与恢复提示仍用“可能已生效”（有意区分，副屏无 IME composing／撤销栈兜底）。本条改动尚未提交。
+
+2026-10-10 真机复跑更新：无线设备在新端口（`10.93.133.110:39365`，serial `12cd0365`）恢复在线，当前 main 的七项限定验收复跑 **7/7 PASS**（离线四项＋真实 Service 三项，逐项 `OK (1 test)`、零 `FAILURES!!`），#16 修复后的 parity 三探针真机 PASS；#2 的“无设备时跳过显示绿”取得真机闭环证据（`am instrument` 整类只显示 `OK (4 tests)`，AGP 单选该类得 `skipped="4"` 的 XML，`dev/check-test-results.py` 判 FAIL／退出码 2）。同轮踩到两个陷阱并已写入 SPEC／README：AGP `connectedDebugAndroidTest` 结束会卸载三件套并清空应用数据（含已保存 API 配置），夹具预热必须启动 `VirtualCapabilityActivity`。新发现默认 collected 集合里 4 个 Compose 用例类真机必失败（`Exception handler was not found via a ServiceLoader`，会以 `Process crashed` 中止本次运行），记为 #17。（#17 已于同日按路线 B 收尾：这 4 个类由 `ComposeUiTestGate` 默认跳过并列入 `dev/expected-skips.txt`，小米真机 25/25 assumption failure、`OK (25 tests)`，AGP XML `skipped="25"` 且脚本判 PASS。）
+
 ## 建议推进顺序（2026-10-10）
 
-1. **#2 与 #14／#13 合并做一小步**：先让验收脚本对 `skipped > 0` 报警，再把平台探针类移出默认集合，同时补 `dev/verify.sh`（四连命令 + `git diff --check` + skipped 报警）与构建配置小项。理由：本轮真机验收已实测到“4 个 assumption failure 仍显示 `OK (4 tests)`”，它直接决定“以为通过”的可信度；改动面小、当天可见效。（进度 2026-10-10：`dev/verify.sh`、`dev/check-test-results.py`、`dev/expected-skips.txt` 已落地；#13 构建配置小项与探针类移出仍待办。）
+1. **#2 与 #14／#13 合并做一小步**：先让验收脚本对 `skipped > 0` 报警，再把平台探针类移出默认集合，同时补 `dev/verify.sh`（四连命令 + `git diff --check` + skipped 报警）与构建配置小项。理由：本轮真机验收已实测到“4 个 assumption failure 仍显示 `OK (4 tests)`”，它直接决定“以为通过”的可信度；改动面小、当天可见效。（进度 2026-10-10：`dev/verify.sh`、`dev/check-test-results.py`、`dev/expected-skips.txt` 已落地，报警部分也已用真机产物验证；#13 构建配置小项与“探针类移出默认集合”仍待办。新增的 #17——会让默认集合里的 4 个 Compose 类整次运行 crashed——已在同日按路线 B 收尾：4 个类由 `ComposeUiTestGate` 在启动 Activity 前默认跳过并逐个列入名单，小米真机与 API 35 模拟器均已复核。）
 2. ~~**#5 create_todo 双重解码与 dueAt 语义校验**~~：2026-10-10 逐条取证后**核心证据不成立**（见该条），已补回归测试；剩余只有“双重解码”这一维护性改动，并入第 6 条架构三步。
 3. **#16 与 #12**：均为低风险小修（清理断言消息丢失／主线程解码整屏 PNG），可顺手并入下一次改动。（进度 2026-10-10：~~#16~~ 已完成（两处 finally 清理段已不再吞断言消息，待真机复跑）；~~#12~~ 已完成（独立复审 PASS；尚未提交，也未在真机上看解码时序）。）
-4. **#7、#9**：~~#9~~ 已实施并独立复审 PASS（只读失败以原因码回传模型自纠、写入类维持终止，见该条）；#7 只剩终态用词拍板。
-5. **功能 #5 真机生命周期补测**：需真机在线（2026-10-10 无线已断联），恢复连接后再约。
+4. ~~**#7、#9**~~：#9 已实施并独立复审 PASS（只读失败以原因码回传模型自纠、写入类维持终止）；#7 终态用语已按拍板改为“已写入”。
+5. **功能 #5 真机生命周期补测**：无线设备已恢复在线（2026-10-10 新端口 `10.93.133.110:39365`），但设备上已保存的 DeepSeek 配置被 Gradle connected 运行清空，真实模型的恢复类验收需用户先重新填写配置；离线部分可先做。
 6. **架构三步**（[docs/architecture-notes.md](docs/architecture-notes.md)）：AppContainer → 拆 RunController／runSteps → 去 create_todo 双重解码；不单独立项，按改动顺手推进。
 
 ## 功能下一步
@@ -27,7 +31,7 @@
 2. 在平台探针已证明可行的条件下分别推进 HOME、LOCAL 键盘、尺寸／旋转及跨单步会话／任务外截图的最小产品接入与闭环验收；仍需明确各能力的生命周期和配置边界，不据探针直接扩大默认产品行为。
 3. 已有固定失败类别；仅在再次真实失败时收集协议细分或 HTTP／网络类固定证据，不保存原文，不自动重放已成功的输入，不据未证实假设改预算或协议守卫。
 4. 已在预置公开世界时钟页完成“启动 → 中文搜索 → 读取结果”限定验收；后续如需扩展，另行界定冷启动／其他应用范围。保留测试页自动关闭回执异常，保持历史误点诊断暂缓边界。
-5. 无障碍已手动恢复，强杀后的自动重绑异常仍需单独归因。在已确认的专用范围内补真人／通知确认、Service 单独销毁恢复、输入提交中／提交后或其他副作用执行期间的进程死亡及查询中断连；不把受控 OpenApp／Type 待确认死亡或运行前手工断连当作所有生命周期场景通过。（前置：2026-10-10 无线真机已断联，需重新开启无线调试取得新端口，或另行授权 USB 设备后再约。）
+5. 无障碍已手动恢复，强杀后的自动重绑异常仍需单独归因。在已确认的专用范围内补真人／通知确认、Service 单独销毁恢复、输入提交中／提交后或其他副作用执行期间的进程死亡及查询中断连；不把受控 OpenApp／Type 待确认死亡或运行前手工断连当作所有生命周期场景通过。（前置 2026-10-10：无线设备已在新端口 `10.93.133.110:39365` 恢复在线并完成七项复跑；但设备上已保存的 DeepSeek 配置与运行历史被 Gradle connected 运行清空，真实模型的恢复类验收需用户先在 App 内重新填写 API 配置。Type 待确认死亡两阶段已确认走 `TypeProcessRecoveryInstrumentedTest`：`prepareServiceAtUnapprovedType` → 主机在 45s 窗口内杀进程 → `verifyAfterHostKillAndNormalActivityReopen` 核对 `RECOVERY_REQUIRED`、历史 `INTERRUPTED`、恢复入口因未开上传确认被拒与不自动重放。）
 6. 按实际风险补界面、厂商、活跃多显示与 GKD 业务共存；节点点击、跨步缓存和更多信息源仍需独立定范围，不扩展后台无人值守敏感操作。
 7. 补其他 SAF 提供方及实际文件 UI；JSON 字段编辑、批量预览和文件到手机的交接仍需独立定范围，不把研究候选算成已实现功能。
 
@@ -41,7 +45,8 @@
 - 建议：验收脚本对 `skipped > 0` 报警而不是只看 failed；平台探针类移出默认集合或去掉 `Test` 后缀（另有 3 个 `*Probe*InstrumentedTest` 被 runner 收集、4 个 0 `@Test` 的支撑文件混在 androidTest）。
 - 进度 2026-10-10：报警部分已完成——`dev/check-test-results.py` 把“名单外跳过”判为 FAIL(2)（退出码 0 通过／1 有失败／2 有未预期跳过／3 无结果或参数错误），`dev/expected-skips.txt` 只列 3 个显式 opt-in 的探针用例；离线自测 6 个场景通过，`dev/verify.sh` 也用它汇总单测。
 - 注意：3 个探针类并非整类门控——`VirtualCalculatorUsageProbeInstrumentedTest` 另有 4 个非门控用例（:211/:226/:234/:248），`VirtualCalculatorEqualityEffortProbeInstrumentedTest` 另有 2 个（:231/:247），每类只有 1 个 live 用例受 `-e` 开关控制；所以“去掉 `Test` 后缀”不能整类做，只能把受门控的 live 用例拆出去，且改前要用真机确认 runner 的收集规则。
-- 状态：部分完成（报警已落地；探针类移出默认集合待真机在线）
+- 进度 2026-10-10（真机）：告警有效性已用真机产物验证——不给开关跑整类，`am instrument` 只显示 `OK (4 tests)`（加 `-r` 才见四个 `INSTRUMENTATION_STATUS_CODE: -4` 的 assumption failure）；改用 AGP 单选该类取得 `tests="4" failures="0" skipped="4"` 的 XML（含四个 `<skipped/>`），`dev/check-test-results.py` 判 FAIL、退出码 2。同轮还发现默认集合里 4 个 Compose 用例类真机必失败（见 #17），说明默认 `connectedAndroidTest` 的问题不只是“跳过显示绿”，还有“跑了就 crash”。
+- 状态：部分完成（报警已落地并经真机产物验证；探针类移出默认集合待定）
 
 ### #4（中）androidTest 样板大量复制
 
@@ -57,12 +62,13 @@
 - 剩余：只有“双重解码”这一维护性问题（RootPilot 动作协议依赖旧 Agent 的 decoder，超限错误文案也来自旧 Agent）。按 AGENTS.md“默认最小改动、不顺手重构旧 Agent”，并入架构三步第 3 步（[docs/architecture-notes.md](docs/architecture-notes.md)），本轮不动。
 - 状态：证据不成立，已补回归测试；维护性改动并入架构三步
 
-### #7（中）副屏写入终态语义 · 需产品语义确认
+### #7（中）副屏写入终态语义 · 已完成 2026-10-10
 
-- 现状：实现已有两档固定文案（未提交“副屏输入目标不可用或已变化，未提交文本”／SET_TEXT 后未确认“副屏输入可能已生效，但提交或目标／服务状态未确认”），plan 被规则拒绝另有独立原因码（复审修复）。
-- 为什么会出现“已提交但未确认”：SET_TEXT 是写给目标输入框的写操作，之后的确认依赖同一绑定上的屏幕观察（`input/VirtualDisplayTextInputPolicy.kt:95-104` 要求会话／显示 id、目标一致、前台包一致且键盘可见性可读，任一条件在 `:65` 的 3s 超时内不成立就拿不到观察结果）。此时既不能断言“没写”（写可能已落地），也不能断言“已写”（没有回读证据），所以只能报“可能已生效”；也不做二次重放，避免重复插入。
-- 待确认：“可能已生效”是否为可接受终态用语、是否需要更强的“已写入未确认”区分（建议沿用主屏 `input/ImeTextInput.kt:53` 与任务恢复 `ui/TaskResultCard.kt:46` 的“可能已生效／部分操作可能已生效 … 不会自动重放”，不升级为“已写入”）。
-- 状态：待处理（仅剩产品语义确认）
+- 现状：两档固定文案——未提交“副屏输入目标不可用或已变化，未提交文本”／`SET_TEXT` 已调用但回读未确认“副屏输入已写入，但提交或目标／服务状态未确认；请核对结果，勿直接重放”；plan 被规则拒绝另有独立原因码（复审修复）。
+- 为什么会出现“已提交但未确认”：`SET_TEXT` 是写给目标输入框的写操作，之后的确认依赖同一绑定上的屏幕观察（`input/VirtualDisplayTextInputPolicy.kt:95-104` 要求会话／显示 id、目标一致、前台包一致且键盘可见性可读，任一条件在 `:65` 的 3s 超时内不成立就拿不到观察结果）。此时既不能断言“没写”，也没有回读证据；“已写入”是保守上界，`attempted` 在 `:143` 置位（含 `access.setText` 返回 false 或抛异常的情形）；不做二次重放，避免重复插入。
+- 已拍板（用户 2026-10-10）：采用“已写入未确认”一档，不再用“可能已生效”。实施＝`input/VirtualDisplayTextInputPolicy.kt:88` 改文案，`app/src/test/java/com/example/agent/rootpilot/input/VirtualDisplayTextInputPolicyTest.kt` 三条断言改 `contains("已写入")`、两个用例改名（`…ReportsWrittenButUnconfirmed…`）。
+- 有意保留的不一致：主屏 `input/ImeTextInput.kt:53`（“输入可能已生效，但原输入法未恢复”）与恢复提示 `ui/TaskResultCard.kt:46`（“部分操作可能已生效 … 不会自动重放”）不动，因为副屏输入没有 IME composing／撤销栈兜底。
+- 状态：已完成 2026-10-10（尚未提交、未真机复跑非空输入失败档）。
 
 ### #8（中）多轮文件任务思考被清空
 
@@ -123,3 +129,19 @@
 
 - README 副屏 `type` 文案：原写“只支持空框、非空一律拒绝”，与已接入生产源码的非空语义及同文件探针说明自相矛盾；本轮已改写为当前语义并标注空框／非空各自的验收状态。
 - 设计取舍文档化：旧文超过 128 个 UTF-16 单元时在 `app/src/main/java/com/example/agent/rootpilot/input/VirtualDisplayTextInputPolicy.kt` 的接受判定层即被拒，沿用“目标不可用或已变化”漂移文案（即超限旧文视为不可绑定目标）；已写入 SPEC 与 README 的副屏 `type` 说明。
+
+### #17（中）默认 androidTest 集合里的 Compose 用例类真机必失败（两个独立成因）
+
+- 证据（复现）：4 个使用 `createComposeRule`／`createAndroidComposeRule` 的 instrumented 类（`app/src/androidTest/java/com/example/agent/rootpilot/RootPilotAppLaunchPickerInstrumentedTest.kt`、`RootPilotScreenNavigationInstrumentedTest.kt`、`RunHistoryScreenInstrumentedTest.kt`、`TaskResultCardInstrumentedTest.kt`，合计 25 个 `@Test`，全部 0 处 `assumeTrue` 门控）在真机失败：`java.lang.IllegalStateException: Exception handler was not found via a ServiceLoader`（`kotlinx.coroutines.internal.CoroutineExceptionHandlerImplKt.ensurePlatformExceptionHandlerLoaded` ← `kotlinx.coroutines.test.TestScopeImpl.enter` ← Compose 的 `AndroidComposeUiTestEnvironment.runTest`）。2026-10-10 手工 `am instrument` 与 `./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.example.agent.rootpilot.TaskResultCardInstrumentedTest` 均复现，后者 `Instrumentation run failed due to Process crashed`、`BUILD FAILED in 13m21s`、XML `tests=1 failures=1`；加不加 `su` 都一样。
+- 成因①（异常处理器查找的 classloader 归属，与版本无关）：`CoroutineExceptionHandlerImplKt` 的静态初始化在 **app APK 的 classloader** 上执行一次性 `ServiceLoader.load(CoroutineExceptionHandler::class.java, CoroutineExceptionHandler::class.java.classLoader).asSequence().toList()`，只看到 app APK 的 `kotlinx.coroutines.android.AndroidExceptionPreHandler`；androidTest APK 的 `kotlinx.coroutines.test.internal.ExceptionCollectorAsService` 属于另一个 classloader，永远进不了这个列表。真机诊断探针实测：app loader 与 test loader `sameLoader=false`、`contextClassLoader`＝app loader、`getResources` 分别命中 1／3 份、`ServiceLoader` 分别 1 项（仅 Android 实现）／2 项（Android＋测试实现）。合入判定靠 `ExceptionCollector.equals(other) = other is ExceptionCollector || other is ExceptionCollectorAsService`，所以只有让 app APK 自己带上测试侧提供者才有解。版本：`gradle/libs.versions.toml:13` coroutines core／android／test 均 1.9.0；`app/build.gradle.kts` 只把 coroutines-test 声明为 `testImplementation`（约 :81），androidTest 侧靠 `androidx.ui.test.junit4` 传递。
+- 成因②（MIUI 拦截同一类里第二个宿主 Activity 启动）：同类第二个用例启动宿主 Activity 时被系统当后台弹界面掐掉——logcat `D ActivityStarterImpl: MIUILOG- Permission Denied Activity …`、`E ActivityTaskManager: Abort background activity starts from 10479`、该次 `START … (BAL_ALLOW_PERMISSION) result code=102`（同轮先前一次是 `(BAL_ALLOW_VISIBLE_WINDOW) result code=0`），于是 `android.app.Instrumentation.startActivitySync(Instrumentation.java:645)` 永久等待；`kill -3` 得到的 `/data/anr/trace_01` 栈为 `startActivitySync` ← `InstrumentationActivityInvoker.startActivity` ← `ActivityScenario.launchInternal` ← `ActivityScenario.launch` ← `ActivityScenarioRule.before` ← `AndroidComposeTestRule`，约 15 分钟后以 `Process crashed` 结束。**单独跑任一用例都能通过**（`-e class "…#onlySuccessfulSavedTodoEvidenceIsShownAndSurvivesLaterFailure"` → `OK (1 test)`、Time 0.912s）。
+- 已排除：升级 coroutines 修不好——1.9.0／1.10.0／1.10.2／1.11.0（Maven Central 当期最新）的 `CoroutineExceptionHandlerImplKt` 与 `TestScope` 调用点字节码一致（`kotlinx.coroutines.test` 侧 `runTest` 同样调 `ensurePlatformExceptionHandlerLoaded(ExceptionCollector)`），与本项无关。
+- 已验证的 A 配方（本轮未采用，留档）：`app/build.gradle.kts` 加 `debugImplementation(libs.kotlinx.coroutines.test)`，AGP 会把两份 `META-INF/services/kotlinx.coroutines.CoroutineExceptionHandler` 合并进 debug APK（`ExceptionCollectorAsService` ＋ `AndroidExceptionPreHandler`），这些用例即可在真机运行（已实测单跑通过）。代价：同一个 jar 的 `META-INF/services/kotlinx.coroutines.internal.MainDispatcherFactory` 也被合并，debug APK 的 `Dispatchers.Main` 变成 `TestMainDispatcher`（默认委托给 Android 的实现），真机验收的运行时因此偏离生产配置。另试过 `packaging.resources.pickFirsts` ＋ `app/src/debug/resources` 自备服务文件（只留 Android factory，生产 Main 不受影响）：APK 内容核对成功，但真机单跑这些 Compose 用例**挂死**，说明用例依赖 `Dispatchers.Main` 即 `TestMainDispatcher`，故“无副作用修法”不可行。
+- 决策 2026-10-10（用户拍板走路线 B）：回退上述实验，保持 debug APK 与已取的 7/7 验收证据一致；把这 4 个类从默认 collected 集合移出或加门控（门控必须在 compose rule 启动 Activity **之前**生效，`@Before` 里的 `assumeTrue` 太晚，用 `@Ignore` 或外层 `RuleChain` 包住 compose rule）；A 配方留档在本条，将来真要跑这些 UI 用例时再开。
+- 操作教训：`./gradlew :app:assembleDebugAndroidTest` **不会**重建 app APK（必须同时 `:app:assembleDebug`）；`am instrument -w` 必须配看门狗（无超时，曾白等约 20 分钟；事后 `am force-stop` 会让输出变成误导性的 `Process crashed`）；`connectedDebugAndroidTest` 会卸载三件套并清空应用数据（已写入 README／SPEC）。
+- 关联：与 #2 同源（默认 collected 集合的可信度），但 #13 的构建配置小项不含本项。
+- 实施与验证（2026-10-10，**已完成**，未提交）：①实验回退（`debugImplementation`、`packaging` 块、`app/src/debug/resources/**` 全部撤销）、临时诊断探针 `ServiceLoaderDiagnosticInstrumentedTest.kt` 删除、`app/build.gradle.kts` 与 `app/src/debug/` 恢复干净；②新增 `app/src/androidTest/java/com/example/agent/rootpilot/ComposeUiTestGate.kt`（`TestRule`：没有 `-e composeUiTests=true` 就 `assumeTrue(false)`），4 个类改为 `private val compose = createComposeRule()` ＋ `@get:Rule val rules: RuleChain = RuleChain.outerRule(ComposeUiTestGate()).around(compose)`，门控因此发生在 compose rule 启动宿主 Activity 之前（不是 `@Before`）；③25 个用例按精确 `包名.类名.方法名` 记入 `dev/expected-skips.txt` 的 `#17 门控` 段（全文件 28 条数据行＝3 条平台探针＋25 条本项，无重复）。
+  - 真机证据（小米 15，serial `12cd0365`，USB）：`adb shell am instrument -w -r -e class <4 个类> com.example.agent.test/androidx.test.runner.AndroidJUnitRunner` → `OK (25 tests)`、25 个 `INSTRUMENTATION_STATUS_CODE: -4`（assumption failure，消息即门控文案）、0 个 `-1/-2`、无 `Process crashed`，耗时 0.01s 量级（此前同类运行是约 15 分钟后 `Process crashed`）。用 `-r` 才看得到这些状态行。
+  - 模拟器证据（API 35 AVD `Medium_Phone`）＋脚本闭环：AGP XML `TEST-Medium_Phone(AVD) - 15-_app-.xml` 为 `tests="25" failures="0" errors="0" skipped="25"`（25 个 `<testcase>` 全带 `<skipped/>`），`python3 dev/check-test-results.py "<XML>"` 判 `PASS`（退出码 0）；把名单换成空文件即判 `FAIL`（退出码 2），说明 `skipped > 0` 报警仍然有效。
+  - 路线 B 前提已核对：`app/build/outputs/apk/debug/app-debug.apk` 的 `META-INF/services/kotlinx.coroutines.CoroutineExceptionHandler` 已回到只含 `kotlinx.coroutines.android.AndroidExceptionPreHandler`（与 7/7 验收时的 debug APK 一致）；`app/build.gradle.kts` 无 diff。
+  - 注意：门控只让这些用例默认不跑；显式加 `-e composeUiTests=true` 后仍会撞上成因①／②（MIUI 上会挂死约 15 分钟），真要跑起来必须先按上面的 A 配方把 `kotlinx-coroutines-test` 加进 debug 依赖。

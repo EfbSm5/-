@@ -22,11 +22,15 @@ import com.example.agent.rootpilot.ui.RunHistoryScreen
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class RunHistoryScreenInstrumentedTest {
-    @get:Rule val compose = createComposeRule()
+    private val compose = createComposeRule()
+
+    @get:Rule
+    val rules: RuleChain = RuleChain.outerRule(ComposeUiTestGate()).around(compose)
 
     @Test fun emptyHistoryCannotBeClearedAndCanReturn() {
         var back = 0
