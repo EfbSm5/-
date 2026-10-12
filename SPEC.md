@@ -98,7 +98,7 @@ adb -P "$rootpilot_adb_server_port" -s "$rootpilot_device_serial" shell am instr
 
 离线四项不调用模型、不导出像素。真实 Service 入口会使用手机已配置 API 并产生费用，上传范围仅限专用副屏固定非敏感测试页、截图及控件树，遵守现有上传授权与动作确认边界；不读取或输出 Token，不读取凭据输入画面。连接／锁定／授权／目标不明时保留明确缺口，不借主屏或旧页面补验。
 
-本阶段剩余：独立复审未证实项仍需各自定范围＝真机 node.text／选区读取时序、hint 与真实内容区分、富文本／IME composing／撤销栈及 `input/VirtualDisplayTextInputPolicy.kt` 兜底 catch 的触发率（`TASKS.md` 评审待办 #16 的两处 finally 清理段已改为保留主体失败原因，并已于 2026-10-10 用非空输入 parity 三探针在真机复跑确认无回归）。之后分别接入并验收 HOME、LOCAL 键盘、尺寸／旋转及跨单步会话／任务外截图。主屏并行输入、提交中／提交后死亡、真人／通知和更多 App／厂商仍为未验证项，不由本轮七项通过自动覆盖。进程死亡后的恢复验收有专门的 `TypeProcessRecoveryInstrumentedTest` 两阶段入口（`prepareServiceAtUnapprovedType` 需要真实模型与已保存的 DeepSeek 配置，主机在 45s 窗口内杀死进程后再跑 `verifyAfterHostKillAndNormalActivityReopen` 核对 `RECOVERY_REQUIRED`、历史 `INTERRUPTED` 与“不自动重放”）；2026-10-10 已核对该流程与参数，但因设备上已保存配置被 Gradle 卸载清空，本轮未执行。
+本阶段剩余：独立复审未证实项仍需各自定范围＝真机 node.text／选区读取时序、hint 与真实内容区分、富文本／IME composing／撤销栈及 `input/VirtualDisplayTextInputPolicy.kt` 兜底 catch 的触发率（`TASKS.md` 评审待办 #16 的两处 finally 清理段已改为保留主体失败原因，并已于 2026-10-10 用非空输入 parity 三探针在真机复跑确认无回归）。之后分别接入并验收 HOME、LOCAL 键盘、尺寸／旋转及跨单步会话／任务外截图。主屏并行输入、提交中／提交后死亡、真人／通知和更多 App／厂商仍为未验证项，不由本轮七项通过自动覆盖。主屏进程死亡后的恢复验收有专门的 `TypeProcessRecoveryInstrumentedTest` 两阶段入口（`prepareServiceAtUnapprovedType` 需要真实模型与已保存的 DeepSeek 配置，主机在 45s 窗口内杀死进程后再跑 `verifyAfterHostKillAndNormalActivityReopen` 核对 `RECOVERY_REQUIRED`、历史 `INTERRUPTED` 与“不自动重放”）；用户恢复配置并启用 RootPilot 输入法后，2026-10-11 当前产物复跑限定通过，见“Type 待确认进程死亡复跑”。该主屏结果不替代副屏非空输入提交中／提交后的死亡验收。
 
 ## 只读手机信息工具
 
@@ -305,6 +305,14 @@ adb -P "$rootpilot_adb_server_port" -s "$rootpilot_device_serial" shell am instr
 - 上述网络失败后的唯一一次正常输入重试仍 FAIL（19.342 秒），run `94b2c9a1-35e0-4015-bca5-bac36484052b`。完整 38 项事件中，三类查询成功后批准并成功执行一次 Type，下一步截图及三类查询成功；第 8 次模型请求以 `RESPONSE_PROTOCOL / EMPTY_OUTPUT` 失败，正文 22 个字符全部为空白，`finishReason=STOP`，最终 FAILED。终态断言先失败，未到达测试页最终文本匹配断言，因此不能把执行成功回执当作完整输入验收 PASS。按重试上限暂停后，用户明确同意跳过此异常继续上述独立待确认恢复用例；没有再次重放正常输入，也未扩大为模型协议修复。
 - 重试收尾断言没有清理异常；再次独立回读确认原输入法已恢复，任务快照及 IME 恢复文件／旁路文件均不存在，RootPilot／GKD／Cumulus 全部绑定且 `Crashed services` 为空。固定测试页已关闭；未截图或操作随后恢复的其他应用页面。
 - 本轮证据目录 `/tmp/rootpilot-input-recovery.peKFVC/`，包括停止／正常完成失败回执及对应脱敏历史、`type-process-recovery.txt`、`type-process-recovery-history.json`、`type-recovery-a11y-offline.txt` 和无障碍恢复前后列表及系统页面截图。历史文件仅保存对应本次 run 的固定字段，不保存凭据、模型原文或用户输入。没有清空／改写历史；恢复后共 50 条，仍保留原先的 49 条。
+
+### Type 待确认进程死亡复跑（2026-10-11，真机限定 PASS）
+
+- 小米 15（serial `12cd0365`／型号 `24129PN74C`）上沿用已提交的 `TypeProcessRecoveryInstrumentedTest` 和真实生产 Service／已保存 DeepSeek 配置；不改生产代码、不构建或安装新包。真实模型产生 Type 后保持未批准，准备阶段持续核对同一输入目标、待确认状态及恢复文件，host 校验本轮 receipt、PID／UID／启动时刻和有效期后仅终止主进程。
+- 最终 run `63e67733-c5aa-4855-bb40-6bd0924a1f7b`、receipt `5b910948-bb02-4ede-bc3d-81dcb76eb35b`：原主 PID `20572` 被终止，普通 Activity 重开后 PID `13452`；fixture PID `27239` 与实例 UUID `181a9cc4-0f76-4e6f-9445-ba4d6786b276` 保持一致。host 在 45 秒有效窗口内完成身份复核并杀旧进程，留存 summary 记录 ready 后至验证／收尾共 2715 ms，验证阶段 1.236 秒 `OK (1 test)`；`passed`／`baselineRestored`／`verifyClaimed` 均为 true，`reasonCode`／`cleanupReasonCode` 均为 `NONE`。prepare 的 `Process crashed` 是本次主动杀进程产生的预期中断，不单独计作通过。
+- 验证断言覆盖 `RECOVERY_REQUIRED`、历史 `INTERRUPTED`、pendingAction／frame 清空、上传同意 false、未重新授权的 RECOVER 被拒；同一测试页仍为空，原小米输入法恢复，IME 恢复记录清除，随后只放弃本次测试快照并还原原配置／启动列表。独立证据复核限定 PASS：完整历史、日志与状态断言未见重开后新增模型请求／截图／执行或批准动作；回执四个 0 是这些断言通过后填写的常量，并非独立计数器或网络抓包。无 trace 的隐式副作用不在该测试可证范围；持续观察窗口为 1 秒，不保证窗口外长期稳定。没有关闭 QQ、GKD 或 Shizuku；第三方无障碍设置前后字节一致。本轮不验证 RootPilot 无障碍强杀后自动重绑。
+- 当前三件套本机与安装包 SHA-256 均一致：产品 `8d62d416d520c17513ab852cb6792138153526b3712f20f4fba4e8416bf2cf47`、测试 `0b3682434e4a9fb7070ff880f3a492a47c68c825fad5524e60e6042463c07711`、fixture `3d9dddeb3d41ba0f4442940bc1a926b1711cc817787de938e0718ea0a83abade`。证据在 `/tmp/rootpilot-type-recovery-20261010-235653-4f11db/`：`metadata.json` 是前置失败轮的产物核对，最终依据 `rerun-prepare.txt`、`rerun-verify.txt`、`rerun2-summary.json` 与 `final-state.json`，不同 receipt 不混用。`final-state.json` 于验收后 00:05:32 再次直接核对当前安装三件套与本机哈希一致，补充最终产物的时间绑定。
+- 失败记录保留：首轮 `IME_UNAVAILABLE`（1.215 秒）未启动真实任务；用户手动启用 RootPilot 输入法后再验。宿主新脚本首次在 PID 身份查询因 ADB shell 引号丢失退出，未启动 instrumentation；修正命令传参后才取得上述结果。更早的前台／连接失败不据本次成功反推 root 权限不足或 QQ 干扰。未覆盖 commitText 进行中／提交后死亡、真人／通知确认、Service 单独销毁、查询中断连或其他厂商；功能 #5 仍为部分完成。
 
 ### 真实时钟中文城市搜索（2026-10-05，业务限定 PASS／自动测试 FAIL，已手动收尾）
 
