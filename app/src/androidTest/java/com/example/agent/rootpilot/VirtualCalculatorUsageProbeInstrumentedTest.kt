@@ -43,168 +43,172 @@ import org.junit.runner.RunWith
 /** Fixed, opt-in, transport-only diagnosis. Returned actions and tools are never dispatched. */
 @RunWith(AndroidJUnit4::class)
 class VirtualCalculatorUsageProbeInstrumentedTest {
-    @Test
-    fun diagnosesRetainedResultWithoutDeviceActions() = runBlocking {
-        assumeTrue(InstrumentationRegistry.getArguments().getString("liveVirtualUsageProbe") == "true")
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val state = RootPilotService.uiState.value
-        requireFixed(!state.running && state.pendingAction == null && state.status == RootPilotStatus.FAILED &&
-            state.step == 6, "prior_state_required")
-        val history = RootPilotService.historyState(context)
-        val originalHistory = history.value
-        val prior = originalHistory.records.singleOrNull { it.id == PRIOR_ID } ?: reject("prior_record_missing")
-        requireFixed(originalHistory.error == null && prior == originalHistory.records.maxByOrNull { it.startedAtEpochMs } &&
-            !prior.eventsTruncated && prior.status == RunHistoryStatus.FAILED &&
-            prior.events.lastOrNull()?.let { it.event == TraceEvent.RUN_END && it.step == 6 &&
-                it.modelFailure?.protocolReason == ModelProtocolReason.OUTPUT_LIMIT } == true, "prior_failure_required")
-        val expected = listOf(TraceActionType.OPEN_APP to 0) + (0..5).map { TraceActionType.TAP to it }
-        val executions = prior.events.filter { it.stage == TraceStage.EXECUTION }
-        requireFixed(executions.size == 14 && executions.chunked(2).zip(expected).all { (pair, action) ->
-            pair.all { it.actionType == action.first && it.step == action.second } &&
-                pair.map { it.event } == listOf(TraceEvent.START, TraceEvent.RESULT) &&
-                pair.map { it.status } == listOf(TraceStatus.STARTED, TraceStatus.SUCCESS)
-        } && prior.events.filter { it.event == TraceEvent.CONFIRMED }.map { it.actionType to it.step } == expected,
-            "prior_execution_required")
-        requireFixed(prior.events.none { it.stage == TraceStage.INFORMATION || it.event == TraceEvent.TODO_SAVED },
-            "prior_information_mismatch")
-        val receipt = File(context.cacheDir, PRIOR_DIRECTORY).resolve("metadata.json")
-        requireFixed(receipt.isFile && receipt.length() in 1..16_384, "receipt_required")
-        val metadata = Json.parseToJsonElement(receipt.readText()).jsonObject
-        requireFixed(metadata["runId"]?.jsonPrimitive?.contentOrNull == PRIOR_ID &&
-            metadata["firstKeyIndex"]?.jsonPrimitive?.intOrNull == 1 &&
-            metadata["currentRunApprovedKeyCount"]?.jsonPrimitive?.intOrNull == 6 &&
-            listOf("result5535Observed", "resultVirtualImageSaved", "remainingKeysApproved", "runEnd", "displayGone",
-                "cleanupConfirmed", "imeUnchanged", "configRestored", "allowlistBytesRestored")
-                .all { metadata[it]?.jsonPrimitive?.booleanOrNull == true }, "receipt_mismatch")
-        val frame = state.frame ?: reject("retained_frame_required")
-        val resultFile = receipt.parentFile!!.resolve("result.jpg")
-        requireFixed(resultFile.isFile && resultFile.length() in 8..1_048_576 &&
-            frame.bytes.size in 8..1_048_576 && frame.bytes.contentEquals(resultFile.readBytes()), "frame_receipt_mismatch")
-        val digest = MessageDigest.getInstance("SHA-256").digest(frame.bytes).joinToString("") { "%02x".format(it) }
-        requireFixed(digest == "85a75634263e46c9541c0dac80630ffe4a9e94326965800adede2819ce82ba27" &&
-            frame.width == 720 && frame.height == 1280 && frame.physicalWidth == 1080 && frame.physicalHeight == 1920 &&
-            frame.dataUrl == "data:image/jpeg;base64," + Base64.encodeToString(frame.bytes, Base64.NO_WRAP), "frame_invalid")
-        val dimensions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(frame.bytes, 0, frame.bytes.size, dimensions)
-        requireFixed(dimensions.outMimeType == "image/jpeg" && dimensions.outWidth == 720 && dimensions.outHeight == 1280,
-            "frame_decode_invalid")
-        val manager = context.getSystemService(DisplayManager::class.java) ?: reject("display_manager_required")
-        fun unchanged() = requireFixed(RootPilotService.uiState.value === state && history.value == originalHistory &&
-            manager.displays.none { it.name.startsWith(VirtualDisplayProtocol.DISPLAY_PREFIX) }, "environment_changed")
-        unchanged()
-        val saved = try { RootPilotApiConfigStore.create(context).read() } catch (_: Exception) { null }
-            ?: reject("saved_config_required")
-        requireFixed(saved.baseUrl.trimEnd('/') == "https://api.deepseek.com" && saved.apiKey.isNotBlank(), "endpoint_required")
-        val request = DeepSeekVisionRequest(
-            saved.applyTo(RootPilotConfig(task = TASK, allowScreenUpload = true,
-                executionDisplay = ExecutionDisplay.VIRTUAL, virtualDisplayStartPackage = "com.miui.calculator")),
-            frame, listOf(447 to 830, 675 to 830, 875 to 676, 308 to 781, 493 to 749, 878 to 902).mapIndexed { index, xy ->
-                "step=$index action=tap(${xy.first},${xy.second}) result=success"
-            }, remainingSteps = 14, step = 6,
-            availableApps = listOf(RootPilotApp("com.miui.calculator", "计算器", "com.miui.calculator.cal.CalculatorActivity")),
-            observation = null, observationStartedAtMillis = null,
-        )
-        // Only pure prompt construction is reflected; no execution or lifecycle internals are invoked.
-        val promptBuilder = HttpDeepSeekClient::class.java.getDeclaredMethod("buildUserPrompt",
-            DeepSeekVisionRequest::class.java, Boolean::class.javaPrimitiveType).apply { isAccessible = true }
-        val prompt = promptBuilder.invoke(HttpDeepSeekClient(), request, true) as String
-        val system = HttpDeepSeekClient::class.java.getField("SYSTEM_PROMPT").get(null) as String
-        val high = Json.parseToJsonElement(buildDeviceDecisionRequest(request, emptyList(), true, system, prompt)).jsonObject
-        requireFixed(high["max_tokens"] == JsonPrimitive(8192) && high["reasoning_effort"] == JsonPrimitive("high"),
-            "baseline_changed")
-        val noThinking = JsonObject(high.toMutableMap().apply {
-            put("thinking", buildJsonObject { put("type", "disabled") }); remove("reasoning_effort")
-        })
-        val switches = setOf("thinking", "reasoning_effort")
-        requireFixed(high.filterKeys { it !in switches } == noThinking.filterKeys { it !in switches }, "context_changed")
-        // A fixed receipt-scoped directory makes this authorization single-use, including after process death.
-        val directory = File(context.cacheDir, "virtual-model-usage-probe-$PRIOR_ID")
-        requireFixed(directory.mkdir(), "authorization_already_attempted")
-        val outcomes = mutableListOf<JsonObject>()
-        var attempts = 0
-        fun publish() {
-            val report = buildJsonObject {
-                put("source", "verified_result_frame_reconstructed_last_step"); put("originalWireReplay", false)
-                put("liveScreenObservationIncluded", false); put("modelRequestsAttempted", attempts); put("maxModelRequests", 2)
-                put("deviceActions", 0); put("toolDispatches", 0); put("serviceCommands", 0); put("configurationChanged", false)
-                putJsonArray("outcomes") { outcomes.forEach(::add) }
-            }.toString()
-            directory.resolve("metadata.json").writeText(report)
-            InstrumentationRegistry.getInstrumentation().sendStatus(0, Bundle().apply {
-                putString("artifactDirectoryName", directory.name); putString("modelUsageProbe", report)
+    // Default AndroidJUnitRunner scanning excludes nested classes; select this class explicitly.
+    @RunWith(AndroidJUnit4::class)
+    class LiveProbe {
+        @Test
+        fun diagnosesRetainedResultWithoutDeviceActions() = runBlocking {
+            assumeTrue(InstrumentationRegistry.getArguments().getString("liveVirtualUsageProbe") == "true")
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            val state = RootPilotService.uiState.value
+            requireFixed(!state.running && state.pendingAction == null && state.status == RootPilotStatus.FAILED &&
+                state.step == 6, "prior_state_required")
+            val history = RootPilotService.historyState(context)
+            val originalHistory = history.value
+            val prior = originalHistory.records.singleOrNull { it.id == PRIOR_ID } ?: reject("prior_record_missing")
+            requireFixed(originalHistory.error == null && prior == originalHistory.records.maxByOrNull { it.startedAtEpochMs } &&
+                !prior.eventsTruncated && prior.status == RunHistoryStatus.FAILED &&
+                prior.events.lastOrNull()?.let { it.event == TraceEvent.RUN_END && it.step == 6 &&
+                    it.modelFailure?.protocolReason == ModelProtocolReason.OUTPUT_LIMIT } == true, "prior_failure_required")
+            val expected = listOf(TraceActionType.OPEN_APP to 0) + (0..5).map { TraceActionType.TAP to it }
+            val executions = prior.events.filter { it.stage == TraceStage.EXECUTION }
+            requireFixed(executions.size == 14 && executions.chunked(2).zip(expected).all { (pair, action) ->
+                pair.all { it.actionType == action.first && it.step == action.second } &&
+                    pair.map { it.event } == listOf(TraceEvent.START, TraceEvent.RESULT) &&
+                    pair.map { it.status } == listOf(TraceStatus.STARTED, TraceStatus.SUCCESS)
+            } && prior.events.filter { it.event == TraceEvent.CONFIRMED }.map { it.actionType to it.step } == expected,
+                "prior_execution_required")
+            requireFixed(prior.events.none { it.stage == TraceStage.INFORMATION || it.event == TraceEvent.TODO_SAVED },
+                "prior_information_mismatch")
+            val receipt = File(context.cacheDir, PRIOR_DIRECTORY).resolve("metadata.json")
+            requireFixed(receipt.isFile && receipt.length() in 1..16_384, "receipt_required")
+            val metadata = Json.parseToJsonElement(receipt.readText()).jsonObject
+            requireFixed(metadata["runId"]?.jsonPrimitive?.contentOrNull == PRIOR_ID &&
+                metadata["firstKeyIndex"]?.jsonPrimitive?.intOrNull == 1 &&
+                metadata["currentRunApprovedKeyCount"]?.jsonPrimitive?.intOrNull == 6 &&
+                listOf("result5535Observed", "resultVirtualImageSaved", "remainingKeysApproved", "runEnd", "displayGone",
+                    "cleanupConfirmed", "imeUnchanged", "configRestored", "allowlistBytesRestored")
+                    .all { metadata[it]?.jsonPrimitive?.booleanOrNull == true }, "receipt_mismatch")
+            val frame = state.frame ?: reject("retained_frame_required")
+            val resultFile = receipt.parentFile!!.resolve("result.jpg")
+            requireFixed(resultFile.isFile && resultFile.length() in 8..1_048_576 &&
+                frame.bytes.size in 8..1_048_576 && frame.bytes.contentEquals(resultFile.readBytes()), "frame_receipt_mismatch")
+            val digest = MessageDigest.getInstance("SHA-256").digest(frame.bytes).joinToString("") { "%02x".format(it) }
+            requireFixed(digest == "85a75634263e46c9541c0dac80630ffe4a9e94326965800adede2819ce82ba27" &&
+                frame.width == 720 && frame.height == 1280 && frame.physicalWidth == 1080 && frame.physicalHeight == 1920 &&
+                frame.dataUrl == "data:image/jpeg;base64," + Base64.encodeToString(frame.bytes, Base64.NO_WRAP), "frame_invalid")
+            val dimensions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(frame.bytes, 0, frame.bytes.size, dimensions)
+            requireFixed(dimensions.outMimeType == "image/jpeg" && dimensions.outWidth == 720 && dimensions.outHeight == 1280,
+                "frame_decode_invalid")
+            val manager = context.getSystemService(DisplayManager::class.java) ?: reject("display_manager_required")
+            fun unchanged() = requireFixed(RootPilotService.uiState.value === state && history.value == originalHistory &&
+                manager.displays.none { it.name.startsWith(VirtualDisplayProtocol.DISPLAY_PREFIX) }, "environment_changed")
+            unchanged()
+            val saved = try { RootPilotApiConfigStore.create(context).read() } catch (_: Exception) { null }
+                ?: reject("saved_config_required")
+            requireFixed(saved.baseUrl.trimEnd('/') == "https://api.deepseek.com" && saved.apiKey.isNotBlank(), "endpoint_required")
+            val request = DeepSeekVisionRequest(
+                saved.applyTo(RootPilotConfig(task = TASK, allowScreenUpload = true,
+                    executionDisplay = ExecutionDisplay.VIRTUAL, virtualDisplayStartPackage = "com.miui.calculator")),
+                frame, listOf(447 to 830, 675 to 830, 875 to 676, 308 to 781, 493 to 749, 878 to 902).mapIndexed { index, xy ->
+                    "step=$index action=tap(${xy.first},${xy.second}) result=success"
+                }, remainingSteps = 14, step = 6,
+                availableApps = listOf(RootPilotApp("com.miui.calculator", "计算器", "com.miui.calculator.cal.CalculatorActivity")),
+                observation = null, observationStartedAtMillis = null,
+            )
+            // Only pure prompt construction is reflected; no execution or lifecycle internals are invoked.
+            val promptBuilder = HttpDeepSeekClient::class.java.getDeclaredMethod("buildUserPrompt",
+                DeepSeekVisionRequest::class.java, Boolean::class.javaPrimitiveType).apply { isAccessible = true }
+            val prompt = promptBuilder.invoke(HttpDeepSeekClient(), request, true) as String
+            val system = HttpDeepSeekClient::class.java.getField("SYSTEM_PROMPT").get(null) as String
+            val high = Json.parseToJsonElement(buildDeviceDecisionRequest(request, emptyList(), true, system, prompt)).jsonObject
+            requireFixed(high["max_tokens"] == JsonPrimitive(8192) && high["reasoning_effort"] == JsonPrimitive("high"),
+                "baseline_changed")
+            val noThinking = JsonObject(high.toMutableMap().apply {
+                put("thinking", buildJsonObject { put("type", "disabled") }); remove("reasoning_effort")
             })
-        }
-        val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(120, TimeUnit.SECONDS)
-            .writeTimeout(120, TimeUnit.SECONDS).callTimeout(120, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false).build()
-        try {
-            for ((index, body) in listOf(high, noThinking).withIndex()) {
-                unchanged()
-                if (index > 0) {
-                    if (outcomes.single()["reasonCode"] != JsonPrimitive("response_protocol_output_limit")) break
-                    delay(10_000)
-                }
-                val outcome = withContext(Dispatchers.IO) {
+            val switches = setOf("thinking", "reasoning_effort")
+            requireFixed(high.filterKeys { it !in switches } == noThinking.filterKeys { it !in switches }, "context_changed")
+            // A fixed receipt-scoped directory makes this authorization single-use, including after process death.
+            val directory = File(context.cacheDir, "virtual-model-usage-probe-$PRIOR_ID")
+            requireFixed(directory.mkdir(), "authorization_already_attempted")
+            val outcomes = mutableListOf<JsonObject>()
+            var attempts = 0
+            fun publish() {
+                val report = buildJsonObject {
+                    put("source", "verified_result_frame_reconstructed_last_step"); put("originalWireReplay", false)
+                    put("liveScreenObservationIncluded", false); put("modelRequestsAttempted", attempts); put("maxModelRequests", 2)
+                    put("deviceActions", 0); put("toolDispatches", 0); put("serviceCommands", 0); put("configurationChanged", false)
+                    putJsonArray("outcomes") { outcomes.forEach(::add) }
+                }.toString()
+                directory.resolve("metadata.json").writeText(report)
+                InstrumentationRegistry.getInstrumentation().sendStatus(0, Bundle().apply {
+                    putString("artifactDirectoryName", directory.name); putString("modelUsageProbe", report)
+                })
+            }
+            val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(120, TimeUnit.SECONDS)
+                .writeTimeout(120, TimeUnit.SECONDS).callTimeout(120, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false).build()
+            try {
+                for ((index, body) in listOf(high, noThinking).withIndex()) {
                     unchanged()
-                    requireFixed(directory.resolve("request-${index + 1}.attempted").createNewFile(), "request_already_attempted")
-                    attempts++
+                    if (index > 0) {
+                        if (outcomes.single()["reasonCode"] != JsonPrimitive("response_protocol_output_limit")) break
+                        delay(10_000)
+                    }
+                    val outcome = withContext(Dispatchers.IO) {
+                        unchanged()
+                        requireFixed(directory.resolve("request-${index + 1}.attempted").createNewFile(), "request_already_attempted")
+                        attempts++
+                        publish()
+                        unchanged()
+                        compare(http, saved.apiKey, body.toString(), if (index == 0) "high" else "none")
+                    }
+                    outcomes += outcome
                     publish()
                     unchanged()
-                    compare(http, saved.apiKey, body.toString(), if (index == 0) "high" else "none")
                 }
-                outcomes += outcome
-                publish()
-                unchanged()
+            } finally {
+                http.dispatcher.cancelAll(); http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown()
             }
-        } finally {
-            http.dispatcher.cancelAll(); http.connectionPool.evictAll(); http.dispatcher.executorService.shutdown()
+            unchanged()
         }
-        unchanged()
-    }
 
-    private suspend fun compare(http: OkHttpClient, key: String, body: String, effort: String): JsonObject {
-        val payload = body.toRequestBody("application/json; charset=utf-8".toMediaType())
-        val call = http.newCall(Request.Builder().url("https://api.deepseek.com/chat/completions")
-            .header("Authorization", "Bearer $key").post(object : RequestBody() {
-                override fun contentType() = payload.contentType()
-                override fun contentLength() = payload.contentLength()
-                override fun isOneShot() = true
-                override fun writeTo(sink: BufferedSink) = payload.writeTo(sink)
-            }).build())
-        val started = SystemClock.elapsedRealtime()
-        var reason = "none"
-        var parsed: Boolean? = null
-        var finishParsed: Boolean? = null
-        var status: Int? = null
-        var capture: UsageCapture? = null
-        try {
-            call.execute().use { response ->
-                try {
-                    status = response.code
-                    if (status !in 200..299) reason = "http"
-                    else {
-                        capture = UsageCapture(response.body?.source() ?: reject("response_source_missing"))
-                        val result = readDeepSeekToolStream(capture!!.buffer()) {}
-                        if (result.toolCalls.isNotEmpty()) reason = "tool_call_not_dispatched"
+        private suspend fun compare(http: OkHttpClient, key: String, body: String, effort: String): JsonObject {
+            val payload = body.toRequestBody("application/json; charset=utf-8".toMediaType())
+            val call = http.newCall(Request.Builder().url("https://api.deepseek.com/chat/completions")
+                .header("Authorization", "Bearer $key").post(object : RequestBody() {
+                    override fun contentType() = payload.contentType()
+                    override fun contentLength() = payload.contentLength()
+                    override fun isOneShot() = true
+                    override fun writeTo(sink: BufferedSink) = payload.writeTo(sink)
+                }).build())
+            val started = SystemClock.elapsedRealtime()
+            var reason = "none"
+            var parsed: Boolean? = null
+            var finishParsed: Boolean? = null
+            var status: Int? = null
+            var capture: UsageCapture? = null
+            try {
+                call.execute().use { response ->
+                    try {
+                        status = response.code
+                        if (status !in 200..299) reason = "http"
                         else {
-                            val action = ActionParser().parse(result.content)
-                            parsed = action is ActionParseResult.Success
-                            finishParsed = action is ActionParseResult.Success && action.action is RootPilotAction.Finish
-                            if (!parsed!!) reason = "action_parse_failed"
+                            capture = UsageCapture(response.body?.source() ?: reject("response_source_missing"))
+                            val result = readDeepSeekToolStream(capture!!.buffer()) {}
+                            if (result.toolCalls.isNotEmpty()) reason = "tool_call_not_dispatched"
+                            else {
+                                val action = ActionParser().parse(result.content)
+                                parsed = action is ActionParseResult.Success
+                                finishParsed = action is ActionParseResult.Success && action.action is RootPilotAction.Finish
+                                if (!parsed!!) reason = "action_parse_failed"
+                            }
                         }
-                    }
-                } finally { call.cancel() }
+                    } finally { call.cancel() }
+                }
+            } catch (error: ModelProtocolException) {
+                reason = "response_protocol_" + error.reason.name.lowercase()
+            } catch (_: SerializationException) { reason = "response_protocol_unspecified"
+            } catch (_: InterruptedIOException) { reason = "timeout"
+            } catch (_: IOException) { reason = "network"
+            } finally { call.cancel() }
+            return buildJsonObject {
+                put("effort", effort); put("maxTokens", 8192); put("elapsedMs", SystemClock.elapsedRealtime() - started)
+                put("reasonCode", reason); put("actionParsed", parsed); put("finishParsed", finishParsed); put("httpStatus", status)
+                capture?.report()?.forEach { (name, value) -> put(name, value) }
             }
-        } catch (error: ModelProtocolException) {
-            reason = "response_protocol_" + error.reason.name.lowercase()
-        } catch (_: SerializationException) { reason = "response_protocol_unspecified"
-        } catch (_: InterruptedIOException) { reason = "timeout"
-        } catch (_: IOException) { reason = "network"
-        } finally { call.cancel() }
-        return buildJsonObject {
-            put("effort", effort); put("maxTokens", 8192); put("elapsedMs", SystemClock.elapsedRealtime() - started)
-            put("reasonCode", reason); put("actionParsed", parsed); put("finishParsed", finishParsed); put("httpStatus", status)
-            capture?.report()?.forEach { (name, value) -> put(name, value) }
         }
     }
 

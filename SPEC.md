@@ -1,6 +1,6 @@
 # RootPilot 当前状态
 
-更新日期：2026-10-10。副屏既有 Activity 栈、临时单步及空框 Unicode 输入的专用页真实 Service 验收限定 PASS；八项剩余差异平台探针也已限定 PASS。非空光标插入／选区替换已按限定纯文本语义接入生产源码，首轮审查指出的三处问题已修改，本地单测／构建／Lint 通过；独立复审结论为 FAIL（低，无高／中缺陷，两项 P3 残留见 `TASKS.md`），四项离线真机与三项真实 Service 入口在重建夹具后 7/7 限定 PASS（手机已安装的三个 APK 哈希与本机构建一致），故该限定范围可称闭环 PASS；富文本／IME composing／撤销栈、hint 与真实内容区分、主屏并行输入及厂商兼容仍未验证。HOME 在带系统装饰的探针配置下可行，产品仍禁用；LOCAL 键盘、尺寸／旋转与跨单步页面保留仍未开放。任务外副屏截图禁用，设备动作仍为 LOW／65536；协议、保屏及广泛兼容的稳定性仍 PARTIAL。当前接手顺序见下方“当前工作：副屏非空输入与剩余能力”；提交／推送状态以 Git 为准。
+更新日期：2026-10-12。副屏既有 Activity 栈、临时单步及空框 Unicode 输入的专用页真实 Service 验收限定 PASS；八项剩余差异平台探针也已限定 PASS。非空光标插入／选区替换已按限定纯文本语义接入生产源码，首轮审查指出的三处问题已修改，本地单测／构建／Lint 通过；独立复审结论为 FAIL（低，无高／中缺陷，两项 P3 残留见 `TASKS.md`），四项离线真机与三项真实 Service 入口在重建夹具后 7/7 限定 PASS（手机已安装的三个 APK 哈希与本机构建一致），故该限定范围可称闭环 PASS；富文本／IME composing／撤销栈、hint 与真实内容区分、主屏并行输入及厂商兼容仍未验证。HOME 在带系统装饰的探针配置下可行，产品仍禁用；LOCAL 键盘、尺寸／旋转与跨单步页面保留仍未开放。任务外副屏截图禁用，设备动作仍为 LOW／65536；协议、保屏及广泛兼容的稳定性仍 PARTIAL。当前接手顺序见下方“当前工作：副屏非空输入与剩余能力”；提交／推送状态以 Git 为准。
 
 本文件只保存最新状态，直接更新对应条目，不追加开发过程、历次测试数字或补验流水。使用与构建说明见 [README.md](README.md)，协作规则见 [AGENTS.md](AGENTS.md)，下一步任务与评审待办见 [TASKS.md](TASKS.md)。
 
@@ -452,6 +452,15 @@ adb -P "$rootpilot_adb_server_port" -s "$rootpilot_device_serial" shell am instr
 - 文件写入逐次确认并绑定不可变预览；提交前检查目录、身份与原文 hash，编辑前备份、写后回读。写入失败不自动重放，开始写入后停止不代表撤销；SAF 不保证跨应用原子性。
 - 文件仅支持 UTF-8 text/*、JSON、XML，单文件 64 KiB、单目录 100 项，每次请求最多 8 轮／16 次工具调用；备份上限 5 MiB 或 1000 项，满后拒绝需备份的新写入，不自动删旧备份。无删除、建目录、Shell、Root、网络搜索或手机动作工具。
 
+## 默认测试收集与构建配置整理（2026-10-12）
+
+- 三个历史联网诊断方法移入各自的静态嵌套 `LiveProbe`。当前 AndroidJUnitRunner 1.7.0 默认扫描排除带 `$` 的嵌套类，显式 `class` 选择仍能运行；因此默认不再收集这三项，原 Usage 外类 4 项、Equality 外类 2 项离线回归仍保留。联网开关、固定回执／进程身份、截图上传授权、请求次数和不执行返回动作的守卫均未改。显式入口与 shell 转义见 [README.md](README.md)。
+- API 35 `Medium_Phone` 模拟器（`emulator-5554`）安装本轮两份 APK 后，仅收集不执行的前后对比为 **188 → 185**，差集恰为这 3 项、没有新增或丢失其他方法。显式收集可找到 3 个新嵌套入口；不提供原联网开关实际运行时 3 项均 assumption failure。6 项离线回归实际运行 **6/6 PASS**。没有访问手机、开启联网探针或上传图片，也没有执行完整默认集合。
+- 同一模拟器经 AGP 选上述 6 项离线回归与 4 个 Compose 类，真实 XML 为 `tests="31" failures="0" errors="0" skipped="25"`（6 项通过、25 项门控跳过）。[expected-skips.txt](dev/expected-skips.txt) 移除原 3 个已不在默认集合的联网方法，只保留 25 项 Compose；报告脚本使用名单时 PASS／退出 0，换空名单时 FAIL／退出 2，仍拒绝未知跳过。不能把预期跳过称作 UI 断言通过。
+- 本机四连验证成功（1m41s）：667 项 JVM 测试零失败／错误／跳过，Debug 与 androidTest APK 构建成功，Lint 0 errors／29 warnings；空白检查通过。Markwon 由硬编码改用版本目录 `libs.markwon.core`，仍为 `io.noties.markwon:core:4.6.2`；SDK／target／最低版本、release 混淆、runner 与产品运行时依赖未变，未增加 lint baseline 掩盖告警。
+- 独立只读审查 **PASS**：原生审查运行 `7cc47960-39df-48f5-9439-7e44e076e31a` 与延迟返回的第二份复核均核对源码、默认／显式 Runner 路径、六项离线保留、名单与现有报告，未发现本轮确认缺陷。它们没有重跑设备或真实联网；不能扩称完整默认集合或 25 项 UI 断言通过。报告脚本只核对已报告的失败／跳过，不检查未收集的方法；本轮没有丢失普通测试的证据来自前后方法集合的精确差集，不能单靠报告 PASS。[架构笔记](docs/architecture-notes.md)的 2026-10-09 `@Test` 源码统计是历史快照，不改写为本轮的默认收集 185 项。
+- 证据在仓库外 `/tmp/rootpilot-probe-collection-20261012-tb9elckq/`：`baseline-collection.txt`／`after-collection.txt` 是收集对比，`offline-execution.txt` 是 6 项执行，`explicit-live-collection.txt`／`explicit-live-gates-off.txt` 核对显式入口及原门控；`verification-summary.json`／`local-validation-summary.json` 与 `selected-agp-results.xml` 汇总并保留报告。该目录不是仓库交付物；runner 升级后须重新核对收集边界。
+
 ## 已知限制与未验证项
 
 - **真实应用只读搜索范围有限**：预置世界时钟页后的中文搜索业务限定通过，自动测试的 fixture 关闭回执异常仍保留，已正常 UI 手动收尾。此前系统设置搜索仍未完成；冷启动自主导航、其他应用和真人确认未验证，不能称通用独立闭环。
@@ -463,7 +472,7 @@ adb -P "$rootpilot_adb_server_port" -s "$rootpilot_device_serial" shell am instr
 - **界面**：最新聊天布局的大字体＋键盘＋生成中停止、键盘收起恢复、设置二级页状态恢复、生产凭据编辑防截图生命周期、长 Markdown 与历史非空列表视觉尚未完整覆盖；旧页面通过结果不自动覆盖新布局。
 - **文件与网络**：实际 external-storage SAF 的多级检索已有限定证据；其他 DocumentsProvider、文件浏览 UI、多级大文件性能、并发修改／部分写入、真实模型拒绝／取消组合及真实 DNS／TLS／服务端故障尚未完整验证。
 - **技术边界**：Miuix 使用实验性依赖；悬浮窗、输入法面板及旧 Agent 未迁移。聊天进程死亡不保留会话；待办无跨进程 exactly-once 保证，也不是离线规划能力。
-- **默认 androidTest 集合里的 4 个 Compose 用例类已被门控跳过**：`RootPilotAppLaunchPickerInstrumentedTest`、`RootPilotScreenNavigationInstrumentedTest`、`RunHistoryScreenInstrumentedTest`、`TaskResultCardInstrumentedTest` 共 25 个 `@Test` 依赖 `createComposeRule` 启动宿主 Activity，在真机会撞上两个独立成因（①coroutines 1.9.0 的 `CoroutineExceptionHandlerImplKt.ensurePlatformExceptionHandlerLoaded` 只在 app classloader 上做一次 `ServiceLoader` 收集，看不到 androidTest APK 的 `kotlinx.coroutines.test.internal.ExceptionCollectorAsService`，抛 `java.lang.IllegalStateException: Exception handler was not found via a ServiceLoader`；②MIUI 拦截同一类里第二个宿主 Activity 启动，`Instrumentation.startActivitySync` 永久等待、约 15 分钟后 `Process crashed`），而单独跑任一用例都能通过。它们现在由 `app/src/androidTest/java/com/example/agent/rootpilot/ComposeUiTestGate.kt` 在 compose rule 启动 Activity 之前 `assumeTrue` 跳过（默认不跑），并逐个列入 `dev/expected-skips.txt`，因此默认 `connectedDebugAndroidTest` 不再出现 `Process crashed`：真机实测 25/25 为 assumption failure、控制台 `OK (25 tests)`，AGP XML 为 `tests="25" skipped="25"` 且 `dev/check-test-results.py` 判 PASS。要显式运行需加 `-e composeUiTests=true`，并先按 `TASKS.md` 评审待办 #17 的 A 配方把 `kotlinx-coroutines-test` 加进 debug 依赖（否则仍会失败／挂死）。两个成因的完整证据与取舍见 `TASKS.md` #17。
+- **默认 androidTest 的 25 项 Compose 断言尚未执行通过**：4 个类曾在小米上出现 ServiceLoader 失败和宿主 Activity 启动阻塞，现由 [ComposeUiTestGate.kt](app/src/androidTest/java/com/example/agent/rootpilot/ComposeUiTestGate.kt) 在 Activity 启动前默认跳过，25 项逐条列入 [expected-skips.txt](dev/expected-skips.txt)。2026-10-10 小米手工选这 4 类得到 25 项 assumption failure，同日 `tests="25" skipped="25"` 的 AGP XML 来自 API 35 模拟器；2026-10-12 同一模拟器选 6 项离线回归加这 4 类得到 31 项、25 跳过，见上节。两次报告校验通过均不等于 25 项 UI 断言或完整默认集合通过。历史 debug 依赖实验仅取得 TaskResultCard 两项分别单跑通过，连跑阻塞；保留 Android Main 的实验阻塞原因未确定，不能证明必须使用 TestMainDispatcher。当前显式启用 `composeUiTests=true` 仍有测试基础设施限制，未实施通用修复，详见 [TASKS.md](TASKS.md) #17。
 
 ## 下一步
 

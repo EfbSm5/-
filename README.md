@@ -74,7 +74,7 @@ SAF 不提供跨应用的原子比较并写入：写入前后的检查能发现�
 
 ## 构建与测试
 
-使用支持 AGP 9.1.1 的 Android Studio、兼容的 Gradle JDK 和 Android SDK 37。项目使用 Gradle 9.3.1、Kotlin 2.4.20；首次构建需要下载依赖。compileSdk 为37，targetSdk 仍为36，最低系统仍为 Android 15 / API 35。
+使用支持 AGP 9.1.1 的 Android Studio、兼容的 Gradle JDK 和 Android SDK 37。项目使用 Gradle 9.3.1、Kotlin 2.4.20；首次构建需要下载依赖。compileSdk 为 37，targetSdk 保留 36，最低系统仍为 Android 15 / API 35；编译 API 级别与目标运行行为分开维护，构建配置整理不顺带改变 targetSdk、最低版本或 release 混淆开关。Markwon 版本由 [libs.versions.toml](gradle/libs.versions.toml) 统一声明，仍为 4.6.2。
 
 ```sh
 ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug --no-daemon
@@ -120,7 +120,7 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 需要已连接无障碍服务的信息工具用例，先正常启动 RootPilot 并确认服务连接，再用 `am instrument --no-restart` 执行。默认 instrumentation 会在开始和结束时停止目标进程，本次小米会因此将无障碍服务列入 `Crashed services`，不能靠等待当作已恢复。发生这种情况需用户手动关闭再开启 RootPilot 页面结构读取；不更改其他服务。`--no-restart` 要求目标进程已存在，进程保持不退出也不代表业务用例通过。2026-10-10 实测：重绑时把 `enabled_accessibility_services` 整串加引号写入才会生效，不加引号会静默失败，写完要回读 `dumpsys accessibility`。
 
-不要用 `./gradlew :app:connectedDebugAndroidTest` 代替上面的逐方法运行：它结束时会卸载 app 与 test APK 并清空应用数据，手机上已保存的 DeepSeek 配置、启动白名单和运行历史都会丢失（2026-10-10 实测），真实模型验收前必须重新配置；确需 Gradle connected 时加 `-Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true` 保留安装。另外，默认 collected 集合里的 4 个 Compose 用例类（25 个 `@Test`）会启动宿主 Activity，真机上必因两个测试基础设施成因失败或挂死，因此已由 `app/src/androidTest/java/com/example/agent/rootpilot/ComposeUiTestGate.kt` 在启动 Activity 之前默认跳过，并逐个列入 `dev/expected-skips.txt`：真机实测 25/25 为 assumption failure、控制台 `OK (25 tests)`、AGP XML `tests="25" skipped="25"`，`dev/check-test-results.py` 判 PASS。要显式运行需加 `-e composeUiTests=true`，并先按 `TASKS.md` #17 的 A 配方把 `kotlinx-coroutines-test` 加进 debug 依赖（否则仍会失败／挂死）。验收只看 AGP XML 与 `dev/check-test-results.py` 的结论，不看 `am instrument` 控制台的 `OK`。
+不要用 `./gradlew :app:connectedDebugAndroidTest` 代替上面的逐方法运行：它结束时会卸载 app 与 test APK 并清空应用数据，手机上已保存的 DeepSeek 配置、启动白名单和运行历史都会丢失（2026-10-10 实测），真实模型验收前必须重新配置；确需 Gradle connected 时加 `-Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true` 保留安装。另外，4 个 Compose 用例类（25 个 `@Test`）曾在小米上出现 ServiceLoader 失败及宿主 Activity 启动阻塞，现由 [ComposeUiTestGate.kt](app/src/androidTest/java/com/example/agent/rootpilot/ComposeUiTestGate.kt) 在启动 Activity 之前默认跳过，逐项列入 [expected-skips.txt](dev/expected-skips.txt)。2026-10-10 小米手工选这 4 类运行得到 25 项 assumption failure；同日 `tests="25" skipped="25"` 的 AGP XML 来自 API 35 模拟器，不是同一次真机运行。2026-10-12 模拟器选这 4 类和 6 项离线探针回归得到 `tests="31" failures="0" errors="0" skipped="25"`，报告脚本判 PASS，表示 6 项通过、25 项预期跳过，不代表 25 项 UI 断言或完整默认集合通过。显式启用 `composeUiTests=true` 仍有未解决的测试基础设施限制；历史 debug 依赖实验见 [TASKS.md](TASKS.md) #17，不能作为通用修复。验收同时核对 XML 与 [check-test-results.py](dev/check-test-results.py) 的结论，不只看控制台 `OK`。
 
 `RootPilotProductionServiceInstrumentedTest` 使用真实 Service、手机本机全屏采集、已保存 DeepSeek 配置及实际悬浮窗监听器，仍只操作签名保护的固定测试页。分别单独运行 `realServiceModelOverlayInputAndCompletion`（`liveProductionServiceAcceptance=true`）、`realServiceStopAtInputConfirmationRestoresIme`（`productionServiceStopAcceptance=true`）、`realServiceStopDuringActivityQuery`（`productionQueryStopAcceptance=true`）。完成用例检查一次固定 Type、输入后查询、完成、原输入法恢复及无恢复记录；确认／停止按钮通过 `performClick` 调用，不代表物理触摸，查询停止由测试发送 Service 停止命令。全屏上传可能包含测试页、系统及键盘层，运行前须另行同意并确认无敏感内容。
 
@@ -205,9 +205,27 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 如果回执链已证明等号执行成功、但测试在结果布局过渡时停止，可单独用 `realServiceObservesVerifiedProductWithoutReplayingEquals` 和 `liveVirtualObserveVerifiedProduct=true` 补做结果观察，并提供同样的完整回执链。它只确认启动计算器，禁止任何点击；使用生产新截图及本地当前行核验后，要求模型只报告结果。普通算式测试的结果读取以生产既有的等待与下一轮截图完成为门槛，不在等号执行回执刚到时读取布局；该观察与原输入任务分开计证。
 
-`VirtualCalculatorModelBudgetProbeInstrumentedTest` 是另行授权、默认关闭的历史 4096 基线诊断。仅 `liveVirtualBudgetComparison=true` 且已核验的首键失败回执、零输入当前值检查及原进程保留截图全部匹配时，才各发一次 HIGH/4096、LOW/4096、HIGH/8192 请求；总计最多三次，不重试、不执行返回动作或工具、不改产品配置。三份请求除思考强度和输出预算外相同；已释放副屏的实时观察不可恢复，使用空观察并明确不属于原网络请求重放。只导出原因码、耗时和解析是否通过，不保存模型原文或凭据，也不证明动作点位正确。该次对照已完成；当前设备动作预算为 65536，原探针的基线守卫会在联网前拒绝，不作为当前版本验收入口。
+#### 历史联网诊断：仅显式收集
 
-`VirtualCalculatorUsageProbeInstrumentedTest` 是默认关闭、单次授权最多两请求的 8192 用量诊断；须另行同意截图上传及 API 消耗后使用 `liveVirtualUsageProbe=true`。入口绑定指定失败回执、原进程保留的已核验结果图及其哈希，固定重建最后一步，不读取当前屏幕，也不是原请求精确重放。先测 HIGH，仅输出超限时隔 10 秒测试关闭思考；持久尝试标记禁止重复运行。只输出数值、固定原因码及解析是否通过，缺失用量标为未知；不执行动作／工具、不发送 Service 命令、不改生产默认。统计器合成测试不需要开启联网开关。
+三个历史联网方法已放入各自的静态嵌套 `LiveProbe`，当前 AndroidJUnitRunner 默认扫描不收集嵌套类；原外类中的 6 项合成／离线回归仍照常收集。不能只把整个外类改名，否则会漏掉这些回归。显式选择嵌套类仍须满足原联网开关、回执与进程守卫，不因入口迁移获得上传授权。
+
+| 显式 `class` 入口 | 原联网开关 |
+| --- | --- |
+| `com.example.agent.rootpilot.VirtualCalculatorUsageProbeInstrumentedTest$LiveProbe#diagnosesRetainedResultWithoutDeviceActions` | `liveVirtualUsageProbe=true` |
+| `com.example.agent.rootpilot.VirtualCalculatorModelBudgetProbeInstrumentedTest$LiveProbe#comparesThreeBudgetsWithoutExecutingModelOutput` | `liveVirtualBudgetComparison=true` |
+| `com.example.agent.rootpilot.VirtualCalculatorEqualityEffortProbeInstrumentedTest$LiveProbe#comparesRetainedEqualityFailureWithoutDeviceActions` | `liveEqualityEffortProbe=true` |
+
+类名中的 `$` 必须在设备 shell 中保留。先正常启动 RootPilot，下面仅收集用量探针，不执行、不联网；实际联网须另行授权并满足历史回执守卫，不适用于当前新任务：
+
+```sh
+adb -s "${SERIAL:?先设置已核对的设备serial}" shell 'am instrument --no-restart -w -r -e log true -e class "com.example.agent.rootpilot.VirtualCalculatorUsageProbeInstrumentedTest\$LiveProbe#diagnosesRetainedResultWithoutDeviceActions" com.example.agent.test/androidx.test.runner.AndroidJUnitRunner'
+```
+
+2026-10-12 API 35 模拟器核对：默认收集 188 → 185，仅减少上述 3 项；6 项离线回归实际通过，显式选择这 3 项但不启用联网开关时均跳过。收集成功不代表联网或完整默认集合通过。runner 版本升级时需重新核对默认扫描与显式入口。
+
+`VirtualCalculatorModelBudgetProbeInstrumentedTest$LiveProbe#comparesThreeBudgetsWithoutExecutingModelOutput` 是另行授权、默认关闭的历史 4096 基线诊断。仅 `liveVirtualBudgetComparison=true` 且已核验的首键失败回执、零输入当前值检查及原进程保留截图全部匹配时，才各发一次 HIGH/4096、LOW/4096、HIGH/8192 请求；总计最多三次，不重试、不执行返回动作或工具、不改产品配置。三份请求除思考强度和输出预算外相同；已释放副屏的实时观察不可恢复，使用空观察并明确不属于原网络请求重放。只导出原因码、耗时和解析是否通过，不保存模型原文或凭据，也不证明动作点位正确。该次对照已完成；当前设备动作预算为 65536，原探针的基线守卫会在联网前拒绝，不作为当前版本验收入口。
+
+`VirtualCalculatorUsageProbeInstrumentedTest$LiveProbe#diagnosesRetainedResultWithoutDeviceActions` 是默认关闭、单次授权最多两请求的 8192 用量诊断；须另行同意截图上传及 API 消耗后使用 `liveVirtualUsageProbe=true`。入口绑定指定失败回执、原进程保留的已核验结果图及其哈希，固定重建最后一步，不读取当前屏幕，也不是原请求精确重放。先测 HIGH，仅输出超限时隔 10 秒测试关闭思考；持久尝试标记禁止重复运行。只输出数值、固定原因码及解析是否通过，缺失用量标为未知；不执行动作／工具、不发送 Service 命令、不改生产默认。统计器合成测试不需要开启联网开关。
 
 ### 无需工作区授权的隔离文件验收
 
