@@ -314,6 +314,15 @@ adb -P "$rootpilot_adb_server_port" -s "$rootpilot_device_serial" shell am instr
 - 当前三件套本机与安装包 SHA-256 均一致：产品 `8d62d416d520c17513ab852cb6792138153526b3712f20f4fba4e8416bf2cf47`、测试 `0b3682434e4a9fb7070ff880f3a492a47c68c825fad5524e60e6042463c07711`、fixture `3d9dddeb3d41ba0f4442940bc1a926b1711cc817787de938e0718ea0a83abade`。证据在 `/tmp/rootpilot-type-recovery-20261010-235653-4f11db/`：`metadata.json` 是前置失败轮的产物核对，最终依据 `rerun-prepare.txt`、`rerun-verify.txt`、`rerun2-summary.json` 与 `final-state.json`，不同 receipt 不混用。`final-state.json` 于验收后 00:05:32 再次直接核对当前安装三件套与本机哈希一致，补充最终产物的时间绑定。
 - 失败记录保留：首轮 `IME_UNAVAILABLE`（1.215 秒）未启动真实任务；用户手动启用 RootPilot 输入法后再验。宿主新脚本首次在 PID 身份查询因 ADB shell 引号丢失退出，未启动 instrumentation；修正命令传参后才取得上述结果。更早的前台／连接失败不据本次成功反推 root 权限不足或 QQ 干扰。未覆盖 commitText 进行中／提交后死亡、真人／通知确认、Service 单独销毁、查询中断连或其他厂商；功能 #5 仍为部分完成。
 
+### Type 已提交后进程死亡（2026-10-13，主屏固定页限定 PASS）
+
+- 新增默认关闭的 `prepareServiceAfterSubmittedType`／`verifySubmittedTypeAfterHostKillAndNormalActivityReopen`，除原 `typeProcessRecovery=true` 外还要求 `typeSubmittedRecovery=true`；每次只调用一个方法。真实生产 Service 使用已保存 DeepSeek 配置，由实际安全悬浮窗确认按钮监听器批准一次固定 Type；fixture 仅记录两参数 `commitText` 调用次数，不阻塞输入，不替换模型、Controller 或 IME。原未批准用例保留，生产代码未改。
+- 在同一小米 15（serial `12cd0365`／型号 `24129PN74C`／API 37）实际通过。run `c8ca63b1-e3ab-4760-8d44-ef744e707ba7`，receipt `4c60cbc4-25f0-403c-a691-de8b0a954d37`：目标全文匹配且 `commitCalls=1`、原 IME 已恢复、状态 `WAITING_SCREEN`、九事件历史与快照稳定后，host 复核 PID／UID／启动时刻、回执／基线／快照／历史摘要及有效期，仅终止主 PID `11105`；报告到 kill 确认的宿主耗时 210 ms。普通 Activity 重开后 PID `3764`，fixture PID `24216`／实例 `00892b01-f7c7-4166-beed-8a18eca830dc` 保持不变。
+- verify 1.248 秒 `OK (1 test)`，`passed=true`／`baselineRestored=true`／`verifyClaimed=true`，原因与清理原因均为 `NONE`。目标仍为原固定文本且提交次数仍为 1；恢复状态 `RECOVERY_REQUIRED`、上传同意 false、pendingAction／frame 清空，未重新授权的 RECOVER 被拒；历史只由 RUNNING 转为 INTERRUPTED，完整九事件不增加。随后只丢弃本次快照，原配置／API 密文摘要／启动列表保持，原小米 IME 保持，任务与 IME 恢复文件消失，claimed／completed 存在且无 invalidated。无障碍启用列表前后相同；没有关闭 QQ／GKD／Shizuku，不据此宣称无障碍自动重绑通过。
+- 源码及针对断言修正的独立只读复核 PASS，宿主身份／摘要／时间守卫和修正后的精确结果行匹配复核 PASS；三件套构建及 `git diff --check` 通过。本机与最终安装包 SHA-256 相同：产品 `7e4d662583fb0bf1408c4673c99d52718f087397f8daecd370a27c722e0798da`、测试 `22288344d925877e72337deb2f50768bd95325097b75242568300dd068c1c70e`、fixture `883055d6d2cb06e2c7ff979a4273b426c54ce37088ef15d67fadaf259ce87ad5`。证据 `/tmp/rootpilot-submitted-run-20261013-final/`：prepare／verify、summary、ready、baseline、history 和 final-state；宿主脚本 `/tmp/rootpilot-submitted-recovery-20261013.py`。本轮未提交或推送。
+- 失败证据不抹除：首轮 220 秒 instrumentation 无入口输出，主线程实测 `do_freezer_trap`，未产生本轮回执／任务快照／IME 恢复文件，未发杀命令。创建本轮撤销标记并正常打开仍冻结，取消仅本包测试 runner 后恢复 `do_epoll_wait`；未改省电设置。第二轮实际写入成功，但新增测试误断言 WAITING_SCREEN 时 `pendingAction == null`，45 ms 后报 `WAITING_IDENTITY`，未发杀命令且清理成功；Controller 的 `updateStateLocked` 此时保留展示值，删去该错误前置断言、保留重开后的清空断言及其他守卫后才通过。两份失败回执归档在应用私有 `rootpilot-type-process-recovery-aborted`，外部证据分别在 `/tmp/rootpilot-submitted-run-20261013-1630/`、`/tmp/rootpilot-submitted-run-20261013-1640/`。
+- 边界：只证明主屏固定测试页已写入、IME 已恢复后的进程死亡不自动重放，**不覆盖发送端 `commitText` 进行中、IME 切换中死亡或副屏提交后死亡**。没有测试侧暂停生产循环，host 上限 400 ms 还受生产 500 ms settle 余量约束；若状态／摘要已变化则拒绝 kill 或判失败，不补杀。重开后的 0 请求／截图／执行来自完整历史、内存日志与状态断言，不是网络抓包；观察窗口 1 秒。fixture 计的是本次两参数提交尝试，三参数重载不在该计数器覆盖范围；失败提交也计数，清理可能因此保守失败。真人触摸／通知入口、Service 单独销毁、查询断连及长期稳定性仍待验证。
+
 ### 真实时钟中文城市搜索（2026-10-05，业务限定 PASS／自动测试 FAIL，已手动收尾）
 
 - 用户授权自主选择非敏感真实应用后，选用小米系统时钟 `com.android.deskclock` 的公开城市搜索。人工预置世界时钟页，再由真实生产 Service／已保存 DeepSeek 配置执行启动、打开城市选择、聚焦搜索、一次中文 Type；只读取结果，不选中或添加城市，不操作闹钟／计时器／设置。此范围是预置页面后的热启动，不覆盖冷启动后自主切换标签。
@@ -468,7 +477,7 @@ adb -P "$rootpilot_adb_server_port" -s "$rootpilot_device_serial" shell am instr
 - **历史误点诊断暂缓**：没有确认固定坐标偏移，也没有证明已修复；不继续取证或增加坐标补偿。
 - **屏幕保护非原子**：同窗口内容变化、检查后瞬间切窗及 A→B→A 可能漏检；不能证明动作成功。系统诊断格式不是稳定 SDK；主屏模式仍拒绝活跃或无法确认闲置的副屏，实验副屏只接受本次拥有的显示／会话及明确的目标窗口。
 - **GKD 共存未完整验收**：本轮 RootPilot 专用测试页的生产停止及用户手工断连／重连均未关闭 GKD／Cumulus；未验证它们的业务、所有共存模式或查询中 Binder 断连。此前 Root UiAutomation 注册失败不作为 GKD 根因证据。
-- **生命周期与兼容**：已限定覆盖副屏模型阶段停止、Tap 待确认停止、OpenApp 待确认时进程死亡，以及主屏 Type 已切换 IME 且待确认时的停止／进程死亡与原输入法恢复；实际收尾发现 RootPilot 无障碍 enabled 但 crashed／未绑定，已通过系统界面手动恢复并通过不联网三工具复验，不代表自动重绑通过。生产 Service 单独销毁／重建、输入提交中／提交后的防重放、真实通知／真人悬浮窗确认与恢复组合，横屏／多窗口／工作资料／其他厂商和键盘仍需验证。主屏按钮取焦后副屏计算通过，不代表全局键盘焦点隔离。
+- **生命周期与兼容**：已限定覆盖副屏模型阶段停止、Tap 待确认停止、OpenApp 待确认时进程死亡，以及主屏 Type 已切换 IME 且待确认时的停止／进程死亡与原输入法恢复；2026-10-13 追加主屏固定页 Type 已写入、原 IME 已恢复后的进程死亡不重放限定 PASS（见“Type 已提交后进程死亡”）。此前实际收尾发现 RootPilot 无障碍 enabled 但 crashed／未绑定，已通过系统界面手动恢复并通过不联网三工具复验，不代表自动重绑通过。生产 Service 单独销毁／重建、输入提交中／副屏提交后的防重放、真实通知／真人悬浮窗确认与恢复组合，横屏／多窗口／工作资料／其他厂商和键盘仍需验证。主屏按钮取焦后副屏计算通过，不代表全局键盘焦点隔离。
 - **界面**：最新聊天布局的大字体＋键盘＋生成中停止、键盘收起恢复、设置二级页状态恢复、生产凭据编辑防截图生命周期、长 Markdown 与历史非空列表视觉尚未完整覆盖；旧页面通过结果不自动覆盖新布局。
 - **文件与网络**：实际 external-storage SAF 的多级检索已有限定证据；其他 DocumentsProvider、文件浏览 UI、多级大文件性能、并发修改／部分写入、真实模型拒绝／取消组合及真实 DNS／TLS／服务端故障尚未完整验证。
 - **技术边界**：Miuix 使用实验性依赖；悬浮窗、输入法面板及旧 Agent 未迁移。聊天进程死亡不保留会话；待办无跨进程 exactly-once 保证，也不是离线规划能力。

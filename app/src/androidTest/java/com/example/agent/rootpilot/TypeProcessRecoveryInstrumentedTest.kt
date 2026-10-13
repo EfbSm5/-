@@ -13,6 +13,11 @@ import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import android.view.Display
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inspector.WindowInspector
+import android.widget.Button
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.example.agent.rootpilot.history.RunHistoryRecord
@@ -56,15 +61,20 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Real production Service / saved API / IME, with no approval or text injection by the test.
+ * Real production Service / saved API / IME; the test never injects text directly.
+ * Unapproved methods leave Type pending. Submitted methods require typeSubmittedRecovery=true,
+ * click the actual secure overlay confirmation once, and require the same target to contain
+ * exactly EXPECTED with one commitText call after IME restoration. This is after-submit recovery,
+ * not death inside the sender's commitText or recovery during an unfinished IME switch.
  * Invoke each method separately with --no-restart, typeProcessRecovery=true,
  * recoveryReceiptId=<fresh UUID>, expectedRootPilotPid=<host-verified current main PID>.
  * Prepare also requires recoveryBaseline=empty_task_saved_api_or_defaults and a normally
  * foreground RootPilotActivity. Prepare opens the signed fixture once; neither phase reopens
  * it after binding its identity, and verify never launches any Activity.
  *
- * After ready_for_main_process_kill, the host has at most 45 seconds to kill only the old main
- * PID, normally reopen RootPilotActivity, then invoke verify in its new process within 120
+ * After ready_for_main_process_kill, the host has at most 45 seconds (400 ms for submitted Type,
+ * additionally bounded by the unchanged WAITING_SCREEN snapshot/history) to kill only the old main
+ * PID, normally reopen RootPilotActivity, then invoke the matching verify method within 120
  * seconds of readyAt. Prepare dying with that process is expected and is not a test PASS.
  * The fixture Activity instance and process must survive; a newly empty page is not evidence.
  *
@@ -79,12 +89,17 @@ import org.junit.runner.RunWith
 class TypeProcessRecoveryInstrumentedTest {
     @Test fun prepareServiceAtUnapprovedType() = invoke(prepare = true)
 
+    @Test fun prepareServiceAfterSubmittedType() = invoke(prepare = true, submitted = true)
+
     @Test fun verifyAfterHostKillAndNormalActivityReopen() = invoke(prepare = false)
 
-    private fun invoke(prepare: Boolean) {
+    @Test fun verifySubmittedTypeAfterHostKillAndNormalActivityReopen() = invoke(prepare = false, submitted = true)
+
+    private fun invoke(prepare: Boolean, submitted: Boolean = false) {
         assumeTrue(InstrumentationRegistry.getArguments().getString("typeProcessRecovery") == "true")
+        if (submitted) assumeTrue(InstrumentationRegistry.getArguments().getString("typeSubmittedRecovery") == "true")
         runBlocking {
-            val test = Recovery(InstrumentationRegistry.getInstrumentation().targetContext)
+            val test = Recovery(InstrumentationRegistry.getInstrumentation().targetContext, submitted)
             var failure: Reason? = null
             try {
                 test.checkInvocation()
@@ -114,7 +129,13 @@ class TypeProcessRecoveryInstrumentedTest {
         }
     }
 
-    private class Recovery(private val context: Context) {
+    private class Recovery(private val context: Context, private val submitted: Boolean) {
+        private var approved = false
+        private var submittedReady = false
+        private val expectedTrace get() = if (submittedReady) SUBMITTED_TRACE else EXPECTED_TRACE
+        private val expectedStatus get() = if (submittedReady) RootPilotStatus.WAITING_SCREEN else RootPilotStatus.WAITING_CONFIRMATION
+        private val expectedSummary get() = if (submittedReady) null else "type(length=${EXPECTED.length})"
+        private val killWindow get() = if (submitted) 400L else HOST_KILL_WINDOW
         private val state get() = RootPilotService.uiState.value
         private val root = context.noBackupFilesDir.resolve("rootpilot-type-process-recovery-test")
         private val apiFile = context.noBackupFilesDir.resolve(RootPilotApiConfigStore.FILE_NAME)
@@ -250,6 +271,7 @@ class TypeProcessRecoveryInstrumentedTest {
                     delay(POLL)
                 }
             }
+            if (submitted) approveAndAwaitSubmission(base)
             val owned = runId ?: fail(Reason.RUN_IDENTITY)
             val disk = diskHistory()
             checkCompleteHistory(disk.document.records.single { it.id == owned }, RunHistoryStatus.RUNNING)
@@ -259,15 +281,15 @@ class TypeProcessRecoveryInstrumentedTest {
             val receipt = Ready(id, owned, Process.myPid(), Process.myUid(), boot, SystemClock.elapsedRealtime(),
                 fileDigest(snapshotFile, Reason.SNAPSHOT_CHANGED), disk.digest,
                 digest(JSON.encodeToString(interrupted).encodeToByteArray()),
-                fileDigest(imeFile, Reason.IME_RECOVERY), fixtureId, fixturePid,
-                fileDigest(directory.resolve("baseline.json"), Reason.RECEIPT_IO))
+                if (submitted) digest(byteArrayOf()) else fileDigest(imeFile, Reason.IME_RECOVERY), fixtureId, fixturePid,
+                fileDigest(directory.resolve("baseline.json"), Reason.RECEIPT_IO), submitted)
             ready = receipt
             checkPrepared(base, receipt)
             write(directory.resolve("ready.json"), JSON.encodeToString(receipt).encodeToByteArray())
             checkReceiptValid()
             checkPrepared(base, receipt)
             report("ready_for_main_process_kill", null)
-            while (SystemClock.elapsedRealtime() - receipt.readyAt < HOST_KILL_WINDOW) {
+            while (SystemClock.elapsedRealtime() - receipt.readyAt < killWindow) {
                 checkReceiptValid()
                 checkPrepared(base, receipt)
                 delay(POLL)
@@ -308,16 +330,64 @@ class TypeProcessRecoveryInstrumentedTest {
             boundAction = action
         }
 
+        private suspend fun approveAndAwaitSubmission(base: Baseline) {
+            checkPendingType()
+            checkFixture(base, foreground = true)
+            withContext(Dispatchers.Main.immediate) {
+                check(state.pendingAction === boundAction && state.status == RootPilotStatus.WAITING_CONFIRMATION,
+                    Reason.TYPE_IDENTITY)
+                val panel = WindowInspector.getGlobalWindowViews().singleOrNull {
+                    (it.layoutParams as? WindowManager.LayoutParams)?.title == "RootPilotOverlay" && it.isAttachedToWindow
+                } ?: fail(Reason.APPROVAL_UNAVAILABLE)
+                check((panel.layoutParams as WindowManager.LayoutParams).flags and WindowManager.LayoutParams.FLAG_SECURE != 0,
+                    Reason.APPROVAL_UNAVAILABLE)
+                val button = descendants(panel).filterIsInstance<Button>().singleOrNull { it.text.toString() == "确认" }
+                    ?: fail(Reason.APPROVAL_UNAVAILABLE)
+                check(button.isEnabled && button.isShown, Reason.APPROVAL_UNAVAILABLE)
+                approved = true
+                check(button.performClick(), Reason.APPROVAL_UNAVAILABLE)
+            }
+            withTimeout(10_000) {
+                while (true) {
+                    check(state.running && state.config == testConfig() && state.step == 0 && state.status in
+                        setOf(RootPilotStatus.WAITING_CONFIRMATION, RootPilotStatus.EXECUTING, RootPilotStatus.WAITING_SCREEN),
+                        Reason.UNEXPECTED_ACTIVITY)
+                    val value = fixtureState()
+                    check(value.getString("instanceId") == base.fixtureInstanceId && value.getInt("processId") == base.fixturePid,
+                        Reason.FIXTURE_IDENTITY)
+                    check(value.getInt("commitCalls") in 0..1, Reason.FIXTURE_STATE)
+                    if (state.status == RootPilotStatus.WAITING_SCREEN && value.getBoolean("matches") &&
+                        value.getInt("commitCalls") == 1 && ime.currentId() == base.originalIme && !exists(imeFile)) {
+                        val disk = diskHistory()
+                        val record = disk.document.records.singleOrNull { it.id == runId }
+                        if (record?.events?.map(::shape) == SUBMITTED_TRACE && history.value.records == disk.document.records &&
+                            ownSnapshot().status == RootPilotStatus.WAITING_SCREEN.name) break
+                    }
+                    delay(10)
+                }
+            }
+            submittedReady = true
+        }
+
         private suspend fun checkPrepared(base: Baseline, receipt: Ready) {
             checkMainUnlocked()
             checkFixture(base, foreground = true)
-            checkPendingType()
-            check(ime.currentId() == ime.ownId && fixed(Reason.IME_RECOVERY) { FileImeRestoreStore(context).read() } ==
-                base.originalIme && !imeSidecarsExist(), Reason.IME_RECOVERY)
-            check(fileDigest(imeFile, Reason.IME_RECOVERY) == receipt.imeRecoveryDigest, Reason.IME_RECOVERY)
+            if (submittedReady) {
+                // The controller retains the preview value while executing; only the approval token is cleared.
+                // The exact trace and snapshot below, not that display field, bind this post-submit state.
+                check(state.running && state.status == RootPilotStatus.WAITING_SCREEN && state.step == 0 &&
+                    state.config == testConfig(), Reason.WAITING_IDENTITY)
+                check(ime.currentId() == base.originalIme, Reason.IME_NOT_RESTORED)
+                checkImeFileAbsent()
+            } else {
+                checkPendingType()
+                check(ime.currentId() == ime.ownId && fixed(Reason.IME_RECOVERY) { FileImeRestoreStore(context).read() } ==
+                    base.originalIme && !imeSidecarsExist(), Reason.IME_RECOVERY)
+                check(fileDigest(imeFile, Reason.IME_RECOVERY) == receipt.imeRecoveryDigest, Reason.IME_RECOVERY)
+            }
             val snapshot = ownSnapshot()
-            check(snapshot.status == RootPilotStatus.WAITING_CONFIRMATION.name && snapshot.step == 0 &&
-                snapshot.actionSummary == "type(length=${EXPECTED.length})" && snapshot.allowScreenUpload,
+            check(snapshot.status == expectedStatus.name && snapshot.step == 0 &&
+                snapshot.actionSummary == expectedSummary && snapshot.allowScreenUpload,
                 Reason.SNAPSHOT_IDENTITY)
             checkSnapshotDigest(receipt)
             checkUnchangedFiles(base)
@@ -338,6 +408,8 @@ class TypeProcessRecoveryInstrumentedTest {
             val receipt = fixed(Reason.RECEIPT_IO) {
                 JSON.decodeFromString<Ready>(readBounded(directory.resolve("ready.json"), MAX_FILE).decodeToString())
             }
+            check(receipt.submitted == submitted, Reason.RECEIPT_ID)
+            submittedReady = submitted
             check(base.id == id && receipt.id == id && validId(receipt.runId) &&
                 validId(base.fixtureInstanceId) && receipt.fixtureInstanceId == base.fixtureInstanceId &&
                 receipt.fixturePid == base.fixturePid && base.fixturePid > 0 && base.fixturePid != base.mainPid &&
@@ -459,7 +531,7 @@ class TypeProcessRecoveryInstrumentedTest {
             // Independent readbacks still run if STOP or one resource's restoration failed.
             attempt { check(ime.currentId() == base.originalIme, Reason.IME_NOT_RESTORED); checkImeFileAbsent() }
             attempt { checkMainUnlocked() }
-            attempt { checkFixture(base, foreground = false) }
+            attempt { checkFixture(base, foreground = false, allowApproved = prepare && approved) }
             attempt { checkUnchangedFiles(base) }
             if (stopped) attempt {
                 check(!state.running && !exists(snapshotFile) && state.pendingAction == null, Reason.CLEANUP_UNCONFIRMED)
@@ -525,19 +597,23 @@ class TypeProcessRecoveryInstrumentedTest {
         private fun checkSnapshotDigest(receipt: Ready) {
             check(fileDigest(snapshotFile, Reason.SNAPSHOT_CHANGED) == receipt.snapshotDigest, Reason.SNAPSHOT_CHANGED)
             val snapshot = ownSnapshot()
-            check(snapshot.status == RootPilotStatus.WAITING_CONFIRMATION.name && snapshot.step == 0 &&
-                snapshot.allowScreenUpload && snapshot.actionSummary == "type(length=${EXPECTED.length})", Reason.SNAPSHOT_IDENTITY)
+            check(snapshot.status == expectedStatus.name && snapshot.step == 0 &&
+                snapshot.allowScreenUpload && snapshot.actionSummary == expectedSummary, Reason.SNAPSHOT_IDENTITY)
         }
 
         private suspend fun fixtureState(): Bundle = try { fixture.call("state") }
         catch (_: Throwable) { fail(Reason.FIXTURE_STATE) }
 
-        private suspend fun checkFixture(base: Baseline, foreground: Boolean) {
+        private suspend fun checkFixture(base: Baseline, foreground: Boolean, allowApproved: Boolean = false) {
             val value = fixtureState()
             check(value.getString("instanceId") == base.fixtureInstanceId && value.getInt("processId") == base.fixturePid,
                 Reason.FIXTURE_IDENTITY)
-            check(value.getBoolean("empty") && !value.getBoolean("matches") &&
-                value.getInt("fieldId") == android.R.id.edit && (!foreground || value.getBoolean("ready")), Reason.FIXTURE_STATE)
+            val once = !value.getBoolean("empty") && value.getBoolean("matches") && value.getInt("commitCalls", -1) == 1
+            val untouched = value.getBoolean("empty") && !value.getBoolean("matches")
+            val expectedContent = if (allowApproved) once || untouched && value.getInt("commitCalls", -1) == 0
+                else if (submittedReady) once else untouched
+            check(expectedContent && value.getInt("fieldId") == android.R.id.edit &&
+                (!foreground || value.getBoolean("ready")), Reason.FIXTURE_STATE)
         }
 
         private fun checkMainUnlocked() {
@@ -579,9 +655,9 @@ class TypeProcessRecoveryInstrumentedTest {
         private fun checkCompleteHistory(record: RunHistoryRecord, status: RunHistoryStatus) {
             check(record.status == status && !record.eventsTruncated && record.stepCount == 1 &&
                 record.events.all { it.runId == record.id && it.reason == TraceReason.NONE } &&
-                record.events.map(::shape) == EXPECTED_TRACE && record.reason == TraceReason.NONE,
+                record.events.map(::shape) == expectedTrace && record.reason == TraceReason.NONE,
                 Reason.UNEXPECTED_ACTIVITY)
-            check(record.events.none { it.stage == TraceStage.EXECUTION || it.event == TraceEvent.CONFIRMED } &&
+            if (!submittedReady) check(record.events.none { it.stage == TraceStage.EXECUTION || it.event == TraceEvent.CONFIRMED } &&
                 record.events.last().let { it.event == TraceEvent.WAITING && it.actionType == TraceActionType.TYPE &&
                     it.status == TraceStatus.WAITING }, Reason.UNEXPECTED_ACTIVITY)
         }
@@ -600,9 +676,9 @@ class TypeProcessRecoveryInstrumentedTest {
             val start = all.indexOfFirst { it.runId == owned }
             check(start >= 0, Reason.TRACE_UNAVAILABLE)
             val current = all.drop(start)
-            check(current.all { it.runId == owned && it.reason == "none" } && current.size <= EXPECTED_TRACE.size &&
-                current.map { it.shape } == EXPECTED_TRACE.take(current.size) &&
-                (!complete || current.size == EXPECTED_TRACE.size), Reason.UNEXPECTED_ACTIVITY)
+            check(current.all { it.runId == owned && it.reason == "none" } && current.size <= expectedTrace.size &&
+                current.map { it.shape } == expectedTrace.take(current.size) &&
+                (!complete || current.size == expectedTrace.size), Reason.UNEXPECTED_ACTIVITY)
         }
 
         private fun checkReceiptValid() {
@@ -641,12 +717,13 @@ class TypeProcessRecoveryInstrumentedTest {
                     putString("runId", it.runId)
                     putLong("readyAt", it.readyAt)
                 }
-                if (stage == "ready_for_main_process_kill") putLong("hostKillWindowMs", HOST_KILL_WINDOW)
+                if (stage == "ready_for_main_process_kill") putLong("hostKillWindowMs", killWindow)
                 if (verified && failure == null && cleanupReason == null) {
                     putInt("postReopenModelRequests", 0)
                     putInt("postReopenScreenshots", 0)
                     putInt("postReopenExecutions", 0)
-                    putInt("confirmedActions", 0)
+                    putInt("confirmedActions", if (submitted) 1 else 0)
+                    if (submitted) putInt("targetCommitCalls", 1)
                 }
             })
         }
@@ -664,6 +741,7 @@ class TypeProcessRecoveryInstrumentedTest {
         val id: String, val runId: String, val mainPid: Int, val appUid: Int, val bootCount: Int, val readyAt: Long,
         val snapshotDigest: String, val historyDigest: String, val interruptedHistoryDigest: String,
         val imeRecoveryDigest: String, val fixtureInstanceId: String, val fixturePid: Int, val baselineDigest: String,
+        val submitted: Boolean = false,
     )
 
     @Serializable
@@ -680,7 +758,7 @@ class TypeProcessRecoveryInstrumentedTest {
         SNAPSHOT_IDENTITY, SNAPSHOT_CHANGED, API_CHANGED, ALLOWLIST_CHANGED, TRACE_UNAVAILABLE, HISTORY_CHANGED,
         HOST_KILL_TIMEOUT, RECEIPT_INVALIDATION_FAILED, RECEIPT_INVALIDATED, MAIN_NOT_DEAD, PID_QUERY,
         RECEIPT_EXPIRED, RECOVERY_STATE, UPLOAD_CONSENT, RECOVER_NOT_REJECTED, CLEANUP_UNCONFIRMED,
-        DISCARD_FAILED, RESTORE_FAILED, REPORT_FAILED, TIMEOUT, UNEXPECTED,
+        DISCARD_FAILED, RESTORE_FAILED, REPORT_FAILED, APPROVAL_UNAVAILABLE, TIMEOUT, UNEXPECTED,
     }
 
     private companion object {
@@ -701,6 +779,15 @@ class TypeProcessRecoveryInstrumentedTest {
             "RUN/RUN_START/STARTED/NONE/-1", "SCREENSHOT/START/STARTED/NONE/0", "SCREENSHOT/RESULT/SUCCESS/NONE/0",
             "MODEL/START/STARTED/NONE/0", "MODEL/RESULT/SUCCESS/NONE/0", "APPROVAL/WAITING/WAITING/TYPE/0",
         )
+
+        val SUBMITTED_TRACE = EXPECTED_TRACE + listOf(
+            "APPROVAL/CONFIRMED/SUCCESS/TYPE/0", "EXECUTION/START/STARTED/TYPE/0", "EXECUTION/RESULT/SUCCESS/TYPE/0",
+        )
+
+        fun descendants(view: View): Sequence<View> = sequence {
+            yield(view)
+            if (view is ViewGroup) for (index in 0 until view.childCount) yieldAll(descendants(view.getChildAt(index)))
+        }
 
         fun fail(reason: Reason): Nothing = throw RecoveryFailure(reason)
         fun check(value: Boolean, reason: Reason) { if (!value) fail(reason) }

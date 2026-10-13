@@ -10,6 +10,8 @@ import android.os.Process;
 import android.text.InputType;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputConnectionWrapper;
 import android.widget.EditText;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -26,6 +28,7 @@ public final class ExecutionFixtureActivity extends Activity {
     private LinearLayout page;
     private EditText editor;
     private boolean resumed;
+    private int commitCalls;
     private Button isolationButton;
     private int isolationClicks;
 
@@ -43,7 +46,18 @@ public final class ExecutionFixtureActivity extends Activity {
         title.setTextColor(Color.BLACK);
         title.setTextSize(22);
         page.addView(title);
-        editor = new EditText(this);
+        editor = new EditText(this) {
+            @Override public InputConnection onCreateInputConnection(EditorInfo info) {
+                InputConnection connection = super.onCreateInputConnection(info);
+                if (connection == null) return null;
+                return new InputConnectionWrapper(connection, false) {
+                    @Override public boolean commitText(CharSequence text, int newCursorPosition) {
+                        commitCalls++;
+                        return super.commitText(text, newCursorPosition);
+                    }
+                };
+            }
+        };
         editor.setId(android.R.id.edit);
         editor.setHint("第一个输入框（已聚焦）");
         editor.setTextColor(Color.BLACK);
@@ -91,6 +105,7 @@ public final class ExecutionFixtureActivity extends Activity {
         result.putBoolean("empty", text.isEmpty());
         result.putBoolean("matches", EXPECTED.equals(text));
         result.putInt("fieldId", editor.getId());
+        result.putInt("commitCalls", commitCalls);
         if (isolationButton != null) {
             Rect bounds = new Rect();
             boolean visible = isolationButton.getLocalVisibleRect(bounds);
