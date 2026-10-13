@@ -23,6 +23,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.example.agent.rootpilot.history.RunHistoryRecord
 import com.example.agent.rootpilot.history.RunHistoryStatus
 import com.example.agent.rootpilot.input.AndroidImeEnvironment
+import com.example.agent.rootpilot.input.CommitBoundaryGate
+import com.example.agent.rootpilot.input.TypeCommitRecoveryGate
 import com.example.agent.rootpilot.input.FileImeRestoreStore
 import com.example.agent.rootpilot.input.InputConnectionBridge
 import com.example.agent.rootpilot.input.LiveExecutionInstrumentedTest.FixtureClient
@@ -95,11 +97,17 @@ class TypeProcessRecoveryInstrumentedTest {
 
     @Test fun verifySubmittedTypeAfterHostKillAndNormalActivityReopen() = invoke(prepare = false, submitted = true)
 
-    private fun invoke(prepare: Boolean, submitted: Boolean = false) {
+    @Test fun prepareBeforeCommitBoundary() = invoke(prepare = true, boundary = CommitBoundaryGate.Boundary.BEFORE_SUBMIT)
+    @Test fun prepareAfterCommitBoundary() = invoke(prepare = true, boundary = CommitBoundaryGate.Boundary.AFTER_SUBMIT)
+    @Test fun verifyBeforeCommitBoundary() = invoke(prepare = false, boundary = CommitBoundaryGate.Boundary.BEFORE_SUBMIT)
+    @Test fun verifyAfterCommitBoundary() = invoke(prepare = false, boundary = CommitBoundaryGate.Boundary.AFTER_SUBMIT)
+
+    private fun invoke(prepare: Boolean, submitted: Boolean = false, boundary: CommitBoundaryGate.Boundary? = null) {
         assumeTrue(InstrumentationRegistry.getArguments().getString("typeProcessRecovery") == "true")
         if (submitted) assumeTrue(InstrumentationRegistry.getArguments().getString("typeSubmittedRecovery") == "true")
+        if (boundary != null) assumeTrue(InstrumentationRegistry.getArguments().getString("typeCommitBoundaryRecovery") == "true")
         runBlocking {
-            val test = Recovery(InstrumentationRegistry.getInstrumentation().targetContext, submitted)
+            val test = Recovery(InstrumentationRegistry.getInstrumentation().targetContext, submitted, boundary)
             var failure: Reason? = null
             try {
                 test.checkInvocation()
@@ -129,13 +137,15 @@ class TypeProcessRecoveryInstrumentedTest {
         }
     }
 
-    private class Recovery(private val context: Context, private val submitted: Boolean) {
+    private class Recovery(private val context: Context, private val submitted: Boolean, private val boundary: CommitBoundaryGate.Boundary?) {
         private var approved = false
         private var submittedReady = false
-        private val expectedTrace get() = if (submittedReady) SUBMITTED_TRACE else EXPECTED_TRACE
-        private val expectedStatus get() = if (submittedReady) RootPilotStatus.WAITING_SCREEN else RootPilotStatus.WAITING_CONFIRMATION
+        private var boundaryReady = false
+        private var boundaryReceipt: CommitBoundaryGate.Receipt? = null
+        private val expectedTrace get() = if (boundaryReady) BOUNDARY_TRACE else if (submittedReady) SUBMITTED_TRACE else EXPECTED_TRACE
+        private val expectedStatus get() = if (boundaryReady) RootPilotStatus.EXECUTING else if (submittedReady) RootPilotStatus.WAITING_SCREEN else RootPilotStatus.WAITING_CONFIRMATION
         private val expectedSummary get() = if (submittedReady) null else "type(length=${EXPECTED.length})"
-        private val killWindow get() = if (submitted) 400L else HOST_KILL_WINDOW
+        private val killWindow get() = if (boundary != null) 5_000L else if (submitted) 400L else HOST_KILL_WINDOW
         private val state get() = RootPilotService.uiState.value
         private val root = context.noBackupFilesDir.resolve("rootpilot-type-process-recovery-test")
         private val apiFile = context.noBackupFilesDir.resolve(RootPilotApiConfigStore.FILE_NAME)
@@ -271,7 +281,7 @@ class TypeProcessRecoveryInstrumentedTest {
                     delay(POLL)
                 }
             }
-            if (submitted) approveAndAwaitSubmission(base)
+            if (submitted || boundary != null) approveAndAwaitSubmission(base)
             val owned = runId ?: fail(Reason.RUN_IDENTITY)
             val disk = diskHistory()
             checkCompleteHistory(disk.document.records.single { it.id == owned }, RunHistoryStatus.RUNNING)
@@ -282,7 +292,8 @@ class TypeProcessRecoveryInstrumentedTest {
                 fileDigest(snapshotFile, Reason.SNAPSHOT_CHANGED), disk.digest,
                 digest(JSON.encodeToString(interrupted).encodeToByteArray()),
                 if (submitted) digest(byteArrayOf()) else fileDigest(imeFile, Reason.IME_RECOVERY), fixtureId, fixturePid,
-                fileDigest(directory.resolve("baseline.json"), Reason.RECEIPT_IO), submitted)
+                fileDigest(directory.resolve("baseline.json"), Reason.RECEIPT_IO), submitted,
+                boundary?.name, boundaryReceipt?.reachedAt, boundaryReceipt?.deadline)
             ready = receipt
             checkPrepared(base, receipt)
             write(directory.resolve("ready.json"), JSON.encodeToString(receipt).encodeToByteArray())
@@ -344,6 +355,7 @@ class TypeProcessRecoveryInstrumentedTest {
                 val button = descendants(panel).filterIsInstance<Button>().singleOrNull { it.text.toString() == "确认" }
                     ?: fail(Reason.APPROVAL_UNAVAILABLE)
                 check(button.isEnabled && button.isShown, Reason.APPROVAL_UNAVAILABLE)
+                boundary?.let { TypeCommitRecoveryGate.arm(id, Process.myPid(), it) }
                 approved = true
                 check(button.performClick(), Reason.APPROVAL_UNAVAILABLE)
             }
@@ -356,7 +368,26 @@ class TypeProcessRecoveryInstrumentedTest {
                     check(value.getString("instanceId") == base.fixtureInstanceId && value.getInt("processId") == base.fixturePid,
                         Reason.FIXTURE_IDENTITY)
                     check(value.getInt("commitCalls") in 0..1, Reason.FIXTURE_STATE)
-                    if (state.status == RootPilotStatus.WAITING_SCREEN && value.getBoolean("matches") &&
+                    if (boundary != null) {
+                        val paused = TypeCommitRecoveryGate.receipt(id)
+                        val expectedCalls = if (boundary == CommitBoundaryGate.Boundary.BEFORE_SUBMIT) 0 else 1
+                        val expectedText = if (expectedCalls == 0) value.getBoolean("empty") && !value.getBoolean("matches")
+                            else value.getBoolean("matches") && !value.getBoolean("empty")
+                        if (paused != null && state.status == RootPilotStatus.EXECUTING && expectedText &&
+                            value.getInt("commitCalls") == expectedCalls) {
+                            val disk = diskHistory()
+                            val record = disk.document.records.singleOrNull { it.id == runId }
+                            if (record?.events?.map(::shape) == BOUNDARY_TRACE && history.value.records == disk.document.records &&
+                                ownSnapshot().status == RootPilotStatus.EXECUTING.name) {
+                                check(paused.pid == Process.myPid() && paused.boundary == boundary &&
+                                    paused.deadline - SystemClock.elapsedRealtime() > killWindow + 1_000, Reason.BOUNDARY_INVALID)
+                                boundaryReceipt = paused
+                                boundaryReady = true
+                                break
+                            }
+                        }
+                    }
+                    if (boundary == null && state.status == RootPilotStatus.WAITING_SCREEN && value.getBoolean("matches") &&
                         value.getInt("commitCalls") == 1 && ime.currentId() == base.originalIme && !exists(imeFile)) {
                         val disk = diskHistory()
                         val record = disk.document.records.singleOrNull { it.id == runId }
@@ -366,7 +397,7 @@ class TypeProcessRecoveryInstrumentedTest {
                     delay(10)
                 }
             }
-            submittedReady = true
+            if (boundary == null) submittedReady = true
         }
 
         private suspend fun checkPrepared(base: Baseline, receipt: Ready) {
@@ -380,7 +411,13 @@ class TypeProcessRecoveryInstrumentedTest {
                 check(ime.currentId() == base.originalIme, Reason.IME_NOT_RESTORED)
                 checkImeFileAbsent()
             } else {
-                checkPendingType()
+                if (boundaryReady) {
+                    val paused = TypeCommitRecoveryGate.receipt(id) ?: fail(Reason.BOUNDARY_INVALID)
+                    check(paused == boundaryReceipt && paused.boundary.name == receipt.boundary &&
+                        paused.reachedAt == receipt.boundaryReachedAt && paused.deadline == receipt.boundaryDeadline &&
+                        state.running && state.status == RootPilotStatus.EXECUTING && state.step == 0 &&
+                        state.config == testConfig(), Reason.BOUNDARY_INVALID)
+                } else checkPendingType()
                 check(ime.currentId() == ime.ownId && fixed(Reason.IME_RECOVERY) { FileImeRestoreStore(context).read() } ==
                     base.originalIme && !imeSidecarsExist(), Reason.IME_RECOVERY)
                 check(fileDigest(imeFile, Reason.IME_RECOVERY) == receipt.imeRecoveryDigest, Reason.IME_RECOVERY)
@@ -408,8 +445,13 @@ class TypeProcessRecoveryInstrumentedTest {
             val receipt = fixed(Reason.RECEIPT_IO) {
                 JSON.decodeFromString<Ready>(readBounded(directory.resolve("ready.json"), MAX_FILE).decodeToString())
             }
-            check(receipt.submitted == submitted, Reason.RECEIPT_ID)
+            check(receipt.submitted == submitted && receipt.boundary == boundary?.name, Reason.RECEIPT_ID)
             submittedReady = submitted
+            boundaryReady = boundary != null
+            if (boundaryReady) check(receipt.boundaryReachedAt != null && receipt.boundaryDeadline != null &&
+                receipt.boundaryReachedAt <= receipt.readyAt && receipt.boundaryDeadline - receipt.readyAt > killWindow,
+                Reason.BOUNDARY_INVALID)
+            else check(receipt.boundaryReachedAt == null && receipt.boundaryDeadline == null, Reason.RECEIPT_ID)
             check(base.id == id && receipt.id == id && validId(receipt.runId) &&
                 validId(base.fixtureInstanceId) && receipt.fixtureInstanceId == base.fixtureInstanceId &&
                 receipt.fixturePid == base.fixturePid && base.fixturePid > 0 && base.fixturePid != base.mainPid &&
@@ -559,6 +601,7 @@ class TypeProcessRecoveryInstrumentedTest {
             val owned = bindRun() ?: fail(Reason.CLEANUP_UNCONFIRMED)
             check(state.config == testConfig() && logs().lastOrNull()?.runId == owned, Reason.CLEANUP_UNCONFIRMED)
             if (exists(snapshotFile)) ownSnapshot()
+            if (boundary != null) TypeCommitRecoveryGate.cancel(id)
             if (state.running) RootPilotService.send(context, RootPilotService.ACTION_STOP)
             withTimeout(20_000) {
                 while (true) {
@@ -611,7 +654,8 @@ class TypeProcessRecoveryInstrumentedTest {
             val once = !value.getBoolean("empty") && value.getBoolean("matches") && value.getInt("commitCalls", -1) == 1
             val untouched = value.getBoolean("empty") && !value.getBoolean("matches")
             val expectedContent = if (allowApproved) once || untouched && value.getInt("commitCalls", -1) == 0
-                else if (submittedReady) once else untouched
+                else if (submittedReady || boundaryReady && boundary == CommitBoundaryGate.Boundary.AFTER_SUBMIT) once
+                else untouched && (!boundaryReady || value.getInt("commitCalls", -1) == 0)
             check(expectedContent && value.getInt("fieldId") == android.R.id.edit &&
                 (!foreground || value.getBoolean("ready")), Reason.FIXTURE_STATE)
         }
@@ -657,7 +701,7 @@ class TypeProcessRecoveryInstrumentedTest {
                 record.events.all { it.runId == record.id && it.reason == TraceReason.NONE } &&
                 record.events.map(::shape) == expectedTrace && record.reason == TraceReason.NONE,
                 Reason.UNEXPECTED_ACTIVITY)
-            if (!submittedReady) check(record.events.none { it.stage == TraceStage.EXECUTION || it.event == TraceEvent.CONFIRMED } &&
+            if (!submittedReady && !boundaryReady) check(record.events.none { it.stage == TraceStage.EXECUTION || it.event == TraceEvent.CONFIRMED } &&
                 record.events.last().let { it.event == TraceEvent.WAITING && it.actionType == TraceActionType.TYPE &&
                     it.status == TraceStatus.WAITING }, Reason.UNEXPECTED_ACTIVITY)
         }
@@ -716,14 +760,17 @@ class TypeProcessRecoveryInstrumentedTest {
                 ready?.let {
                     putString("runId", it.runId)
                     putLong("readyAt", it.readyAt)
+                    it.boundary?.let { boundary -> putString("commitBoundary", boundary) }
+                    it.boundaryDeadline?.let { deadline -> putLong("boundaryDeadline", deadline) }
                 }
                 if (stage == "ready_for_main_process_kill") putLong("hostKillWindowMs", killWindow)
                 if (verified && failure == null && cleanupReason == null) {
                     putInt("postReopenModelRequests", 0)
                     putInt("postReopenScreenshots", 0)
                     putInt("postReopenExecutions", 0)
-                    putInt("confirmedActions", if (submitted) 1 else 0)
-                    if (submitted) putInt("targetCommitCalls", 1)
+                    putInt("confirmedActions", if (submitted || boundary != null) 1 else 0)
+                    if (submitted || boundary != null) putInt("targetCommitCalls",
+                        if (boundary == CommitBoundaryGate.Boundary.BEFORE_SUBMIT) 0 else 1)
                 }
             })
         }
@@ -742,6 +789,7 @@ class TypeProcessRecoveryInstrumentedTest {
         val snapshotDigest: String, val historyDigest: String, val interruptedHistoryDigest: String,
         val imeRecoveryDigest: String, val fixtureInstanceId: String, val fixturePid: Int, val baselineDigest: String,
         val submitted: Boolean = false,
+        val boundary: String? = null, val boundaryReachedAt: Long? = null, val boundaryDeadline: Long? = null,
     )
 
     @Serializable
@@ -758,7 +806,7 @@ class TypeProcessRecoveryInstrumentedTest {
         SNAPSHOT_IDENTITY, SNAPSHOT_CHANGED, API_CHANGED, ALLOWLIST_CHANGED, TRACE_UNAVAILABLE, HISTORY_CHANGED,
         HOST_KILL_TIMEOUT, RECEIPT_INVALIDATION_FAILED, RECEIPT_INVALIDATED, MAIN_NOT_DEAD, PID_QUERY,
         RECEIPT_EXPIRED, RECOVERY_STATE, UPLOAD_CONSENT, RECOVER_NOT_REJECTED, CLEANUP_UNCONFIRMED,
-        DISCARD_FAILED, RESTORE_FAILED, REPORT_FAILED, APPROVAL_UNAVAILABLE, TIMEOUT, UNEXPECTED,
+        DISCARD_FAILED, RESTORE_FAILED, REPORT_FAILED, APPROVAL_UNAVAILABLE, BOUNDARY_INVALID, TIMEOUT, UNEXPECTED,
     }
 
     private companion object {
@@ -778,6 +826,10 @@ class TypeProcessRecoveryInstrumentedTest {
         val EXPECTED_TRACE = listOf(
             "RUN/RUN_START/STARTED/NONE/-1", "SCREENSHOT/START/STARTED/NONE/0", "SCREENSHOT/RESULT/SUCCESS/NONE/0",
             "MODEL/START/STARTED/NONE/0", "MODEL/RESULT/SUCCESS/NONE/0", "APPROVAL/WAITING/WAITING/TYPE/0",
+        )
+
+        val BOUNDARY_TRACE = EXPECTED_TRACE + listOf(
+            "APPROVAL/CONFIRMED/SUCCESS/TYPE/0", "EXECUTION/START/STARTED/TYPE/0",
         )
 
         val SUBMITTED_TRACE = EXPECTED_TRACE + listOf(

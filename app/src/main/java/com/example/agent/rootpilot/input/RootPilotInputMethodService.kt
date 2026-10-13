@@ -117,17 +117,20 @@ internal object InputConnectionBridge {
         if (!allowed) return RootExecutionResult.Failure("不能在 RootPilot、密码框或非文本目标中自动输入")
         // Approval refers to this exact connection, not whichever editor appears afterward.
         if (!confirm(ready.info.packageName)) return RootExecutionResult.Failure("用户取消输入")
-        return withContext(Dispatchers.Main.immediate) {
-            if (editor.value !== ready || ready.owner.currentInputConnection !== ready.connection) {
-                return@withContext RootExecutionResult.Failure("输入焦点已变化，未输入文本")
-            }
-            if (ready.info.packageName == ownPackage || ready.info.inputType == InputType.TYPE_NULL ||
-                isPassword(ready.info.inputType)
-            ) return@withContext RootExecutionResult.Failure("不能在 RootPilot、密码框或非文本目标中自动输入")
-            if (ready.connection.commitText(text, 1)) {
-                RootExecutionResult.Success("已提交文本，仍需截图确认实际内容")
-            } else {
-                RootExecutionResult.Failure("输入框未接受文本，未自动重试")
+        return TypeCommitRecoveryGate.aroundSubmission(ready.info.packageName) {
+            // Revalidate after the debug-only pre-submit suspension, immediately before injection.
+            withContext(Dispatchers.Main.immediate) {
+                if (editor.value !== ready || ready.owner.currentInputConnection !== ready.connection) {
+                    return@withContext RootExecutionResult.Failure("输入焦点已变化，未输入文本")
+                }
+                if (ready.info.packageName == ownPackage || ready.info.inputType == InputType.TYPE_NULL ||
+                    isPassword(ready.info.inputType)
+                ) return@withContext RootExecutionResult.Failure("不能在 RootPilot、密码框或非文本目标中自动输入")
+                if (ready.connection.commitText(text, 1)) {
+                    RootExecutionResult.Success("已提交文本，仍需截图确认实际内容")
+                } else {
+                    RootExecutionResult.Failure("输入框未接受文本，未自动重试")
+                }
             }
         }
     }
