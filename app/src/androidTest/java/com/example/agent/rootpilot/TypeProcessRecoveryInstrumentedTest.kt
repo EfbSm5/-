@@ -598,10 +598,16 @@ class TypeProcessRecoveryInstrumentedTest {
 
         private suspend fun stopOwnedPrepare() {
             if (!startSent) return
-            val owned = bindRun() ?: fail(Reason.CLEANUP_UNCONFIRMED)
-            check(state.config == testConfig() && logs().lastOrNull()?.runId == owned, Reason.CLEANUP_UNCONFIRMED)
-            if (exists(snapshotFile)) ownSnapshot()
-            if (boundary != null) TypeCommitRecoveryGate.cancel(id)
+            val owned = try {
+                val owned = bindRun() ?: fail(Reason.CLEANUP_UNCONFIRMED)
+                check(state.config == testConfig() && logs().lastOrNull()?.runId == owned, Reason.CLEANUP_UNCONFIRMED)
+                if (exists(snapshotFile)) ownSnapshot()
+                owned
+            } finally {
+                // Cancel only this receipt, even if ownership checks reject sending STOP.
+                // Keep snapshot validation first: cancellation may advance the run and clear it.
+                if (boundary != null) TypeCommitRecoveryGate.cancel(id)
+            }
             if (state.running) RootPilotService.send(context, RootPilotService.ACTION_STOP)
             withTimeout(20_000) {
                 while (true) {

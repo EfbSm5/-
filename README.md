@@ -128,6 +128,29 @@ adb -s <设备serial> logcat -d -v raw RootPilotTrace:I '*:S' | tail -n 300
 
 本次测试期间 GKD 与 Cumulus 保持连接；仅用户配合补验时关闭／重开 RootPilot 服务。不代表 GKD 业务、所有共存模式、进程死亡恢复、通知或真人触摸确认通过。
 
+### Type 提交边界进程死亡验收（显式联网／强杀授权）
+
+[宿主脚本](dev/type-commit-recovery.py) 固化真实 Service 的两阶段流程：仅在本轮回执、主 PID／UID／启动时刻、快照／历史／IME 摘要和截止窗口全部匹配时杀绑定主进程，随后正常打开 RootPilot Activity 并验证不重放。它不安装 APK、不修改权限或系统设置、不自动重试、不关闭第三方服务，也不自动清理失败现场。
+
+运行前必须另行同意真实模型调用、测试页全屏上传、脚本调用确认监听器批准一次固定 Type，以及本应用主进程强杀。只在已核对身份的授权设备上运行：先构建并保数据安装同版 app／androidTest／fixture，配置好 Root、悬浮窗、已启用的 RootPilot 与原输入法、手机内保存的 API；确认无敏感画面、无进行中或待恢复任务。正常启动 RootPilot，保持解锁；必要时预热签名 fixture。不要通过重新安装／清数据来绕过前置失败。
+
+```sh
+# 一次只运行一个边界。SERIAL 填本轮刚核对的 ADB 地址，不复用历史无线端口。
+SERIAL='<当前授权设备的 ADB serial>'
+python3 dev/type-commit-recovery.py \
+  --serial "$SERIAL" \
+  --expected-hardware-serial 12cd0365 --expected-model 24129PN74C \
+  --boundary BEFORE_SUBMIT \
+  --output "/tmp/rootpilot-before-$(date +%Y%m%d-%H%M%S)" \
+  --allow-live-execution-and-process-kill
+```
+
+`expected-*` 必须填写事先独立核对的硬件身份（上述为已验收小米），不能仅把当前连到的任意设备属性自动回填以绕过身份校验。另一边界用 `AFTER_SUBMIT`，且必须换全新的输出目录；目录只能是 `/tmp` 的直接子目录且不得预先存在。缺少授权开关时不会调用 ADB。脚本要求 Python 3.9+，只用标准库；安全检查在 `python3 -O` 下仍生效。
+
+成功必须退出 0 且 `summary.json` 的 `passed=true`，同时保留 prepare／ready／verify 证据。prepare 中的 `Process crashed` 是预期强杀，不是通过；verify 必须完整成功，跳过、超时、摘要变化和夹具重建均失败。脚本最多等待 prepare 220 秒、verify 45 秒，其他 ADB 和退出收集也有独立超时；只有 ready 后 5 秒内且 gate 截止前才能杀，不补杀。失败时停止，不换 UUID 重跑、不删除应用内回执；先根据摘要核对旧 PID、任务和原输入法，无法确认清理则保留现场。宿主停止 adb 子进程不等于设备测试已停止。
+
+离线回归：`python3 -B -m unittest discover -s dev -p 'test_type_commit_recovery.py' -v`（所有子进程均 mock，不连手机、不请求模型），已接入 [verify.sh](dev/verify.sh)，并以 `-O` 再跑一次。它检查宿主编排契约，不代替真实 Android shell／Binder／IME 验收。既有真机结论与人工扩大窗口的限制见 [SPEC.md](SPEC.md)“Type 提交两侧暂停点”。
+
 ### 应用商店搜索只读预检
 
 `MarketSearchUiAcceptanceInstrumentedTest#inspectPublicMarketPageWithoutActionsOrNetwork` 需显式 `marketSearchPreflight=true`，默认跳过。它只在已打开的应用商店公开首页／搜索页核对前台、焦点与新鲜控件树，输出固定安全标签、资源 ID、控件状态和坐标；不启动任务、不输入查询、不提交搜索、不下载或安装。正常 RootPilot 界面发起的联网搜索验收尚未实现或运行。观察器的 Activity dump 上限为 512 KiB，其余三份输入仍为 256 KiB；超限仍整份丢弃，具体证据见 `SPEC.md`。

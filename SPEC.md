@@ -333,6 +333,13 @@ adb -P "$rootpilot_adb_server_port" -s "$rootpilot_device_serial" shell am instr
 - 原始证据：`/tmp/rootpilot-boundary-before-20261013-1940/`、`/tmp/rootpilot-boundary-after-20261013-1940/`（各含 prepare／ready／verify／summary）；安装前后哈希与收尾见 `/tmp/rootpilot-boundary-installed-20261013-1940.json`、`/tmp/rootpilot-boundary-final-state-20261013.json`。安装产物与本机构建 SHA-256 一致：app `a612796ef0f58a3a484b8c19a789a1c9f108087f5e7409dbdc7a0519194a9337`，androidTest `dea98864c115a06c12c0bc44e4c6ac890b4d703303d7d32393721985e9498803`，fixture `883055d6d2cb06e2c7ff979a4273b426c54ce37088ef15d67fadaf259ce87ad5`。保数据安装，设备保留本次 debug 产物；本轮暂停点改动已获准提交并推送，提交号及远端状态以 Git 为准。
 - 边界：这是 `commitText` 调用两侧的人工扩大窗口，不是函数内部断点；不由此覆盖副屏、真人确认、其他 IME／厂商或长期运行。此前无暂停的已提交后死亡 PASS 仍只对应上一节旧产物。
 
+### 提交边界宿主固化与清理收尾（2026-10-13，离线验证）
+
+- 在已推送的 `4b265e5` 上，将上述临时宿主整理为 [dev/type-commit-recovery.py](dev/type-commit-recovery.py)：保留一次性回执、精确 PID／UID／启动时刻、摘要和截止窗口守卫；新增显式联网／上传／批准／强杀授权开关及必填的预先核对硬件身份，不复用历史无线地址。import 不执行设备操作，所有安全检查改用不会被 Python `-O` 移除的条件检查；不安装、不改设置、不补杀、不自动重试。用法和失败现场处理见 README。
+- 修复上一节记录的测试清理 P3：`stopOwnedPrepare` 的绑定及快照检查包在 try/finally 中，检查失败也只 cancel 本轮 UUID；检查仍在 cancel 前，失败不发送 STOP。未消费取消继续保留到提交入口消费或进程结束，不以清空令牌换取可重跑。未修改产品恢复、IME 或 debug gate 逻辑。
+- [dev/test_type_commit_recovery.py](dev/test_type_commit_recovery.py) 的 7 项离线测试以普通／`-O` 模式分别通过，含两侧成功、错误设备／回执／摘要／时限、不补杀、verify 超时／跳过／计数或 IME 不符等分支；所有子进程均 mock，无 ADB。已接入 `dev/verify.sh`，完整本机验证退出 0：debug 产品／测试 APK 与 lint 构建通过，676 项 JVM 零失败／错误／跳过（本轮 JVM 任务 UP-TO-DATE，沿用已有结果，不称全量重新执行）。日志 `/tmp/rootpilot-host-tools-verify-20261013.txt`；独立静态审查 `3cb2d0fa-aaef-4ecc-8e15-0b676c0c700f` PASS。
+- 本轮未操作手机；mock 不验证实际 Android shell／Binder／IME，旧临时脚本的真机 PASS 不冒充新脚本或 P3 异常路径的真机复验。本轮于 2026-10-13 完成后按要求停止，2026-10-14 获准提交推送；提交号及远端状态以 Git 为准。
+
 ### 真实时钟中文城市搜索（2026-10-05，业务限定 PASS／自动测试 FAIL，已手动收尾）
 
 - 用户授权自主选择非敏感真实应用后，选用小米系统时钟 `com.android.deskclock` 的公开城市搜索。人工预置世界时钟页，再由真实生产 Service／已保存 DeepSeek 配置执行启动、打开城市选择、聚焦搜索、一次中文 Type；只读取结果，不选中或添加城市，不操作闹钟／计时器／设置。此范围是预置页面后的热启动，不覆盖冷启动后自主切换标签。
