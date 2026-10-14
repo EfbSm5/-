@@ -1,6 +1,6 @@
 # RootPilot 当前状态
 
-更新日期：2026-10-12。副屏既有 Activity 栈、临时单步及空框 Unicode 输入的专用页真实 Service 验收限定 PASS；八项剩余差异平台探针也已限定 PASS。非空光标插入／选区替换已按限定纯文本语义接入生产源码，首轮审查指出的三处问题已修改，本地单测／构建／Lint 通过；独立复审结论为 FAIL（低，无高／中缺陷，两项 P3 残留见 `TASKS.md`），四项离线真机与三项真实 Service 入口在重建夹具后 7/7 限定 PASS（手机已安装的三个 APK 哈希与本机构建一致），故该限定范围可称闭环 PASS；富文本／IME composing／撤销栈、hint 与真实内容区分、主屏并行输入及厂商兼容仍未验证。HOME 在带系统装饰的探针配置下可行，产品仍禁用；LOCAL 键盘、尺寸／旋转与跨单步页面保留仍未开放。任务外副屏截图禁用，设备动作仍为 LOW／65536；协议、保屏及广泛兼容的稳定性仍 PARTIAL。当前接手顺序见下方“当前工作：副屏非空输入与剩余能力”；提交／推送状态以 Git 为准。
+更新日期：2026-10-14。副屏既有 Activity 栈、临时单步及空框 Unicode 输入的专用页真实 Service 验收限定 PASS；八项剩余差异平台探针也已限定 PASS。非空光标插入／选区替换已按限定纯文本语义接入生产源码，首轮审查指出的三处问题已修改，本地单测／构建／Lint 通过；独立复审结论为 FAIL（低，无高／中缺陷，两项 P3 残留见 `TASKS.md`），四项离线真机与三项真实 Service 入口在重建夹具后 7/7 限定 PASS（手机已安装的三个 APK 哈希与本机构建一致），故该限定范围可称闭环 PASS；富文本／IME composing／撤销栈、hint 与真实内容区分、主屏并行输入及厂商兼容仍未验证。HOME 在带系统装饰的探针配置下可行，产品仍禁用；LOCAL 键盘、尺寸／旋转与跨单步页面保留仍未开放。任务外副屏截图禁用，设备动作仍为 LOW／65536；协议、保屏及广泛兼容的稳定性仍 PARTIAL。当前接手顺序见下方“当前工作：副屏非空输入与剩余能力”；提交／推送状态以 Git 为准。
 
 本文件只保存最新状态，直接更新对应条目，不追加开发过程、历次测试数字或补验流水。使用与构建说明见 [README.md](README.md)，协作规则见 [AGENTS.md](AGENTS.md)，下一步任务与评审待办见 [TASKS.md](TASKS.md)。
 
@@ -339,6 +339,18 @@ adb -P "$rootpilot_adb_server_port" -s "$rootpilot_device_serial" shell am instr
 - 修复上一节记录的测试清理 P3：`stopOwnedPrepare` 的绑定及快照检查包在 try/finally 中，检查失败也只 cancel 本轮 UUID；检查仍在 cancel 前，失败不发送 STOP。未消费取消继续保留到提交入口消费或进程结束，不以清空令牌换取可重跑。未修改产品恢复、IME 或 debug gate 逻辑。
 - [dev/test_type_commit_recovery.py](dev/test_type_commit_recovery.py) 的 7 项离线测试以普通／`-O` 模式分别通过，含两侧成功、错误设备／回执／摘要／时限、不补杀、verify 超时／跳过／计数或 IME 不符等分支；所有子进程均 mock，无 ADB。已接入 `dev/verify.sh`，完整本机验证退出 0：debug 产品／测试 APK 与 lint 构建通过，676 项 JVM 零失败／错误／跳过（本轮 JVM 任务 UP-TO-DATE，沿用已有结果，不称全量重新执行）。日志 `/tmp/rootpilot-host-tools-verify-20261013.txt`；独立静态审查 `3cb2d0fa-aaef-4ecc-8e15-0b676c0c700f` PASS。
 - 本轮未操作手机；mock 不验证实际 Android shell／Binder／IME，旧临时脚本的真机 PASS 不冒充新脚本或 P3 异常路径的真机复验。本轮于 2026-10-13 完成后按要求停止，2026-10-14 获准提交推送；提交号及远端状态以 Git 为准。
+
+### Service 单独销毁验收交接（2026-10-14，未批准 Type 单点限定 PASS）
+
+- 已推送基线仍为 `a9a0bed`；本轮在保留原交接修改的基础上实施，验收后已获准提交，尚未推送；提交号以 Git 为准。本机闭环后，经用户指定设备并授权继续，保数据安装当前 APK，单次真实模型／Service／IME 验收限定 PASS。此前 Type 进程死亡与提交两侧暂停窗口的限定 PASS 保留，未重做。
+- [TypeProcessRecoveryInstrumentedTest](app/src/androidTest/java/com/example/agent/rootpilot/TypeProcessRecoveryInstrumentedTest.kt) 新增单方法 `realServiceDestroyedAtUnapprovedType`，仅 `typeServiceDestroy=true` 启用。复用原 Recovery 的保存配置、固定 fixture、输入目标、IME、隐私、历史容量与运行所有权前置；真实模型提出 step0 Type 待确认且零批准后，由 `Context.stopService` 销毁真实 Service。新路径和失败清理均不用 ACTION_STOP、杀进程、直接调用 controller.destroy 或伪执行器代替。
+- [Service](app/src/main/java/com/example/agent/rootpilot/RootPilotService.kt) 仅增加 onCreate 完成／onDestroy 尾部的只读观察调用：[debug 弱引用观察器](app/src/debug/java/com/example/agent/rootpilot/ServiceDestroyObservation.kt) 标识实际实例与销毁完成，[release 同名实现](app/src/release/java/com/example/agent/rootpilot/ServiceDestroyObservation.kt) 无状态、无动作。不改变生产取消／恢复语义；销毁回调不等于异步收尾，用例还等待 `running=false`（owner 释放）、历史落盘 `INTERRUPTED`、`RUN_END CANCELLED` 和原 IME 恢复。
+- 验收断言：主 PID／UID／boot 不变，旧真实确认 View 脱离窗口且其监听器在销毁后和重建后都不能批准；同一 fixture PID／UUID 仍空、双参数 `commitText` 计数 0；快照摘要保持等待确认点；其他历史记录不变、本次原事件前缀不变。取消尾部只允许一个 `RUN_END`，以及 reject／cancel 竞态可能出现的一个 `REJECTED`，不允许 CONFIRMED／EXECUTION 或额外模型／截图；不照搬进程死亡的完整历史摘要不变断言。
+- 收尾后走正常 `restoreIfNeeded` 入口，观察新的真实 Service 完成 onCreate；允许它按正常空闲逻辑立即自停，不要求实例持续存活。保持 RECOVERY_REQUIRED、撤销截图上传授权；未重新授权的 ACTION_RECOVER 必须拒绝，并在 1 秒静默窗口内保持完整 trace／历史不变。此处无自动重放证据不是网络抓包或无限时保证，也不是真人／通知确认验收。验证成功后才放弃本轮快照并恢复原配置；失败保留未验快照与失效回执，所有权不明不主动停止他人运行。
+- [Service 专用宿主](dev/type-service-destroy.py) 要求显式联网与销毁授权、设备 serial／硬件 serial／型号、新直系 `/tmp` 输出目录；只执行一个 `--no-restart` 方法，前后核对主 PID／UID／启动时刻、原 IME。instrumentation 最长 240 秒，失败最多再等 35 秒收尾，其他 ADB 每次 15 秒；超时只结束本机客户端，不杀设备进程，不把客户端退出记为设备清理成功。白名单摘要缺少任何必需证据、跳过、崩溃或重复回执均 FAIL；无自动安装／重试。操作说明见 [README](README.md)。
+- 本机验证：`./dev/verify.sh` 通过（82 tasks；72 份结果、676 项 JVM 单测零失败／错误／跳过，debug app／androidTest 构建与 Lint 通过）；另行 release Kotlin 编译和 fixture APK 构建通过（不等于完整 release APK 验证）。新增宿主 mock 普通／`-O` 各 11 项、旧宿主各 7 项均通过。证据目录 `/tmp/rootpilot-service-destroy-local.2Pouud/`。独立宿主静态审查 PASS；Android 初审发现一项 P2（正常恢复 Service 空闲自停被测试误判），改为验证真实 onCreate 完成而不要求持续存活，独立静态复审 PASS；修复后重跑同一验证集通过（82 tasks，676 项 JVM 和两组普通／优化 mock 均通过）。原 TraeX Android 审查因反复检查无结论已停止，不计通过；最终 Android 结论来自独立原生 GPT-6.1-Sol 审查。Reviewer 的只读沙箱不能创建临时目录，完整 mock 通过来自主环境，不冒称 Reviewer 全量实跑。
+- 真机证据：小米 `24129PN74C`／硬件 serial `12cd0365`，本轮无线连接 `10.93.135.18:42937`；保数据更新 app／androidTest，fixture 已为相同产物，三件套安装 SHA-256 均与本地一致。仅运行一次专用宿主，退出码 0、`passed=true`，receipt `d9a82984-f095-46c7-b4ea-9cb3a17b32ef`、run `c487078a-dc96-40d3-832f-077215412a01`。主 PID 始终 `12381`，UID `10479`、启动 ticks `35651606` 不变；实际销毁、异步收尾、旧确认失效、同实例目标为空且 `targetCommitCalls=0`、快照保留、历史 INTERRUPTED、正常入口重建／接管与未授权恢复拒绝均通过。批准数和重建后模型请求／截图／执行均为 0；原 IME 恢复，无障碍设置保持，`baselineRestored=true`、清理原因 NONE。成功验证后仅清理本轮快照；额外只读收尾确认主 PID 不变、原小米 IME、owned completed 标记存在，无快照／IME 恢复文件／失效回执残留。
+- 脱敏回执见 [真机摘要](</tmp/rootpilot-service-destroy-live-20261014-1735/summary.json>)；安装哈希、前置与额外收尾见 [安装核验](</tmp/rootpilot-service-destroy-device-l0zgir_w/apk-verification.json>)、[收尾核验](</tmp/rootpilot-service-destroy-device-l0zgir_w/postflight.json>)。没有保存模型原文、凭据或原始 instrumentation 输出。范围仅本机本次未批准 step0 Type：已提交／清理中销毁、真人／通知确认、跨设备兼容和超过静默窗口的保证均未覆盖，不自动扩大验收。
 
 ### 真实时钟中文城市搜索（2026-10-05，业务限定 PASS／自动测试 FAIL，已手动收尾）
 

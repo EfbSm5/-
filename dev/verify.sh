@@ -12,6 +12,8 @@ echo
 echo "== 2/4 离线宿主安全回归（无 ADB） =="
 python3 -B -m unittest discover -s dev -p 'test_type_commit_recovery.py' -v
 python3 -O -B -m unittest discover -s dev -p 'test_type_commit_recovery.py' -v
+python3 -B -m unittest discover -s dev -p 'test_type_service_destroy.py' -v
+python3 -O -B -m unittest discover -s dev -p 'test_type_service_destroy.py' -v
 echo
 
 echo "== 3/4 gradle: testDebugUnitTest assembleDebug assembleDebugAndroidTest lintDebug =="

@@ -81,6 +81,7 @@ class RootPilotService : Service(), RootPilotRunHost {
         )
         createNotificationChannel()
         controller.restoreInterruptedRun()
+        ServiceDestroyObservation.created(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -124,6 +125,7 @@ class RootPilotService : Service(), RootPilotRunHost {
         }
         controller.destroy()
         super.onDestroy()
+        ServiceDestroyObservation.destroyed(this)
     }
 
     override fun stateChanged() = notifyState()

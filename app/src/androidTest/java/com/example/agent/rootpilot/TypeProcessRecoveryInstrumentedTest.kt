@@ -64,6 +64,11 @@ import org.junit.runner.RunWith
 
 /**
  * Real production Service / saved API / IME; the test never injects text directly.
+ * realServiceDestroyedAtUnapprovedType is separately gated by typeServiceDestroy=true, runs once
+ * without process death, and reuses prepare's ownership/privacy guards. It retains the waiting
+ * snapshot, permits only cancellation's RUN_END (plus the reject/cancel race), checks a retained
+ * real confirmation listener, then uses restoreIfNeeded to rebuild without replay. The process-
+ * death phases and unchanged-history assertions below do not apply to that method.
  * Unapproved methods leave Type pending. Submitted methods require typeSubmittedRecovery=true,
  * click the actual secure overlay confirmation once, and require the same target to contain
  * exactly EXPECTED with one commitText call after IME restoration. This is after-submit recovery,
@@ -101,6 +106,30 @@ class TypeProcessRecoveryInstrumentedTest {
     @Test fun prepareAfterCommitBoundary() = invoke(prepare = true, boundary = CommitBoundaryGate.Boundary.AFTER_SUBMIT)
     @Test fun verifyBeforeCommitBoundary() = invoke(prepare = false, boundary = CommitBoundaryGate.Boundary.BEFORE_SUBMIT)
     @Test fun verifyAfterCommitBoundary() = invoke(prepare = false, boundary = CommitBoundaryGate.Boundary.AFTER_SUBMIT)
+
+    @Test fun realServiceDestroyedAtUnapprovedType() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("typeServiceDestroy") == "true")
+        runBlocking {
+            val test = Recovery(InstrumentationRegistry.getInstrumentation().targetContext, false, null)
+            var failure: Reason? = null
+            try {
+                test.checkInvocation()
+                test.prepare(serviceDestroy = true)
+            } catch (error: Throwable) { failure = reason(error) }
+            finally {
+                withContext(NonCancellable) {
+                    if (failure != null) try { test.invalidate(failure!!) }
+                    catch (_: Throwable) { test.cleanupReason = Reason.RECEIPT_INVALIDATION_FAILED }
+                    try { test.cleanupServiceDestroy() }
+                    catch (error: Throwable) { test.cleanupReason = reason(error) }
+                    if (failure == null) failure = test.cleanupReason
+                    try { test.reportServiceDestroy(failure) }
+                    catch (_: Throwable) { if (failure == null) failure = Reason.REPORT_FAILED }
+                }
+            }
+            failure?.let(::fail)
+        }
+    }
 
     private fun invoke(prepare: Boolean, submitted: Boolean = false, boundary: CommitBoundaryGate.Boundary? = null) {
         assumeTrue(InstrumentationRegistry.getArguments().getString("typeProcessRecovery") == "true")
@@ -183,7 +212,7 @@ class TypeProcessRecoveryInstrumentedTest {
             check(validId(id), Reason.RECEIPT_ID)
         }
 
-        suspend fun prepare() {
+        suspend fun prepare(serviceDestroy: Boolean = false) {
             check(InstrumentationRegistry.getArguments().getString("recoveryBaseline") ==
                 "empty_task_saved_api_or_defaults", Reason.BASELINE_ACK_REQUIRED)
             val original = state
@@ -281,6 +310,10 @@ class TypeProcessRecoveryInstrumentedTest {
                     delay(POLL)
                 }
             }
+            if (serviceDestroy) {
+                destroyServiceAndVerify(base)
+                return
+            }
             if (submitted || boundary != null) approveAndAwaitSubmission(base)
             val owned = runId ?: fail(Reason.RUN_IDENTITY)
             val disk = diskHistory()
@@ -306,6 +339,196 @@ class TypeProcessRecoveryInstrumentedTest {
                 delay(POLL)
             }
             fail(Reason.HOST_KILL_TIMEOUT)
+        }
+
+        private var destroyedInstance: ServiceDestroyObservation.Instance? = null
+        private var serviceSnapshotDigest: String? = null
+        private var serviceHistoryBefore: RunHistoryRecord? = null
+        private var serviceHistoryAfter: List<RunHistoryRecord>? = null
+        private var serviceLogsAfter: List<String>? = null
+
+        private suspend fun destroyServiceAndVerify(base: Baseline) {
+            val owned = runId ?: fail(Reason.RUN_IDENTITY)
+            checkPendingType()
+            checkLogPrefix(owned, complete = true)
+            checkFixtureZero(base)
+            val before = diskHistory().document.records.single { it.id == owned }
+            checkCompleteHistory(before, RunHistoryStatus.RUNNING)
+            serviceHistoryBefore = before
+            serviceSnapshotDigest = fileDigest(snapshotFile, Reason.SNAPSHOT_CHANGED)
+            checkServiceSnapshot()
+            check(ime.currentId() == ime.ownId && FileImeRestoreStore(context).read() == base.originalIme,
+                Reason.IME_RECOVERY)
+            val old = ServiceDestroyObservation.current ?: fail(Reason.SERVICE_OBSERVATION)
+            check(!old.destroyed && old.service.get() != null, Reason.SERVICE_OBSERVATION)
+            destroyedInstance = old
+            val oldButton = withContext(Dispatchers.Main.immediate) {
+                checkPendingType()
+                val panel = WindowInspector.getGlobalWindowViews().singleOrNull {
+                    (it.layoutParams as? WindowManager.LayoutParams)?.title == "RootPilotOverlay" && it.isAttachedToWindow
+                } ?: fail(Reason.APPROVAL_UNAVAILABLE)
+                check((panel.layoutParams as WindowManager.LayoutParams).flags and WindowManager.LayoutParams.FLAG_SECURE != 0,
+                    Reason.APPROVAL_UNAVAILABLE)
+                descendants(panel).filterIsInstance<Button>().singleOrNull { it.text.toString() == "确认" }
+                    ?.also { check(it.isEnabled && it.isShown, Reason.APPROVAL_UNAVAILABLE) }
+                    ?: fail(Reason.APPROVAL_UNAVAILABLE)
+            }
+            check(context.stopService(android.content.Intent(context, RootPilotService::class.java)), Reason.SERVICE_STOP_REJECTED)
+            withTimeout(20_000) {
+                while (!old.destroyed || state.running || history.value.records != diskHistory().document.records ||
+                    history.value.records.singleOrNull { it.id == owned }?.status != RunHistoryStatus.INTERRUPTED) delay(POLL)
+            }
+            check(!oldButton.isAttachedToWindow, Reason.SERVICE_OBSERVATION)
+            checkServiceInterrupted(base)
+            serviceHistoryAfter = diskHistory().document.records
+            serviceLogsAfter = state.logs.toList()
+            // Exercise the retained real listener, which still addresses the destroyed controller.
+            withContext(Dispatchers.Main.immediate) { check(oldButton.performClick(), Reason.APPROVAL_UNAVAILABLE) }
+            checkServiceQuiet(base, recovered = false)
+            RootPilotService.restoreIfNeeded(context)
+            withTimeout(5_000) {
+                while (ServiceDestroyObservation.current === old || state.config.allowScreenUpload) delay(POLL)
+            }
+            val rebuilt = ServiceDestroyObservation.current ?: fail(Reason.SERVICE_OBSERVATION)
+            // ACTION_RESTORE can idle-stop before this poll; created proves onCreate completed.
+            check(rebuilt !== old, Reason.SERVICE_OBSERVATION)
+            checkServiceQuiet(base, recovered = true)
+            withContext(Dispatchers.Main.immediate) { check(oldButton.performClick(), Reason.APPROVAL_UNAVAILABLE) }
+            check(state.errorMessage != UPLOAD_REJECTION, Reason.RECOVER_NOT_REJECTED)
+            RootPilotService.send(context, RootPilotService.ACTION_RECOVER)
+            withTimeout(5_000) {
+                while (state.errorMessage != UPLOAD_REJECTION) {
+                    checkServiceQuiet(base, recovered = true)
+                    delay(POLL)
+                }
+            }
+            val until = SystemClock.elapsedRealtime() + QUIET_WINDOW
+            while (SystemClock.elapsedRealtime() < until) {
+                checkServiceQuiet(base, recovered = true)
+                check(state.errorMessage == UPLOAD_REJECTION, Reason.RECOVER_NOT_REJECTED)
+                delay(POLL)
+            }
+            verified = true
+        }
+
+        private fun checkServiceSnapshot() {
+            check(fileDigest(snapshotFile, Reason.SNAPSHOT_CHANGED) == serviceSnapshotDigest, Reason.SNAPSHOT_CHANGED)
+            val snapshot = ownSnapshot()
+            check(snapshot.status == RootPilotStatus.WAITING_CONFIRMATION.name && snapshot.step == 0 &&
+                snapshot.allowScreenUpload && snapshot.actionSummary == "type(length=${EXPECTED.length})", Reason.SNAPSHOT_IDENTITY)
+        }
+
+        private suspend fun checkFixtureZero(base: Baseline) {
+            checkFixture(base, foreground = false)
+            check(fixtureState().getInt("commitCalls", -1) == 0, Reason.FIXTURE_STATE)
+        }
+
+        private suspend fun checkServiceInterrupted(base: Baseline) {
+            check(Process.myPid() == base.mainPid && Process.myUid() == base.appUid && bootCount() == base.bootCount,
+                Reason.TARGET_PROCESS)
+            check(destroyedInstance?.destroyed == true && !state.running && state.pendingAction == null &&
+                state.status == RootPilotStatus.RECOVERY_REQUIRED && state.step == 0 && state.savedTodos.isEmpty() &&
+                !state.modelReportedResult, Reason.RECOVERY_STATE)
+            checkMainUnlocked()
+            checkFixtureZero(base)
+            check(ime.currentId() == base.originalIme, Reason.IME_NOT_RESTORED)
+            checkImeFileAbsent()
+            checkUnchangedFiles(base)
+            checkServiceSnapshot()
+            val records = diskHistory().document.records
+            check(history.value.error == null && history.value.records == records &&
+                records.filter { it.id != runId } == previousRecords, Reason.HISTORY_CHANGED)
+            val record = records.singleOrNull { it.id == runId } ?: fail(Reason.RUN_IDENTITY)
+            val before = serviceHistoryBefore ?: fail(Reason.HISTORY_CHANGED)
+            val tail = record.events.drop(before.events.size)
+            check(record.status == RunHistoryStatus.INTERRUPTED && record.reason == TraceReason.CANCELLED &&
+                record.durationMs >= before.durationMs && record.copy(status = before.status, reason = before.reason,
+                    durationMs = before.durationMs, events = before.events) == before &&
+                record.events.take(before.events.size) == before.events, Reason.HISTORY_CHANGED)
+            // reject() can resume await before cancellation; only that documented race is optional.
+            val end = "APPROVAL/RUN_END/CANCELLED/TYPE/0"
+            val rejection = "APPROVAL/REJECTED/CANCELLED/TYPE/0"
+            check(tail.map(::shape) == listOf(end) || tail.map(::shape) == listOf(rejection, end), Reason.UNEXPECTED_ACTIVITY)
+            check(tail.all { it.runId == runId && it.modelFailure == null && it.modelUsage == null &&
+                it.reason == if (it.event == TraceEvent.RUN_END) TraceReason.CANCELLED else TraceReason.USER_REJECTED },
+                Reason.UNEXPECTED_ACTIVITY)
+            val currentLogs = logs().filter { it.runId == runId }
+            check(currentLogs.map { it.shape } == record.events.map(::shape) &&
+                currentLogs.map { it.reason } == record.events.map { it.reason.name.lowercase(Locale.ROOT) } &&
+                logs().none { it.runId !in previousLogIds && it.runId != runId }, Reason.UNEXPECTED_ACTIVITY)
+        }
+
+        private suspend fun checkServiceQuiet(base: Baseline, recovered: Boolean) {
+            checkServiceInterrupted(base)
+            check(state.config == testConfig().copy(allowScreenUpload = !recovered) && state.apiConfigured,
+                Reason.UPLOAD_CONSENT)
+            check(diskHistory().document.records == serviceHistoryAfter && state.logs == serviceLogsAfter,
+                Reason.UNEXPECTED_ACTIVITY)
+        }
+
+        suspend fun cleanupServiceDestroy() {
+            val base = baseline ?: return
+            if (!verified) {
+                // Never discard an unverified snapshot. Only cancel an owned, still-active Service.
+                if (startSent && state.running) {
+                    val owned = bindRun() ?: fail(Reason.CLEANUP_UNCONFIRMED)
+                    check(state.config == testConfig() && logs().lastOrNull()?.runId == owned, Reason.CLEANUP_UNCONFIRMED)
+                    if (exists(snapshotFile)) ownSnapshot()
+                    val instance = ServiceDestroyObservation.current ?: fail(Reason.SERVICE_OBSERVATION)
+                    check(context.stopService(android.content.Intent(context, RootPilotService::class.java)), Reason.SERVICE_STOP_REJECTED)
+                    withTimeout(20_000) { while (!instance.destroyed || state.running) delay(POLL) }
+                }
+                check(ime.currentId() == base.originalIme, Reason.IME_NOT_RESTORED)
+                checkImeFileAbsent()
+                checkFixtureZero(base)
+                checkUnchangedFiles(base)
+                if (startSent) fail(Reason.CLEANUP_UNCONFIRMED)
+            } else {
+                checkServiceQuiet(base, recovered = true)
+                RootPilotService.send(context, RootPilotService.ACTION_DISCARD_RECOVERY)
+                withTimeout(5_000) {
+                    while (state.status != RootPilotStatus.IDLE || exists(snapshotFile)) {
+                        check(!state.running && state.config == testConfig().copy(allowScreenUpload = false), Reason.DISCARD_FAILED)
+                        delay(POLL)
+                    }
+                }
+                check(!state.running && state.pendingAction == null && state.config == testConfig().copy(allowScreenUpload = false),
+                    Reason.CLEANUP_UNCONFIRMED)
+                checkFixtureZero(base)
+                check(ime.currentId() == base.originalIme, Reason.IME_NOT_RESTORED)
+                checkImeFileAbsent()
+                checkUnchangedFiles(base)
+                check(diskHistory().document.records == serviceHistoryAfter, Reason.HISTORY_CHANGED)
+            }
+            if (configChanged) {
+                val original = originalConfig(base)
+                RootPilotService.updateConfig(original)
+                RootPilotService.updateApiConfig(if (base.apiConfigured) savedApi() else null)
+                check(state.config == original && state.apiConfigured == base.apiConfigured, Reason.RESTORE_FAILED)
+            }
+            restored = true
+            if (verified) marker("completed")
+        }
+
+        fun reportServiceDestroy(failure: Reason?) {
+            InstrumentationRegistry.getInstrumentation().sendStatus(0, Bundle().apply {
+                val passed = verified && restored && failure == null && cleanupReason == null
+                putString("serviceDestroyStage", if (passed) "verified" else "failed")
+                putString("reasonCode", failure?.name ?: "NONE")
+                putString("cleanupReasonCode", cleanupReason?.name ?: "NONE")
+                if (::id.isInitialized && validId(id)) putString("recoveryReceiptId", id)
+                runId?.let { putString("runId", it) }
+                putInt("mainPid", Process.myPid())
+                putBoolean("passed", passed)
+                putBoolean("baselineRestored", restored)
+                if (passed) {
+                    listOf("serviceDestroyed", "asyncCleanupComplete", "oldConfirmationInvalid", "serviceRecreated",
+                        "snapshotRetained", "historyInterrupted", "targetSameInstance", "originalImeRestored",
+                        "recoveryRequired", "uploadConsentRevoked", "unapprovedRecoverRejected").forEach { putBoolean(it, true) }
+                    listOf("confirmedActions", "targetCommitCalls", "postReopenModelRequests", "postReopenScreenshots",
+                        "postReopenExecutions").forEach { putInt(it, 0) }
+                }
+            })
         }
 
         private fun bindRun(): String? {
@@ -813,6 +1036,7 @@ class TypeProcessRecoveryInstrumentedTest {
         HOST_KILL_TIMEOUT, RECEIPT_INVALIDATION_FAILED, RECEIPT_INVALIDATED, MAIN_NOT_DEAD, PID_QUERY,
         RECEIPT_EXPIRED, RECOVERY_STATE, UPLOAD_CONSENT, RECOVER_NOT_REJECTED, CLEANUP_UNCONFIRMED,
         DISCARD_FAILED, RESTORE_FAILED, REPORT_FAILED, APPROVAL_UNAVAILABLE, BOUNDARY_INVALID, TIMEOUT, UNEXPECTED,
+        SERVICE_OBSERVATION, SERVICE_STOP_REJECTED,
     }
 
     private companion object {

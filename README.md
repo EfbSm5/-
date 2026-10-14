@@ -151,6 +151,27 @@ python3 dev/type-commit-recovery.py \
 
 离线回归：`python3 -B -m unittest discover -s dev -p 'test_type_commit_recovery.py' -v`（所有子进程均 mock，不连手机、不请求模型），已接入 [verify.sh](dev/verify.sh)，并以 `-O` 再跑一次。它检查宿主编排契约，不代替真实 Android shell／Binder／IME 验收。既有真机结论与人工扩大窗口的限制见 [SPEC.md](SPEC.md)“Type 提交两侧暂停点”。
 
+### Type 待确认时单独销毁 Service（显式联网授权，零批准）
+
+[Service 专用宿主](dev/type-service-destroy.py) 只运行 [TypeProcessRecoveryInstrumentedTest](app/src/androidTest/java/com/example/agent/rootpilot/TypeProcessRecoveryInstrumentedTest.kt) 的 `realServiceDestroyedAtUnapprovedType`，开关为 `typeServiceDestroy=true`，默认关闭。保留真实模型、Service、IME 和固定非敏感 fixture；到 step0 Type 待确认时由测试调用 `Context.stopService`，不使用 `ACTION_STOP`、杀进程或直接销毁 controller。不要复用上节的进程死亡宿主。
+
+先另行授权连接与操作手机，核对本轮 serial／硬件身份，保数据安装同版 app、androidTest、fixture；正常打开 RootPilot 并保持解锁，手机内已有 API 配置，Root／悬浮窗／原输入法和 RootPilot 输入法就绪，任务为空且无恢复残留。明确同意固定 fixture 的全屏上传（可能含系统及键盘层），确认没有敏感画面。宿主不安装、不修改系统设置、不自动重试、不启动 Activity，也不发送设备杀进程命令。
+
+```sh
+python3 dev/type-service-destroy.py \
+  --serial '<本轮授权设备的 ADB serial>' \
+  --expected-hardware-serial '<独立核对的硬件序列号>' \
+  --expected-model '<独立核对的型号>' \
+  --output "/tmp/rootpilot-service-destroy-$(date +%Y%m%d-%H%M%S)" \
+  --allow-live-execution-and-service-destroy
+```
+
+仅退出 0 且输出目录中 `summary.json` 的 `passed=true` 才是本次通过。必须核实主 PID／UID／启动时刻不变、实际 Service 销毁和异步收尾／所有权释放、旧确认失效、同一 fixture 仍空且提交计数 0、原 IME 恢复、快照保留以及历史 `INTERRUPTED`。取消新增 `RUN_END`，不能要求历史摘要完全不变。随后经正常 `restoreIfNeeded` 入口重建 Service，验证真实 onCreate 完成但允许正常空闲自停；保留人工接管、撤销上传授权并拒绝未重新授权的恢复；1 秒静默窗口内无新增模型请求／截图／执行。此处 0 来自完整 trace／历史和 fixture，不是网络抓包或无限时保证；旧确认使用销毁后保留 View 的监听器，不代表真人或通知确认。
+
+宿主为 instrumentation 设置 240 秒期限，异常时最多再等 35 秒收尾；其他 ADB 每次 15 秒、结束本地 ADB 客户端和收集线程也有界。超时不会改成设备 STOP／强杀；`deviceCleanupUnconfirmed=true` 时必须保留现场，人工核对任务与原 IME，不能把本地客户端退出当设备收尾完成。不保存任意 instrumentation 原文，只输出受限字段／固定原因码；不输出 Token、任务正文或模型响应。只覆盖未批准点，已提交／清理中销毁不在本用例范围。
+
+本机离线回归：`python3 -B -m unittest discover -s dev -p 'test_type_service_destroy.py' -v`，并以 `-O` 重跑；[verify.sh](dev/verify.sh) 已集成。所有子进程均 mock，本机通过不代表真机生命周期通过；最新证据与限制见 [SPEC.md](SPEC.md)“Service 单独销毁验收交接”。
+
 ### 应用商店搜索只读预检
 
 `MarketSearchUiAcceptanceInstrumentedTest#inspectPublicMarketPageWithoutActionsOrNetwork` 需显式 `marketSearchPreflight=true`，默认跳过。它只在已打开的应用商店公开首页／搜索页核对前台、焦点与新鲜控件树，输出固定安全标签、资源 ID、控件状态和坐标；不启动任务、不输入查询、不提交搜索、不下载或安装。正常 RootPilot 界面发起的联网搜索验收尚未实现或运行。观察器的 Activity dump 上限为 512 KiB，其余三份输入仍为 256 KiB；超限仍整份丢弃，具体证据见 `SPEC.md`。
