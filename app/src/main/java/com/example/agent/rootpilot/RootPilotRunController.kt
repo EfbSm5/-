@@ -9,6 +9,9 @@ import com.example.agent.rootpilot.log.TraceStatus
 import com.example.agent.rootpilot.history.RunHistoryRepository
 import com.example.agent.rootpilot.history.RunHistoryStatus
 import com.example.agent.rootpilot.loop.ActionApproval
+import com.example.agent.rootpilot.loop.TypeApprovalScope
+import com.example.agent.rootpilot.model.ConfirmationStage
+import com.example.agent.rootpilot.model.ConfirmationUi
 import com.example.agent.rootpilot.loop.AgentLoop
 import com.example.agent.rootpilot.loop.AgentLoopEvent
 import com.example.agent.rootpilot.loop.AgentLoopRequest
@@ -66,6 +69,7 @@ internal class RootPilotRunController(
     private val traceSink: (String) -> Unit = {},
     host: RootPilotRunHost,
     private val history: RunHistoryRepository? = null,
+    private val confirmationUnlocked: () -> Boolean = { true },
 ) {
     private val stateLock get() = taskState.lock
     private val _uiState get() = taskState.mutableState
@@ -75,6 +79,8 @@ internal class RootPilotRunController(
     private var activeJob: Job? = null
     private var activeTrace: Pair<Job, RunTrace>? = null
     private var pendingApproval: ActionApproval? = null
+    private var typeScope: TypeApprovalScope? = null
+    private var typeScopeJob: Job? = null
     private var latestStartId = 0
     private var isDeviceRun = false
     private var storageFailure = false
@@ -88,8 +94,15 @@ internal class RootPilotRunController(
     private fun finishHost(startId: Int) { host?.idle(startId) }
     private fun notifyState() { host?.stateChanged() }
 
+    private fun closeTypeScope() {
+        typeScope?.close()
+        typeScope = null
+        typeScopeJob = null
+    }
+
     fun destroy() {
         synchronized(stateLock) {
+            closeTypeScope()
             destroyed = true
             host = null
             if (activeJob != null) {
@@ -228,8 +241,8 @@ internal class RootPilotRunController(
                     onEvent = { event ->
                         if (virtual && (event is AgentLoopEvent.Completed || event is AgentLoopEvent.Failed)) {
                             terminal = event
-                            handleEvent(AgentLoopEvent.WaitingScreen(uiState.value.step))
-                        } else handleEvent(event)
+                            handleEvent(AgentLoopEvent.WaitingScreen(uiState.value.step), job)
+                        } else handleEvent(event, job)
                     },
                 )
             } catch (error: CancellationException) {
@@ -328,25 +341,72 @@ internal class RootPilotRunController(
     fun confirmAction() {
         synchronized(stateLock) {
             if (destroyed || taskState.owner !== this) return
+            if (pendingApproval?.stage != ConfirmationStage.ACTION) return
             pendingApproval?.approve()
             pendingApproval = null
             notifyState()
         }
     }
 
-    fun confirmNotificationAction(token: String?) {
+    fun confirmNotificationAction(token: String?, stage: ConfirmationStage = ConfirmationStage.ACTION) {
         synchronized(stateLock) {
-            if (destroyed || taskState.owner !== this) return
-            if (token != null && pendingApproval?.approve(token) == true) {
+            if (destroyed || taskState.owner !== this || token == null) return
+            if (stage == ConfirmationStage.TYPE_PREPARE) {
+                if (!stagedApprovalCurrent(ConfirmationStage.TYPE_PREPARE, token)) return
+                if (typeScope?.acceptPreparationFromNotification(token) == true) {
+                    pendingApproval = null
+                    notifyState()
+                }
+            } else if (stage == ConfirmationStage.ACTION && pendingApproval?.approve(token) == true) {
+                NotificationApprovalObservation.succeeded(activeTrace?.second?.runId, token)
                 pendingApproval = null
                 notifyState()
             }
         }
     }
 
+    fun confirmTypeFromIme(token: String) = synchronized(stateLock) {
+        if (!stagedApprovalCurrent(ConfirmationStage.TYPE_COMMIT, token)) return@synchronized
+        if (typeScope?.approveTypeFromIme(token) == true) {
+            NotificationApprovalObservation.succeeded(activeTrace?.second?.runId, token)
+            pendingApproval = null
+            notifyState()
+        }
+    }
+
+    fun cancelTypeConfirmation(token: String, stage: ConfirmationStage) = synchronized(stateLock) {
+        if (stage == ConfirmationStage.ACTION || destroyed || taskState.owner !== this ||
+            pendingApproval?.stage != stage || pendingApproval?.token != token ||
+            typeScopeJob !== activeJob) return@synchronized
+        cancelStagedApproval()
+    }
+
+    fun cancelTypeFromIme(token: String) = cancelTypeConfirmation(token, ConfirmationStage.TYPE_COMMIT)
+
+    private fun stagedApprovalCurrent(stage: ConfirmationStage, token: String): Boolean {
+        if (destroyed || taskState.owner !== this || activeJob?.isActive != true ||
+            typeScopeJob !== activeJob || typeScope?.isClosed != false ||
+            pendingApproval?.stage != stage || pendingApproval?.token != token) return false
+        if (!runCatching(confirmationUnlocked).getOrDefault(false)) {
+            cancelStagedApproval()
+            return false
+        }
+        return true
+    }
+
+    private fun cancelStagedApproval() {
+        typeScope?.close()
+        pendingApproval?.reject()
+        pendingApproval = null
+        updateStateLocked(RootPilotStatus.STOPPING, clearPendingAction = true,
+            errorMessage = "输入确认已失效，正在恢复输入法")
+        activeJob?.cancel()
+    }
+
     private fun finishJob(job: Job) {
         val startId = synchronized(stateLock) {
             if (activeJob === job) {
+                closeTypeScope()
                 activeJob = null
                 val trace = activeTrace?.takeIf { it.first === job }?.second
                 if (storageFailure) {
@@ -520,6 +580,7 @@ internal class RootPilotRunController(
     }
 
     private fun markStorageFailure(operation: String) = synchronized(stateLock) {
+        closeTypeScope()
         recordSnapshotFailure(operation)
         storageFailure = true
         taskState.recoveryBlocked = true
@@ -554,8 +615,19 @@ internal class RootPilotRunController(
         notifyState()
     }
 
-    private suspend fun handleEvent(event: AgentLoopEvent) {
+    private suspend fun handleEvent(event: AgentLoopEvent, originatingJob: Job? = null) {
         synchronized(stateLock) {
+            val incomingTypeScope = when (event) {
+                is AgentLoopEvent.PreparingType -> event.scope
+                is AgentLoopEvent.AwaitingConfirmation -> event.typeScope
+                else -> null
+            }
+            if (incomingTypeScope != null && (destroyed || taskState.owner !== this ||
+                    originatingJob == null || originatingJob !== activeJob || !originatingJob.isActive ||
+                    _uiState.value.status == RootPilotStatus.STOPPING)) {
+                incomingTypeScope.close()
+                return
+            }
             if (taskState.owner !== this) return
             // Cancellation may race with a blocking operation returning. Keep STOPPING
             // until job completion, but retain writes that have actually succeeded.
@@ -596,9 +668,37 @@ internal class RootPilotRunController(
                     persistRunSnapshot(RootPilotStatus.REQUESTING_MODEL, event.step)
                 }
 
+                is AgentLoopEvent.PreparingType -> {
+                    val prepared = event.scope
+                    if (destroyed || originatingJob == null || originatingJob !== activeJob ||
+                        !originatingJob.isActive || prepared.isClosed ||
+                        (typeScope != null && typeScope?.isClosed == false)) {
+                        prepared.close()
+                        return
+                    }
+                    typeScope = prepared
+                    typeScopeJob = originatingJob
+                    pendingApproval = prepared.preparation
+                    _uiState.value = _uiState.value.copy(confirmation = ConfirmationUi(ConfirmationStage.TYPE_PREPARE))
+                    updateStateLocked(RootPilotStatus.WAITING_CONFIRMATION, step = prepared.step,
+                        lastAction = prepared.action, pendingAction = prepared.action)
+                    // Preparation is memory-only, not the final action approval or a snapshot.
+                }
+
                 is AgentLoopEvent.AwaitingConfirmation -> {
+                    if (event.typeScope != null && (destroyed || originatingJob == null ||
+                            originatingJob !== activeJob || !originatingJob.isActive ||
+                            event.typeScope !== typeScope || typeScopeJob !== originatingJob ||
+                            event.typeScope.isClosed || event.approval.stage != ConfirmationStage.TYPE_COMMIT ||
+                            event.step != event.typeScope.step || (event.action as? RootPilotAction.Type)?.text != event.typeScope.action.text)) {
+                        event.typeScope.close()
+                        return
+                    }
                     synchronized(stateLock) {
                         pendingApproval = event.approval
+                        _uiState.value = _uiState.value.copy(confirmation = event.typeScope?.let {
+                            ConfirmationUi(ConfirmationStage.TYPE_COMMIT, event.approval.token)
+                        })
                         updateStateLocked(
                             status = RootPilotStatus.WAITING_CONFIRMATION,
                             step = event.step,
@@ -693,7 +793,9 @@ internal class RootPilotRunController(
         clearPendingAction: Boolean = false,
     ) {
         if (_uiState.value.status == RootPilotStatus.STOPPING && status != RootPilotStatus.STOPPED) return
+        if (clearPendingAction) closeTypeScope()
         _uiState.value = _uiState.value.copy(
+            confirmation = if (clearPendingAction || status != RootPilotStatus.WAITING_CONFIRMATION) null else _uiState.value.confirmation,
             status = status,
             frame = frame ?: _uiState.value.frame,
             step = step ?: _uiState.value.step,

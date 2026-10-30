@@ -38,6 +38,8 @@ internal class DisplayRoutingRootExecutor(
     private val deviceInfoProvider = RootDeviceInfoProvider()
     private val virtualTextInput = VirtualDisplayTextInput(context.packageName)
 
+    override val typeConfirmationFlow: TypeConfirmationFlow get() =
+        if (virtualRequested) TypeConfirmationFlow.LEGACY_BOUND else main.typeConfirmationFlow
     override val initialApp: RootPilotApp? get() = startApp
     override val sessionIdentity: String? get() = session?.sessionId
 

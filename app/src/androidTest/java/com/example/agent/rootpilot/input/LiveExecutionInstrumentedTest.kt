@@ -192,8 +192,13 @@ class LiveExecutionInstrumentedTest {
             context.startActivity(Intent().setClassName(FIXTURE_PACKAGE, FIXTURE_ACTIVITY)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
         }
-        suspend fun call(method: String): Bundle = withContext(Dispatchers.IO) {
-            val result = try { context.contentResolver.call(uri, method, null, null) }
+        suspend fun call(method: String): Bundle = call(method, null)
+        suspend fun freshState(session: String): Bundle {
+            require(session.length == 36 && runCatching { java.util.UUID.fromString(session).toString() == session }.getOrDefault(false))
+            return call("fresh_state_v1", session)
+        }
+        private suspend fun call(method: String, arg: String?): Bundle = withContext(Dispatchers.IO) {
+            val result = try { context.contentResolver.call(uri, method, arg, null) }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) {
                 val reason = when (error) {

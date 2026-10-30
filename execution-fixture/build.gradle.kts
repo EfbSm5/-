@@ -18,6 +18,10 @@ android {
     }
 }
 
+dependencies {
+    testImplementation(libs.junit)
+}
+
 // This app is a device acceptance fixture, never a distributable product variant.
 androidComponents {
     beforeVariants(selector().withBuildType("release")) { it.enable = false }

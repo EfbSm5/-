@@ -172,7 +172,9 @@ internal class RootPilotOverlay(
         detailScroll.contentDescription = if (todo) "待办详情，可上下滚动查看完整内容" else "动作详情，可上下滚动查看完整内容"
         if (actionChanged) detailScroll.scrollTo(0, 0)
         detailScroll.visibility = if (expanded) View.VISIBLE else View.GONE
-        confirm.isEnabled = awaiting && value.pendingAction != null && (!fullPreview || expanded)
+        val ordinaryConfirmation = value.confirmation == null ||
+            value.confirmation.stage == com.example.agent.rootpilot.model.ConfirmationStage.ACTION
+        confirm.isEnabled = ordinaryConfirmation && awaiting && value.pendingAction != null && (!fullPreview || expanded)
         confirm.alpha = if (confirm.isEnabled) 1f else 0.45f
         confirm.text = if (value.pendingAction is RootPilotAction.AskUser) "已处理，继续" else "确认"
         try {

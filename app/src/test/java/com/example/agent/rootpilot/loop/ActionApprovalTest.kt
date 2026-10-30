@@ -12,6 +12,80 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ActionApprovalTest {
+    private fun typeScope() = TypeApprovalScope(0,
+        com.example.agent.rootpilot.model.RootPilotAction.Type("fixture", "fixture"))
+
+    @Test
+    fun twoStageGenericApprovalAndCrossStageTokensAreRejected() = runTest {
+        val scope = typeScope()
+        val a = scope.preparation
+        a.approve()
+        assertFalse(a.approve(a.token))
+        assertFalse(scope.approveTypeFromIme(a.token))
+        assertEquals(null, scope.beginCommit())
+        assertTrue(scope.acceptPreparationFromNotification(a.token))
+        assertTrue(a.await())
+        val b = checkNotNull(scope.beginCommit())
+        assertNotEquals(a.token, b.token)
+        b.approve()
+        assertFalse(b.approve(b.token))
+        assertFalse(scope.acceptPreparationFromNotification(b.token))
+        assertFalse(scope.approveTypeFromIme(a.token))
+        assertTrue(scope.approveTypeFromIme(b.token))
+        assertFalse(scope.approveTypeFromIme(b.token))
+        assertTrue(b.await())
+    }
+
+    @Test
+    fun cancelledPreparationNeverCreatesCommit() = runTest {
+        val scope = typeScope()
+        scope.close()
+        assertFalse(scope.preparation.await())
+        assertFalse(scope.acceptPreparationFromNotification(scope.preparation.token))
+        assertEquals(null, scope.beginCommit())
+    }
+
+    @Test
+    fun cancellationInPreparationCommitGapRevokesScope() = runTest {
+        val scope = typeScope()
+        assertTrue(scope.acceptPreparationFromNotification(scope.preparation.token))
+        scope.close()
+        assertTrue(scope.isClosed)
+        assertEquals(null, scope.beginCommit())
+    }
+
+    @Test
+    fun cancelledCommitAndOldScopeTokensCannotApprove() = runTest {
+        val old = typeScope()
+        old.acceptPreparationFromNotification(old.preparation.token)
+        val b = checkNotNull(old.beginCommit())
+        old.close()
+        assertFalse(b.await())
+        assertFalse(old.approveTypeFromIme(b.token))
+        val next = typeScope()
+        assertFalse(next.acceptPreparationFromNotification(old.preparation.token))
+        next.acceptPreparationFromNotification(next.preparation.token)
+        val nextB = checkNotNull(next.beginCommit())
+        assertFalse(next.approveTypeFromIme(b.token))
+        assertTrue(next.approveTypeFromIme(nextB.token))
+    }
+
+    @Test
+    fun concurrentPreparationAndFinalClicksEachAcceptOnce() = runTest {
+        val scope = typeScope()
+        val aResults = List(8) { async(Dispatchers.Default) {
+            scope.acceptPreparationFromNotification(scope.preparation.token)
+        } }.awaitAll()
+        assertEquals(1, aResults.count { it })
+        val b = checkNotNull(scope.beginCommit())
+        assertEquals(null, scope.beginCommit())
+        val bResults = List(8) { async(Dispatchers.Default) {
+            scope.approveTypeFromIme(b.token)
+        } }.awaitAll()
+        assertEquals(1, bResults.count { it })
+        assertTrue(b.await())
+    }
+
     @Test
     fun tokenApprovesOnlyOnce() = runTest {
         val approval = ActionApproval(CompletableDeferred())

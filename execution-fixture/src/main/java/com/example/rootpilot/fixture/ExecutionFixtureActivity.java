@@ -7,6 +7,12 @@ import android.graphics.Color;
 import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.Process;
+import android.os.ResultReceiver;
+import android.view.ViewTreeObserver;
+import java.io.FileInputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Set;
+import java.util.HashSet;
 import android.text.InputType;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
@@ -31,9 +37,56 @@ public final class ExecutionFixtureActivity extends Activity {
     private int commitCalls;
     private Button isolationButton;
     private int isolationClicks;
+    private String freshSessionId;
+    private long freshProcessStartTicks;
+    private ResultReceiver freshReceiver;
+    private ResultReceiver freshLifecycleReceiver;
+    private final Set<String> freshLifecycleSent = new HashSet<>();
+    private boolean freshTerminal;
+    private final ViewTreeObserver.OnGlobalLayoutListener freshLayout = () -> {
+        emitFreshLifecycle("LAYOUT");
+        signalFreshReady();
+    };
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(null);
+        boolean arrivalDiagnostic = getIntent().hasExtra("freshArrivalDiagnostic");
+        if (getIntent().hasExtra("freshSessionId") || getIntent().hasExtra("freshReadinessReceiver")
+                || getIntent().hasExtra("freshLifecycleDiagnostic") || getIntent().hasExtra("freshLifecycleReceiver")
+                || arrivalDiagnostic) {
+            boolean accepted = false;
+            boolean arrivalRecorded = false;
+            try {
+                Bundle extras = getIntent().getExtras();
+                if (extras != null) {
+                    Object session = extras.get("freshSessionId");
+                    freshSessionId = session instanceof String ? (String) session : null;
+                    Object receiver = extras.get("freshReadinessReceiver");
+                    if (receiver instanceof ResultReceiver) freshReceiver = (ResultReceiver) receiver;
+                    Object lifecycleReceiver = extras.get("freshLifecycleReceiver");
+                    if (lifecycleReceiver instanceof ResultReceiver) freshLifecycleReceiver = (ResultReceiver) lifecycleReceiver;
+                }
+                accepted = FreshRequestAdmission.accepts(extras == null ? null : extras.keySet(), canonicalId(freshSessionId),
+                        freshReceiver != null, freshLifecycleReceiver != null,
+                        extras == null ? null : extras.get("freshLifecycleDiagnostic"),
+                        extras == null ? null : extras.get("freshArrivalDiagnostic"));
+                if (arrivalDiagnostic) {
+                    // Shape admission only, before ownership, process identity, page or READY.
+                    FreshArrivalState.PROCESS.observe(accepted, freshSessionId, instanceId);
+                    arrivalRecorded = true;
+                }
+            } finally {
+                if (arrivalDiagnostic && !arrivalRecorded) FreshArrivalState.PROCESS.observe(false, null, null);
+            }
+            if (!accepted) { rejectFresh("INVALID_REQUEST"); return; }
+            emitFreshLifecycle("CREATE");
+            // Only the newly arriving FRESH object may be rejected; never replace or close an owner.
+            if (current != null) { rejectFresh("CONFLICT"); return; }
+            try (FileInputStream input = new FileInputStream("/proc/self/stat")) {
+                byte[] bytes = input.readNBytes(4097);
+                freshProcessStartTicks = parseProcessStartTicks(new String(bytes, StandardCharsets.US_ASCII), Process.myPid());
+            } catch (Exception ignored) { rejectFresh("PROCESS_IDENTITY_UNAVAILABLE"); return; }
+        }
         current = this;
         page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
@@ -85,13 +138,110 @@ public final class ExecutionFixtureActivity extends Activity {
         }
         setContentView(page);
         editor.requestFocus();
+        if (freshSessionId != null) page.getViewTreeObserver().addOnGlobalLayoutListener(freshLayout);
     }
 
-    @Override protected void onResume() { super.onResume(); resumed = true; }
+    @Override protected void onResume() {
+        super.onResume(); resumed = true; emitFreshLifecycle("RESUME"); signalFreshReady();
+    }
+    @Override public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        emitFreshLifecycle(focused ? "FOCUS_GAINED" : "FOCUS_LOST");
+        if (focused) signalFreshReady();
+    }
     @Override protected void onPause() { resumed = false; super.onPause(); }
     @Override protected void onDestroy() {
+        if (freshSessionId != null && !freshTerminal) completeFresh("REJECTED", "DESTROYED", false);
         if (current == this) current = null;
         super.onDestroy();
+    }
+
+    private static boolean canonicalId(String value) {
+        try { return value != null && value.length() == 36 && UUID.fromString(value).toString().equals(value); }
+        catch (IllegalArgumentException ignored) { return false; }
+    }
+
+    private void rejectFresh(String reason) {
+        // Claim only an attempted self-finish, never task removal or destruction of another object.
+        completeFresh("REJECTED", reason, true);
+    }
+
+    private void emitFreshLifecycle(String event) {
+        ResultReceiver receiver = freshLifecycleReceiver;
+        if (receiver == null || !freshLifecycleSent.add(event)) return;
+        try {
+            String state = (resumed ? "1" : "0") + (hasWindowFocus() ? "1" : "0")
+                    + (page == null ? "u" : page.isShown() ? "1" : "0")
+                    + (page == null ? "u" : page.getWidth() > 0 ? "1" : "0")
+                    + (page == null ? "u" : page.getHeight() > 0 ? "1" : "0")
+                    + (editor == null ? "u" : editor.isFocused() ? "1" : "0");
+            Bundle data = new Bundle();
+            data.putString("freshSessionId", freshSessionId);
+            data.putString("event", event);
+            data.putString("state", state);
+            receiver.send(2, data);
+        } catch (RuntimeException ignored) { /* Diagnostic evidence never changes readiness. */ }
+    }
+
+    private boolean locallyReady() {
+        return resumed && hasWindowFocus() && page != null && page.isShown()
+                && page.getWidth() > 0 && page.getHeight() > 0 && editor != null && editor.isFocused();
+    }
+
+    private void signalFreshReady() {
+        if (freshSessionId != null && !freshTerminal && current == this && locallyReady()) {
+            completeFresh("READY", "NONE", false);
+        }
+    }
+
+    private void completeFresh(String outcome, String reason, boolean selfFinishAttempted) {
+        if (freshTerminal) return;
+        freshTerminal = true;
+        if (page != null && page.getViewTreeObserver().isAlive()) {
+            page.getViewTreeObserver().removeOnGlobalLayoutListener(freshLayout);
+        }
+        ResultReceiver receiver = freshReceiver;
+        freshReceiver = null;
+        freshLifecycleReceiver = null;
+        if (selfFinishAttempted) {
+            try { finish(); } catch (RuntimeException ignored) { /* Only this rejected object was addressed. */ }
+        }
+        if (receiver == null) return;
+        Bundle result = new Bundle();
+        result.putString("freshSessionId", freshSessionId);
+        result.putString("creationOutcome", outcome);
+        result.putString("creationReason", reason);
+        result.putBoolean("rejectedAdmissionSelfFinishAttempted", selfFinishAttempted);
+        if ("READY".equals(outcome)) addFreshIdentity(result);
+        try { receiver.send("READY".equals(outcome) ? 1 : 0, result); }
+        catch (RuntimeException ignored) { /* The terminal result is never retried. */ }
+    }
+
+    private void addFreshIdentity(Bundle result) {
+        result.putString("freshSessionId", freshSessionId);
+        result.putString("instanceId", instanceId);
+        result.putInt("processId", Process.myPid());
+        result.putInt("fixtureTaskId", getTaskId());
+        result.putInt("fixtureDisplayId", getDisplay() == null ? -1 : getDisplay().getDisplayId());
+        result.putLong("fixtureProcessStartTicks", freshProcessStartTicks);
+    }
+
+    // Linux field 22; comm may contain spaces and ')' so split only after the final ')'.
+    static long parseProcessStartTicks(String stat, int expectedPid) {
+        if (stat.length() > 4096 || expectedPid <= 0 || !stat.startsWith(expectedPid + " (")) {
+            throw new IllegalArgumentException("fixture_process_identity");
+        }
+        int end = stat.lastIndexOf(')');
+        if (end < 0 || end + 2 >= stat.length() || stat.charAt(end + 1) != ' ') {
+            throw new IllegalArgumentException("fixture_process_identity");
+        }
+        String[] fields = stat.substring(end + 2).trim().split("\\s+");
+        if (fields.length < 20 || !fields[19].matches("[1-9][0-9]*")) {
+            throw new IllegalArgumentException("fixture_process_identity");
+        }
+        long ticks = Long.parseLong(fields[19]);
+        if (ticks <= 0) throw new IllegalArgumentException("fixture_process_identity");
+        return ticks;
     }
 
     Bundle snapshot(boolean includeImage) {
@@ -100,6 +250,7 @@ public final class ExecutionFixtureActivity extends Activity {
         result.putInt("processId", Process.myPid());
         boolean ready = resumed && hasWindowFocus() && page.isShown()
                 && page.getWidth() > 0 && page.getHeight() > 0 && editor.isFocused();
+        if (freshSessionId != null) addFreshIdentity(result);
         result.putBoolean("ready", ready);
         String text = editor.getText().toString();
         result.putBoolean("empty", text.isEmpty());

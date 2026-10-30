@@ -52,6 +52,11 @@ android {
         compose = true
         buildConfig = true
     }
+    sourceSets {
+        // Compile the same pure diagnostic classifier into tests only, never the app APK.
+        getByName("test").kotlin.srcDir("src/testSupport/kotlin")
+        getByName("androidTest").kotlin.srcDir("src/testSupport/kotlin")
+    }
 }
 
 kotlin {
@@ -81,6 +86,7 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(libs.androidx.uiautomator)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.ui.test.junit4)
     debugImplementation(libs.androidx.ui.tooling)

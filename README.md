@@ -16,7 +16,7 @@
 - **只读手机信息工具（测试页限定通过，稳定性 PARTIAL）**：模型可在选择动作前调用 `get_screen_context`、`get_activity_stack`、`get_ui_tree`。前两项复用本机 Root；控件树来自可选、手动启用的无障碍服务，返回当前应用文字、状态及物理像素位置，过滤密码／敏感节点文字。工具不点击或输入，最终动作仍走原有策略与确认。生产 Service 的真实模型、一次中文输入、输入后查询及完成用例通过；确认／停止按钮由脚本调用实际监听器，不代表真人触摸。确认时停止、查询中停止及用户关闭服务后的不可用分支已通过。模型响应协议曾实际失败，成功复跑不等于根因已修复。
 - **通用应用启动与中文输入**：动态查询可启动应用；通过临时输入法输入 Unicode 文本，校验目标编辑框，拒绝密码框，结束后恢复原输入法。
 - **允许启动的应用**：按名称或包名搜索并勾选，自动保存，可一键全不选。首次默认不允许启动任何应用；模型的应用目录只包含勾选项，执行启动前再次校验。
-- **人工确认**：提供 App、悬浮面板和通知入口。打开应用、文本输入和系统按键始终确认；点击/滑动在手动模式确认。
+- **人工确认**：提供 App、悬浮面板和通知入口。打开应用、文本输入和系统按键始终确认；点击/滑动在手动模式确认。主屏 ServiceIME Type 已实现两阶段确认：通知 A 仅准备，回到目标后在 IME 全文预览中进行 B 最终确认；当前静态审查通过、端到端验收未通过，不可视为可靠无人值守输入。跨会话进度与恢复条件见 [TASKS](<TASKS.md>)。
 - **本地待办**：确认标题和截止时间后保存到应用私有存储，与旧 Agent 共用数据；同一任务内防重复。不创建系统闹钟或提醒。
 - **任务与诊断**：中断任务需人工决定恢复；结构化日志按任务和步骤记录阶段、结果及耗时。模型失败区分请求契约、HTTP、网络、超时、响应协议、配置和未知类；协议失败进一步标记固定原因。诊断不记录凭据、正文、模型原文或异常原文，不改变重试与执行策略。
 - **任务结果**：主页展示完成、失败、停止与接管提示，区分模型报告和本地待办保存回执；完整文案仅保留在内存中，停止不会撤销已经执行的操作。
@@ -170,7 +170,167 @@ python3 dev/type-service-destroy.py \
 
 宿主为 instrumentation 设置 240 秒期限，异常时最多再等 35 秒收尾；其他 ADB 每次 15 秒、结束本地 ADB 客户端和收集线程也有界。超时不会改成设备 STOP／强杀；`deviceCleanupUnconfirmed=true` 时必须保留现场，人工核对任务与原 IME，不能把本地客户端退出当设备收尾完成。不保存任意 instrumentation 原文，只输出受限字段／固定原因码；不输出 Token、任务正文或模型响应。只覆盖未批准点，已提交／清理中销毁不在本用例范围。
 
-本机离线回归：`python3 -B -m unittest discover -s dev -p 'test_type_service_destroy.py' -v`，并以 `-O` 重跑；[verify.sh](dev/verify.sh) 已集成。所有子进程均 mock，本机通过不代表真机生命周期通过；最新证据与限制见 [SPEC.md](SPEC.md)“Service 单独销毁验收交接”。
+本机离线回归：`python3 -B -m unittest discover -s dev -p 'test_type_service_destroy.py' -v`，并以 `-O` 重跑；[verify.sh](dev/verify.sh) 已集成。所有子进程均 mock，本机通过不代表真机生命周期通过；最新证据与限制见 [SPEC.md](SPEC.md)“Service 单独销毁”。
+
+### 真实通知确认一次 Type（显式联网与输入授权）
+
+**交付状态（2026-10-26）：人工入口、本机验证及独立审查已完成，真实通知批准尚未通过。** 单次真机在 UI 设备初始化阶段失败，未进入人工窗口；残留测试已按授权停止。须先解决该问题，再经用户授权运行，不直接重试。下方自动命令仅为操作参考，不代表当前应执行或自动重试；不继续自动展开探索。详见 [当前验收限制](<SPEC.md#通知确认>)。
+
+[通知专用宿主](dev/type-notification-confirmation.py) 只选择 [TypeProcessRecoveryInstrumentedTest](app/src/androidTest/java/com/example/agent/rootpilot/TypeProcessRecoveryInstrumentedTest.kt) 的 `realNotificationApprovesTypeOnce`，开关 `typeNotificationConfirmation=true` 默认关闭。通过生产 `ACTION_SINGLE_STEP` 启动真实模型／Service／IME：固定非敏感 fixture 中空输入框等待 Type 确认后，从系统通知栏中定位 RootPilot 本次通知的“确认”动作，实际点击并经过 `RootPilotNotificationActivity`，不以悬浮窗监听器、直接 controller 调用或发送 PendingIntent 代替首次批准。
+
+前置与上节一致，并要求 RootPilot 通知权限、通知渠道可用且手机解锁。需授权一次固定文本输入、固定 fixture 全屏上传与系统通知 UI 操作；不在凭据输入或敏感画面执行。只读定位本次 RootPilot 通知，不保存整棵通知树、其他通知文字或通知栏截图；若无法唯一识别真实动作则失败，不猜坐标或补批准。宿主不会安装、改设置、自动重试或杀手机进程。
+
+```sh
+python3 dev/type-notification-confirmation.py \
+  --serial '<本轮授权设备的 ADB serial>' \
+  --expected-hardware-serial '<独立核对的硬件序列号>' \
+  --expected-model '<独立核对的型号>' \
+  --output "/tmp/rootpilot-notification-$(date +%Y%m%d-%H%M%S)" \
+  --allow-live-execution-and-notification-approval
+```
+
+通过要求为退出 0、`summary.json` 中 `passed=true`，真实通知 UI 点击／Activity 生命周期被观测，同一 fixture PID／UUID 中文本精确匹配、两参数 `commitText` 计数 1，批准数 1，旧确认不能造成第二次执行，原 IME／配置恢复、历史终态及快照清理均完成。旧确认复验使用保留的同一真实 PendingIntent，要求被取消；它不代表手指双击、跨新任务伪造 token 或所有系统厂商表现。共享有界宿主仍为 240 秒 instrumentation＋最多 35 秒失败收尾，其余 ADB 每次 15 秒；缺证据／跳过／超时／崩溃都不能通过，失败保留现场，先核对任务、输入框和原 IME再决定下一步。
+
+失败摘要的 `failureDiagnostics` 只记录固定状态分类计数，以及唯一、完整且绑定本次 receiptId／PID 的白名单回执；部分、重复、身份不符或缺失回执不作完整证据。它不会把失败或设备清理未确认变成通过，也不会保存 runner 原文；无原因码时不猜测失败阶段。
+
+通知 UI 的固定原因码区分：打开返回失败、标题等待超时／匹配缺失／不唯一、通知行祖先缺失／层数上限、应用 label 为空／匹配缺失／不唯一、行内标题匹配缺失／不唯一，以及展开按钮／确认动作的匹配缺失／不唯一／禁用／不可点击、展开后等待超时。平台调用抛异常仍使用原来的阶段码。诊断只利用原查询及其短路结果，不增加 UI 查询、等待或重试；不保存候选节点、通知文字／树／截图。`*_MISSING` 仅表示原精确选择器没有匹配，不证明资源 ID 或 label 哪一个不同。未知业务计数仍为 `-1`，不得解释成零提交；新诊断不是 OEM 定位修复或真机 PASS。
+
+通知行定位保留既有 `expandableNotificationRow`，并按本机无模型探针的实际祖先支持严格结构路径：标题向上的 `expanded` 直接属于 SystemUI 的 enabled／clickable、非 scrollable FrameLayout，后者直接属于 SystemUI `notification_stack_scroller`／ScrollView。不会把整个通知列表当行，也不推断脱敏资源值的真实 ID。两条路径都继续要求唯一标题、本应用 label 和行内动作；展开后的单次 5 秒等待复用相同判据，不全局搜索确认动作。结构匹配不等于业务通过，实际结果见 [SPEC](<SPEC.md#通知确认>)。
+
+[verify.sh](dev/verify.sh) 已集成新宿主普通／`-O` 离线 mock；设备是否通过及精确证据范围以 [SPEC.md](SPEC.md) 为准。
+
+### 人工配合通知批准（独立入口，真机初始化未通过）
+
+仅在用户再次确认准备好后启动；会调用真实模型并向固定非敏感fixture输入一次，不能在凭据或个人页面运行。等待测试自动下拉通知栏后，人工展开本次RootPilot通知，只点击一次“确认”动作，不点击通知正文或其他通知；没有明确动作则不猜测，等待失败收尾。自动下拉只是开始信号，不证明通知已经正确展开。
+
+```sh
+python3 dev/type-notification-manual-confirmation.py \
+  --serial '<本轮授权设备的 ADB serial>' \
+  --expected-hardware-serial '<独立核对的硬件序列号>' \
+  --expected-model '<独立核对的型号>' \
+  --output "/tmp/rootpilot-manual-notification-$(date +%Y%m%d-%H%M%S)" \
+  --allow-live-execution-and-manual-notification-approval
+```
+
+人工窗口120秒；新宿主 instrumentation 等待期限420秒，异常时最多再等35秒收尾，前后置ADB每次15秒、本地客户端与线程回收另有界，不是整个脚本420秒硬墙钟；旧自动入口240秒不变。测试不自动展开、点击或首发批准PI；旧PI取消反证仍在终态进行。最终唯一`manualNotificationStage`回执要求完整业务断言、`noAutomaticApproval=true`及`automaticApprovalAttempts=0`；不会把`notificationUiClicked`置真，也不能证明手指来源，需结合用户操作声明。提前批准、错误入口、超时、重复Activity／提交或保护恢复失败都不能通过，不自动补批准或重跑。
+
+### 通知初始化隔离诊断（不联网、不操作 UI）
+
+[隔离诊断宿主](dev/notification-initialization.py) 仅运行 [NotificationInitializationInstrumentedTest](app/src/androidTest/java/com/example/agent/rootpilot/NotificationInitializationInstrumentedTest.kt) 的 `diagnoseInitialization`，默认关闭，显式 `notificationInitialization=true`。保留 `--no-restart` 和主 PID 守卫；前置为空闲、无待确认／恢复文件。显式调用一次 `getUiAutomation(FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)`，可用时才以相同标志调用一次 UiDevice 初始化。UiAutomator 2.3.0 的初始化内部还会获取 UiAutomation，null 时最多 3 次、间隔 500 毫秒；这是既有库行为，不是“整个链只获取一次”的保证。诊断不新增重试，不调用模型、截图、通知栏、输入或全局动作，不修改系统设置。此标志有意不同于旧通知测试的默认值，结果不等于原路径的完全复现，也不代表通知业务通过。
+
+```sh
+python3 dev/notification-initialization.py \
+  --serial '<本轮授权设备的 ADB serial>' \
+  --expected-hardware-serial '<独立核对的硬件序列号>' \
+  --expected-model '<独立核对的型号>' \
+  --output "/tmp/rootpilot-notification-init-$(date +%Y%m%d-%H%M%S)" \
+  --allow-ui-initialization-diagnostic
+```
+
+运行前还需确保 UiAutomation 没有被其他自动化客户端独占。普通无障碍服务可并存，`DONT_SUPPRESS_ACCESSIBILITY_SERVICES` 不代表多个 UiAutomation 可共享；出现 `UI_AUTOMATION_ALREADY_REGISTERED` 时先核实占用，不盲目重试或关闭所有无障碍。临时释放 GKD 等客户端的这项能力须经用户授权；若由用户自行关停，不自动恢复。GKD 关停后本项目隔离初始化已取得限定 PASS，真实通知业务仍独立按 [SPEC](SPEC.md) 验收。
+
+运行前需另行确认没有残留测试会话；本设备的 `dumpsys activity instrumentation` 不受支持且仍退出 0，不能据无包名判定 runner 已退出。使用 `dumpsys activity processes` 时须核对本 App 当前进程的 `mInstr` 绑定及对应记录的 `mFinished`／运行 PID；已结束且仅指向死 PID 的记录不能误当活动测试。结果不明或仍有活动会话时停止，不能靠输出中没有测试类名判断退出，也不自动杀进程。当前未解决状态见 [SPEC](SPEC.md)。
+
+下次真机衔接顺序：
+1. 获取新的授权 serial，独立核对硬件序列号／型号，确认手机解锁且 RootPilot 非敏感主页前台；所有 ADB 指定该 serial，不自动换设备。
+2. 核对上述有效会话状态、RootPilotService 空闲、无任务快照／IME 恢复残留、原 IME／无障碍配置和保护文件摘要。旧失效回执原样保留；需清理自有会话时先确认所有权及保护状态，不操作其他服务。
+3. 核对本轮冻结 APK 哈希，仅对实际需要更新的 APK 保数据安装；重新核对主 PID 和空闲状态，再运行上方单方法宿主一次。不要用取消 `--no-restart`、关闭其他无障碍服务或完整模型验收来绕过初始化失败。
+4. 失败后保留白名单回执并另查 runner 是否真正退出；`baselineRestored=true` 是测试回执时点证据，不保证之后的 instrumentation 收尾成功。断连、收尾异常或缺失证据均保留未确认状态，不自动重试。
+
+[共享分类器](app/src/testSupport/kotlin/com/example/agent/rootpilot/UiAutomationFailure.kt) 只编译进 JVM 测试和 androidTest，不进入产品 APK；[Kotlin 单测](app/src/test/java/com/example/agent/rootpilot/UiAutomationFailureTest.kt) 直接执行这份实现，覆盖框架固定字面值（含无空格注册消息）、未知格式／异常类型回退及不回传消息正文。它验证分类规则，不证明厂商实际异常属于其中哪一类。
+
+宿主限时 60 秒，失败最多再等 35 秒，其余 ADB 每次 15 秒；无自动安装／重试／设备杀进程。固定原因码区分初始化阶段和异常类别，不保存异常原文。失败也独立核对 PID、IME、无障碍设置、任务／日志／历史／配置摘要与恢复文件；不删除旧失效回执，不启动或停止任务。`runId` 在本诊断中仅复用 receipt UUID 作为关联 ID，**不是业务运行**。成功要求全部证据齐全；失败回执中的状态未变证据不改写宿主清理未确认或初始化失败。日志／历史零增量是本地证据，不是网络拦截。原通知全链验收仍单独按 [SPEC](SPEC.md) 标记。
+
+### 本应用通知祖先结构探针（无模型）
+
+[结构宿主](dev/notification-structure.py) 仅运行同一[诊断类](app/src/androidTest/java/com/example/agent/rootpilot/NotificationInitializationInstrumentedTest.kt)的 `inspectOwnNotificationStructure`，独立 `notificationStructure=true` 门控。沿用上方设备、空闲、会话及隐私前置；要求本应用没有现存通知、既有通知频道可用。以独立 tag／ID 发布固定无害对照通知，样式参考生产通知，三个独立 PendingIntent 都只打开本应用主页；不启动 Service／模型、不点击或发送通知动作，不修改生产通知或旧失败回执。**这是结构对照，不是真实 Type 批准验收。**
+
+```sh
+python3 dev/notification-structure.py \
+  --serial '<本轮授权设备的 ADB serial>' \
+  --expected-hardware-serial '<独立核对的硬件序列号>' \
+  --expected-model '<独立核对的型号>' \
+  --output "/tmp/rootpilot-notification-structure-$(date +%Y%m%d-%H%M%S)" \
+  --allow-own-notification-structure
+```
+
+只打开通知栏一次，匹配 SystemUI 中唯一固定标题，从标题起最多记录 12 层祖先的资源 ID、类名、限定包名和状态布尔；不取文字／contentDescription、其他通知子树或截图。未知格式／超长值替换为固定 `REDACTED`，到达上限仍有 parent 时标 `truncated`，缺少预期通知行资源本身不判探针失败。结构保存在 App 私有 `no_backup/rootpilot-notification-structure/<receipt>.json`，绑定 receipt／PID；以 CREATE_NEW／NOFOLLOW 独占写入，拒绝覆盖及符号链接，完整写入并 force／关闭后才报告捕获成功。不依赖硬链接，也不声称文件系统原子发布：失败可能留下本次不完整文件，**文件存在不代表证据有效**。只有宿主完整通过、结构捕获和清理均确认后，才允许读取并再次校验身份、格式和大小；失败回执对应文件不得用于修改选择器。宿主只留白名单回执，不自动导出结构，不以探针通过当业务通过。
+
+finally 仅取消自己 tag／ID 和独立 PendingIntent；已确认打开且仍在 SystemUI 时最多一次 Back 收起通知栏，独立核对原通知集合、任务／配置／历史、IME、无障碍及主进程。宿主同样限时 60 秒＋最多 35 秒失败收尾，无自动安装、设备杀进程或重试；未证实清理则保留失败，不为取得结构放宽保护条件。
+
+### 本应用通知行身份探针（无模型，不批准动作）
+
+[身份宿主](dev/notification-identity.py) 只运行 `inspectOwnNotificationIdentity`，独立门控 `notificationIdentity=true`，不改变真实通知验收的 app label 守卫。沿用空闲／解锁／无现存本应用通知／无活动 runner 和原保护前置；新探针使用带本次 receipt 标识的无害标题，先核对自有通知 tag／ID／频道，再按唯一 SystemUI 标题及严格通知行结构限定读取范围。不是在整个通知栏搜索应用名称，也不输出通知文字。
+
+```sh
+python3 dev/notification-identity.py \
+  --serial '<本轮授权设备的 ADB serial>' \
+  --expected-hardware-serial '<独立核对的硬件序列号>' \
+  --expected-model '<独立核对的型号>' \
+  --output "/tmp/rootpilot-notification-identity-$(date +%Y%m%d-%H%M%S)" \
+  --allow-own-notification-identity
+```
+
+候选行内逐节点有界读取：每个阶段最多 32 节点、8 层（depth 0–7），只保存脱敏资源／类名／限定包名、状态，以及 text／description 是否存在、是否等于本应用 label、是否为本次已知标题的布尔值，不保存文字原文或哈希。先取当前态；仅完整遍历证明行内展开按钮唯一、启用且可点击时才展开一次，再取一次展开态。不点击确认／停止或内容入口、不发 PI、不调用模型／截图／输入；不能证明按钮唯一时不点击，截断不等于字段缺失。
+
+标题等待的 `Until.hasObject` 仅证明存在，不是唯一性证明；身份绑定与真实业务统一使用公开 `UiDevice.findObjects`／`UiObject2` 的精确 SystemUI 包名、资源 ID、本次 nonce 选择器，全部返回对象先保留，再限最多 32 个并要求唯一。行内 children 每个对象只取一次，按已描述＋待访预约预算整体接纳；只描述公开查询返回的可见集合，不能把原生 childCount 与可见列表数量不同当作错误，也不据此认定不可见节点不存在。32 节点／8 层限制本方接纳、描述与导出，不保证库内部扫描、refresh、watchers 或 IPC 工作量；所有取得的 wrapper 按 Java 对象身份 finally 释放。初次／展开前复核／展开后分别报告绑定缺失或多匹配；初次及展开后等待超时另用固定 WAIT_TIMEOUT 码，不新增本方等待／重试。固定失败码或失败文件不能当作身份字段证据。
+
+结果仅为结构诊断：私有 `no_backup/rootpilot-notification-identity/<receipt>.json` 最多 32 KiB，独占写入、不覆盖；`identityProofs`、receipt／PID、阶段与截断标志一并保留。必须等宿主完整成功和清理确认后才可导出，并严格复核 schema／身份／大小；失败或部分文件不能用于调整业务断言。仍采用 60 秒＋最多 35 秒失败收尾，无自动安装或重试；通知／PI 清理及状态保护同上方结构探针。即使观察到 label 匹配，也不代表真实通知首次批准或 Type 验收通过。
+
+### 本应用通知行展开探索（独立显式开关）
+
+[展开宿主](<dev/notification-expansion.py>)只运行 `inspectOwnNotificationExpansion`，门控 `notificationExpansion=true`，不改变前述身份探针或真实业务展开路径。仅针对带 nonce 的自有无害通知：先确认完整可见行、严格图标身份和两项动作均缺失，再对新鲜绑定行的实际可见边界内缩后，执行**一次**向下半程手势。不猜屏幕坐标，不点通知内容／确认／停止，不发送 PendingIntent，不换手势或重试。
+
+```sh
+python3 dev/notification-expansion.py \
+  --serial '<本轮授权设备的 ADB serial>' \
+  --expected-hardware-serial '<独立核对的硬件序列号>' \
+  --expected-model '<独立核对的型号>' \
+  --output "/tmp/rootpilot-notification-expansion-$(date +%Y%m%d-%H%M%S)" \
+  --allow-own-notification-expansion-gesture
+```
+
+这只是有界手势探索，`swipe` 返回不代表 OEM 已展开，也不能保证系统不会将其解释成其他交互。单个 5 秒后置窗口内须重新绑定同一通知／PI／nonce／严格行及身份，完整可见快照中“确认当前动作”和“停止”从缺失变为各唯一且启用、可点击，且手势及后置观察期间自家 Activity 创建／恢复计数均为零，才报告 `ownRowExpanded`／`noOwnActivityLaunch`。误触、active-window 包名检查不满足、歧义、截断或超时均失败并清理，不转入模型或业务动作。这里的包名检查读取 active-window root，与跨窗口查找通知标题的查询域不同；拒绝本身不能证明通知栏已消失，返回 null 也不能区分根或包名不可得。此安全拒绝不会因跨窗标题存在而放宽。固定失败码区分 `INITIAL_BIND`／`REBIND`／`PRE_GESTURE`／`AFTER_BIND`／`AFTER_VALIDATE` 及 `ACTIVE_OWN`／`ACTIVE_OTHER`／`PACKAGE_UNAVAILABLE`；不输出实际包名。前三位置失败表示尚未调用手势，后两位置仅表示公共调用已返回，不证明触摸注入或展开。宿主要求全部保护、收尾和这两个附加事实为真；仍为 60 秒＋最多 35 秒失败收尾。
+
+成功结构使用独立 `SWIPED` 状态、前后两阶段及固定 `expansionProofs`，只在保护与清理通过后发布。失败文件不导出；导出仍须核对完整成功回执、进程身份、严格 schema／32 KiB 上限。该诊断通过也不代表真实通知批准或 Type 通过。
+
+### 本应用通知长按探索（独立开关，不是下滑兜底）
+
+[长按宿主](<dev/notification-long-press.py>)仅运行 `inspectOwnNotificationLongPressExpansion`，门控 `notificationLongPressExpansion=true`，独立回执 `notificationLongPressExpansionStage`。候选依据是[小米官方 MIUI10 文档](https://dev.mi.com/xiaomihyperos/documentation/detail?pId=1581)的长按展开说明，不代表当前设备已支持。只对重新验证的自有无害通知行执行一次公开 `longClick`，额外要求 enabled、longClickable 和非空可见边界；不自动从下滑切换、不点击菜单／设置／批准／停止、不重试。
+
+```sh
+python3 dev/notification-long-press.py \
+  --serial '<本轮授权设备的 ADB serial>' \
+  --expected-hardware-serial '<独立核对的硬件序列号>' \
+  --expected-model '<独立核对的型号>' \
+  --output "/tmp/rootpilot-notification-long-press-$(date +%Y%m%d-%H%M%S)" \
+  --allow-own-notification-long-press
+```
+
+其成功条件、5秒后置期限、60秒宿主期限及35秒失败收尾均与下滑探索相同，不以调用返回、菜单出现或祖先变化当作展开。成功证据明确 `LONG_PRESSED` 和 `gestureKind=LONG_CLICK`；旧 `SWIPED` 契约不变。成功导出器仍拒绝所有 failed receipt。
+
+经最新授权的 modal 内容域合同仅用于长按后的实际模态绑定：在完整实际可见图中证明唯一 own row → expanded → status_bar_latest_event_content，所有旁支和祖先同属32节点总预算、统一参与身份／动作计数，不截去其他children。仅content域从自身根计算八层，其余节点仍按原row深度限制；AFTER_EXPAND的`captureRootPath`记录content真实路径，保留所有节点真实path／depth（内容最高可到9），不伪造层级。普通strictrow域不添加该字段；七项诊断的深度始终为真实row深度。未知归属、歧义或截断均失败。
+
+长按回执的截断诊断仅包含固定 `captureSite`（INITIAL_CURRENT／REBIND_CURRENT／AFTER_EXPAND）、`budgetCause`（DEPTH_LIMIT／NODE_LIMIT／BOTH）和五个有界计数：最终 visitedNodes／maxVisitedDepth、首个截断点 pendingAtFirstCut／firstCutVisitedNodes／firstCutDepth。非本轮截断报告使用 NONE 与 -1，不当作零访问或成功证明。计数取现有遍历，不增加 UI 查询；pending 仅为已接纳未描述节点，原始 childCount 可能包含不可见节点，不能据此声称第33个或第9层可见节点存在。原 EXPANSION_TRUNCATED 失败、32节点／8层预算和成功文件 schema 均不变。
+
+若仅在长按后、精确 nonce 仍唯一而严格行绑定失败，可保存独立 **failure-only** 诊断：最多12层已绑定标题的 parent 元数据，16 KiB、限定资源／类／包名和状态，不读文本／描述／子树／兄弟；不接受该新祖先作为业务身份。仅原 `IDENTITY_ROW_UNRELIABLE`、所有权与无自家 Activity 启动检查、保护与清理通过后才发布，回执 `failureStructureCaptured=true`。须使用独立失败导出器并绑定本次只读收尾与当前进程身份；导出成功仍是验收失败，不允许转换为展开或批准 PASS。当前验证结果见 [SPEC](<SPEC.md#通知确认>)。
+
+### 本应用通知区域视觉取证（独立授权，不批准动作）
+
+[区域取证宿主](<dev/notification-roi.py>)仅运行`inspectOwnNotificationRoi`，默认关闭，使用独立`notificationRoiCapture=true`门控；不点击、滑动、长按或调用模型。仅采集本次自有无害通知的strictrow，不是整屏截图命令。
+
+```sh
+python3 dev/notification-roi.py \
+  --serial '<本轮授权设备的 ADB serial>' \
+  --expected-hardware-serial '<独立核对的硬件序列号>' \
+  --expected-model '<独立核对的型号>' \
+  --output '/tmp/<本次不存在的结果目录>' \
+  --allow-own-notification-roi
+```
+
+只有已接受截图API边界后才运行：整屏Bitmap会短暂进入进程内存，前后元数据检查不能原子排除瞬时同窗叠层。归属、完整身份、位置／显示／旋转及窗口遮挡检查通过后，最多一次截图，独立分配并复制通知区域；整屏不编码、不落盘、不上传，随即释放。仅区域PNG可在原清理与observer屏障通过后独占发布。屏幕8,388,608像素准入、区域1,048,576像素、PNG4MiB、manifest32KiB不代表能限制平台内部瞬时分配。
+
+私有结果为`no_backup/rootpilot_notification_roi/<receipt>/notification.png`及最后写入的`manifest.json`；manifest本身不是成功证明。仅完整成功回执配合严格导出器复核身份／大小／SHA／PNG结构和双读后，才能导出本次区域图；失败结果、旧文件或未知PNG元数据不得导出。采集／导出成功不代表通知批准或Type通过。实际审查与设备互通状态见[SPEC](<SPEC.md#通知确认>)。
 
 ### 应用商店搜索只读预检
 

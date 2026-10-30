@@ -23,7 +23,9 @@ public final class FixtureProvider extends ContentProvider {
                 || "virtual_redraw".equals(method);
         boolean prepared = "virtual_prepare_cursor".equals(method) || "virtual_prepare_selection".equals(method)
                 || "virtual_clear_prepared_input".equals(method);
-        if (arg != null || (!probe && !prepared && extras != null) || !("state".equals(method)
+        boolean freshState = "fresh_state_v1".equals(method);
+        if ((freshState ? !FreshArrivalState.canonical(arg) : arg != null)
+                || (!probe && !prepared && extras != null) || !(freshState || "state".equals(method)
                 || "snapshot".equals(method) || "finish".equals(method)
                 || "virtual_state".equals(method) || "virtual_finish".equals(method)
                 || "virtual_receipt".equals(method) || "virtual_seed_cursor".equals(method)
@@ -75,6 +77,18 @@ public final class FixtureProvider extends ContentProvider {
             if ("finish".equals(method)) {
                 if (activity != null) activity.finishAndRemoveTask();
                 return Bundle.EMPTY;
+            }
+            if (freshState) {
+                Bundle result = new Bundle();
+                result.putBundle("state", activity == null ? Bundle.EMPTY : activity.snapshot(false));
+                FreshArrivalState.Snapshot observed = FreshArrivalState.PROCESS.snapshot();
+                result.putString("processEpoch", observed.processEpoch);
+                Bundle arrival = new Bundle();
+                arrival.putString("phase", observed.phase);
+                arrival.putString("sessionId", observed.sessionId);
+                arrival.putString("instanceId", observed.instanceId);
+                result.putBundle("arrival", arrival);
+                return result;
             }
             if (activity == null) return Bundle.EMPTY;
             return activity.snapshot("snapshot".equals(method));

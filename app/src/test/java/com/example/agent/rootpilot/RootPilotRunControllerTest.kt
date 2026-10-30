@@ -753,6 +753,98 @@ class RootPilotRunControllerTest {
         fixture.controller.destroy()
     }
 
+    @Test fun twoStageRequiresNotificationThenBoundImeAndRejectsCrossSources() = runTest {
+        val f = fixture()
+        f.twoStage = true
+        f.response = """{"action":"type","text":"fixture","reason":"test"}"""
+        f.start(); runCurrent()
+        val a = requireNotNull(f.controller.approval).token
+        assertEquals(0, f.typeTransactions)
+        f.controller.confirmAction()
+        f.controller.confirmTypeFromIme(a)
+        f.controller.confirmNotificationAction(a)
+        runCurrent()
+        assertEquals(0, f.typeTransactions)
+        f.controller.confirmNotificationAction(a, com.example.agent.rootpilot.model.ConfirmationStage.TYPE_PREPARE)
+        runCurrent()
+        val b = requireNotNull(f.controller.approval).token
+        assertNotEquals(a, b)
+        assertEquals(1, f.typeTransactions)
+        assertEquals(0, f.executions)
+        f.controller.confirmNotificationAction(b, com.example.agent.rootpilot.model.ConfirmationStage.TYPE_COMMIT)
+        f.controller.confirmNotificationAction(a, com.example.agent.rootpilot.model.ConfirmationStage.TYPE_PREPARE)
+        f.controller.confirmTypeFromIme(a)
+        f.controller.confirmAction()
+        runCurrent()
+        assertEquals(0, f.executions)
+        f.controller.confirmTypeFromIme(b)
+        f.controller.confirmTypeFromIme(b)
+        advanceUntilIdle()
+        assertEquals(1, f.executions)
+        assertEquals(1, f.modelCalls)
+        assertFalse(f.controller.busy)
+        assertFalse(f.file.exists())
+        f.controller.destroy()
+    }
+
+    @Test fun changedOriginalWindowAfterPreparationNeverStartsImeTransaction() = runTest {
+        val f = fixture(); f.twoStage = true
+        f.response = """{"action":"type","text":"fixture","reason":"test"}"""
+        f.start(); runCurrent()
+        val a = requireNotNull(f.controller.approval).token
+        f.observedWindow = "other"
+        f.controller.confirmNotificationAction(a, com.example.agent.rootpilot.model.ConfirmationStage.TYPE_PREPARE)
+        advanceUntilIdle()
+        assertEquals(0, f.typeTransactions)
+        assertEquals(0, f.executions)
+        assertFalse(f.controller.busy)
+        f.controller.destroy()
+    }
+
+    @Test fun stopDuringPreparationCommitGapCannotInstallLateFinalApproval() = runTest {
+        val f = fixture(); f.twoStage = true
+        f.response = """{"action":"type","text":"fixture","reason":"test"}"""
+        val release = CompletableDeferred<Unit>()
+        f.beforeBoundConfirmation = { withContext(NonCancellable) { release.await() } }
+        f.start(); runCurrent()
+        val a = requireNotNull(f.controller.approval).token
+        f.controller.confirmNotificationAction(a, com.example.agent.rootpilot.model.ConfirmationStage.TYPE_PREPARE)
+        runCurrent()
+        assertEquals(1, f.typeTransactions)
+        f.controller.stopAgent(1)
+        release.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(0, f.executions)
+        assertNull(f.controller.approval)
+        assertFalse(f.controller.busy)
+        f.controller.destroy()
+    }
+
+    @Test fun lockedOrUnknownKeyguardRejectsEachStageAndCannotReviveOnUnlock() = runTest {
+        for (atFinal in listOf(false, true)) for (throws in listOf(false, true)) {
+            val f = fixture(); f.twoStage = true
+            f.response = """{"action":"type","text":"fixture","reason":"test"}"""
+            f.start(); runCurrent()
+            val a = requireNotNull(f.controller.approval).token
+            if (atFinal) {
+                f.controller.confirmNotificationAction(a, com.example.agent.rootpilot.model.ConfirmationStage.TYPE_PREPARE)
+                runCurrent()
+            }
+            val token = requireNotNull(f.controller.approval).token
+            f.confirmationUnlocked = { if (throws) error("unavailable") else false }
+            if (atFinal) f.controller.confirmTypeFromIme(token)
+            else f.controller.confirmNotificationAction(token, com.example.agent.rootpilot.model.ConfirmationStage.TYPE_PREPARE)
+            f.confirmationUnlocked = { true }
+            if (atFinal) f.controller.confirmTypeFromIme(token)
+            else f.controller.confirmNotificationAction(token, com.example.agent.rootpilot.model.ConfirmationStage.TYPE_PREPARE)
+            advanceUntilIdle()
+            assertEquals(0, f.executions)
+            assertFalse(f.controller.busy)
+            assertNull(f.controller.approval)
+            f.controller.destroy()
+        }
+    }
+
     private fun TestScope.fixture(
         shared: RootPilotTaskState = RootPilotTaskState().apply {
             mutableState.value = RootPilotUiState(
@@ -791,14 +883,22 @@ class RootPilotRunControllerTest {
         var check: suspend () -> RootExecutionResult = { RootExecutionResult.Success() }
         var saveTodos: suspend () -> Unit = {}
         var confirmationCleanup: () -> Unit = {}
+        var twoStage = false
+        var confirmationUnlocked: () -> Boolean = { true }
+        var typeTransactions = 0
+        var beforeBoundConfirmation: suspend () -> Unit = {}
+        var observedWindow = "abc"
         val host = Host()
         private val root = object : RootExecutor {
+            override val typeConfirmationFlow get() = if (twoStage && state.config.executionDisplay == ExecutionDisplay.MAIN)
+                com.example.agent.rootpilot.root.TypeConfirmationFlow.MAIN_IME_TWO_STAGE
+                else com.example.agent.rootpilot.root.TypeConfirmationFlow.LEGACY_BOUND
             override suspend fun beginRun(config: RootPilotConfig): RootExecutionResult { begins++; return begin() }
             override suspend fun endRun(): RootExecutionResult { ends++; return end() }
             override val initialApp get() = if (state.config.executionDisplay == ExecutionDisplay.VIRTUAL) testApp else null
             override val sessionIdentity get() = if (state.config.executionDisplay == ExecutionDisplay.VIRTUAL) "test-session" else null
             override suspend fun observeScreen() = com.example.agent.rootpilot.screen.ScreenObservation(
-                "com.example.fixture", "com.example.fixture.Main", "com.example.fixture", "abc", false, 1L,
+                "com.example.fixture", "com.example.fixture.Main", "com.example.fixture", observedWindow, false, 1L,
             )
             override suspend fun checkRoot(): RootExecutionResult { rootChecks++; return check() }
             override suspend fun queryDeviceInfo(tool: DeviceInfoTool, expected: com.example.agent.rootpilot.screen.ScreenObservation): DeviceInfoResult {
@@ -813,7 +913,10 @@ class RootPilotRunControllerTest {
             override suspend fun executeConfirmed(
                 action: ExecutableRootAction, confirm: suspend (String?) -> Boolean,
             ): RootExecutionResult = try {
-                if (confirm(null)) execute(action) else RootExecutionResult.Failure("rejected")
+                val stagedType = twoStage && action is ExecutableRootAction.Type
+                if (stagedType) { typeTransactions++; beforeBoundConfirmation() }
+                if (confirm(if (stagedType) "com.example.fixture" else null)) execute(action)
+                else RootExecutionResult.Failure("rejected")
             } finally {
                 confirmationCleanup()
             }
@@ -854,6 +957,7 @@ class RootPilotRunControllerTest {
             logRepository = InMemoryAgentLogRepository(),
             host = host,
             history = history,
+            confirmationUnlocked = { confirmationUnlocked() },
         )
 
         private val testApp get() = RootPilotApp("com.example.fixture", "Fixture", "com.example.fixture.Main")

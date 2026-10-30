@@ -14,7 +14,9 @@ import android.net.Uri
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import com.example.agent.rootpilot.deepseek.HttpDeepSeekClient
+import android.app.KeyguardManager
+import com.example.agent.rootpilot.model.ConfirmationStage
+import com.example.agent.rootpilot.root.TypeConfirmationFlow
 import com.example.agent.rootpilot.apps.AndroidAppCatalog
 import com.example.agent.rootpilot.apps.AllowlistedAppCatalog
 import com.example.agent.rootpilot.apps.AppLaunchAllowlistStore
@@ -61,14 +63,15 @@ class RootPilotService : Service(), RootPilotRunHost {
         val textInput = AndroidImeEnvironment.createInput(this)
         val rootExecutor = DisplayRoutingRootExecutor(this,
             SuRootExecutor(appCatalog = appCatalog, typeText = textInput::type,
-                uiTreeProvider = AndroidUiTreeProvider(packageName)), appCatalog)
+                uiTreeProvider = AndroidUiTreeProvider(packageName),
+                typeConfirmationFlow = TypeConfirmationFlow.MAIN_IME_TWO_STAGE), appCatalog)
         controller = RootPilotRunController(
             taskState = taskState,
             scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
             rootExecutor = rootExecutor,
             loop = AgentLoop(
                 screenshotProvider = RootScreenshotProvider(rootExecutor),
-                deepSeekClient = HttpDeepSeekClient(),
+                deepSeekClient = RootPilotModelClientFactory.create(this),
                 rootExecutor = rootExecutor,
                 appCatalog = appCatalog,
                 todoRepository = com.example.agent.agent.planning.FileTodoRepository(File(filesDir, "agent_todos.json")),
@@ -78,7 +81,9 @@ class RootPilotService : Service(), RootPilotRunHost {
             traceSink = { Log.i(RunTrace.TAG, it) },
             host = this,
             history = historyRepository(this),
+            confirmationUnlocked = { !getSystemService(KeyguardManager::class.java).isKeyguardLocked },
         )
+        synchronized(stateLock) { liveController = controller }
         createNotificationChannel()
         controller.restoreInterruptedRun()
         ServiceDestroyObservation.created(this)
@@ -101,7 +106,11 @@ class RootPilotService : Service(), RootPilotRunHost {
             ACTION_AUTO_EXECUTE -> controller.startRun(singleStep = false, startId = startId)
             ACTION_CONFIRM -> controller.confirmAction()
             ACTION_CONFIRM_NOTIFICATION -> {
-                controller.confirmNotificationAction(intent.getStringExtra(EXTRA_APPROVAL_TOKEN))
+                val stage = intent.getStringExtra(EXTRA_APPROVAL_STAGE)?.let { value ->
+                    ConfirmationStage.entries.singleOrNull { it.name == value }
+                } ?: if (!intent.hasExtra(EXTRA_APPROVAL_STAGE)) ConfirmationStage.ACTION else null
+                if (stage != null && stage != ConfirmationStage.TYPE_COMMIT)
+                    controller.confirmNotificationAction(intent.getStringExtra(EXTRA_APPROVAL_TOKEN), stage)
                 if (!controller.busy) stopSelfResult(startId)
             }
             ACTION_STOP -> controller.stopAgent(startId)
@@ -124,6 +133,7 @@ class RootPilotService : Service(), RootPilotRunHost {
             notificationApprovalToken = null
         }
         controller.destroy()
+        synchronized(stateLock) { if (liveController === controller) liveController = null }
         super.onDestroy()
         ServiceDestroyObservation.destroyed(this)
     }
@@ -166,7 +176,9 @@ class RootPilotService : Service(), RootPilotRunHost {
 
     private fun buildNotification(): Notification = synchronized(stateLock) {
         val state = uiState.value
-        val approval = controller.approval?.takeIf { state.status == RootPilotStatus.WAITING_CONFIRMATION }
+        val approval = controller.approval?.takeIf {
+            state.status == RootPilotStatus.WAITING_CONFIRMATION && it.stage != ConfirmationStage.TYPE_COMMIT
+        }
         if (notificationApprovalToken != approval?.token) {
             notificationApprovalIntent?.cancel()
             notificationApprovalToken = approval?.token
@@ -175,8 +187,9 @@ class RootPilotService : Service(), RootPilotRunHost {
                     this,
                     CONFIRM_REQUEST_CODE,
                     Intent(this, RootPilotNotificationActivity::class.java)
-                        .setData(Uri.parse("rootpilot://confirm/${it.token}"))
+                        .setData(Uri.parse("rootpilot://confirm/${it.stage.name}/${it.token}"))
                         .putExtra(EXTRA_APPROVAL_TOKEN, it.token)
+                        .putExtra(EXTRA_APPROVAL_STAGE, it.stage.name)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION),
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                 )
@@ -196,9 +209,13 @@ class RootPilotService : Service(), RootPilotRunHost {
             stopIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val text = state.pendingAction?.takeIf { approval != null }?.let {
-            "${it.describeForSnapshot()}：${it.reason}"
-        } ?: state.status.notificationText()
+        val text = when (state.confirmation?.stage) {
+            ConfirmationStage.TYPE_PREPARE -> "准备输入：仅准备，尚未批准输入；随后请在输入法核对全文并最终确认"
+            ConfirmationStage.TYPE_COMMIT -> "请在输入法核对完整文本并最终确认输入"
+            else -> state.pendingAction?.takeIf { approval != null }?.let {
+                "${it.describeForSnapshot()}：${it.reason}"
+            } ?: state.status.notificationText()
+        }
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle("RootPilot · 第 ${state.step + 1} 步")
@@ -213,7 +230,11 @@ class RootPilotService : Service(), RootPilotRunHost {
                     addAction(
                         NotificationCompat.Action.Builder(
                             android.R.drawable.ic_menu_send,
-                            if (state.pendingAction is RootPilotAction.AskUser) "已处理，继续" else "确认当前动作",
+                            when {
+                                approval?.stage == ConfirmationStage.TYPE_PREPARE -> "准备输入"
+                                state.pendingAction is RootPilotAction.AskUser -> "已处理，继续"
+                                else -> "确认当前动作"
+                            },
                             confirmation,
                         ).setAuthenticationRequired(true).build(),
                     )
@@ -265,6 +286,22 @@ class RootPilotService : Service(), RootPilotRunHost {
         private val stateLock get() = taskState.lock
         private val sharedLogRepository: AgentLogRepository = InMemoryAgentLogRepository()
         private var sharedHistory: RunHistoryRepository? = null
+        private var liveController: RootPilotRunController? = null
+
+        internal fun confirmTypeFromIme(token: String) = synchronized(stateLock) {
+            liveController?.confirmTypeFromIme(token)
+            Unit
+        }
+
+        internal fun cancelTypePreparation(token: String) = synchronized(stateLock) {
+            liveController?.cancelTypeConfirmation(token, ConfirmationStage.TYPE_PREPARE)
+            Unit
+        }
+
+        internal fun cancelTypeFromIme(token: String) = synchronized(stateLock) {
+            liveController?.cancelTypeFromIme(token)
+            Unit
+        }
 
         @Synchronized
         private fun historyRepository(context: Context): RunHistoryRepository = sharedHistory
@@ -285,6 +322,7 @@ class RootPilotService : Service(), RootPilotRunHost {
         const val ACTION_CONFIRM = "com.example.agent.rootpilot.CONFIRM"
         const val ACTION_CONFIRM_NOTIFICATION = "com.example.agent.rootpilot.CONFIRM_NOTIFICATION"
         const val EXTRA_APPROVAL_TOKEN = "extra_approval_token"
+        const val EXTRA_APPROVAL_STAGE = "extra_approval_stage"
         const val ACTION_STOP = "com.example.agent.rootpilot.STOP"
         const val ACTION_RECOVER = "com.example.agent.rootpilot.RECOVER"
         const val ACTION_DISCARD_RECOVERY = "com.example.agent.rootpilot.DISCARD_RECOVERY"

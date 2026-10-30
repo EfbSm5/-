@@ -14,6 +14,22 @@ python3 -B -m unittest discover -s dev -p 'test_type_commit_recovery.py' -v
 python3 -O -B -m unittest discover -s dev -p 'test_type_commit_recovery.py' -v
 python3 -B -m unittest discover -s dev -p 'test_type_service_destroy.py' -v
 python3 -O -B -m unittest discover -s dev -p 'test_type_service_destroy.py' -v
+python3 -B -m unittest discover -s dev -p 'test_type_notification_confirmation.py' -v
+python3 -O -B -m unittest discover -s dev -p 'test_type_notification_confirmation.py' -v
+python3 -B -m unittest discover -s dev -p 'test_type_notification_manual_confirmation.py' -v
+python3 -O -B -m unittest discover -s dev -p 'test_type_notification_manual_confirmation.py' -v
+python3 -B -m unittest discover -s dev -p 'test_notification_initialization.py' -v
+python3 -O -B -m unittest discover -s dev -p 'test_notification_initialization.py' -v
+python3 -B -m unittest discover -s dev -p 'test_notification_structure.py' -v
+python3 -O -B -m unittest discover -s dev -p 'test_notification_structure.py' -v
+python3 -B -m unittest discover -s dev -p 'test_notification_identity.py' -v
+python3 -O -B -m unittest discover -s dev -p 'test_notification_identity.py' -v
+python3 -B -m unittest discover -s dev -p 'test_notification_expansion.py' -v
+python3 -O -B -m unittest discover -s dev -p 'test_notification_expansion.py' -v
+python3 -B -m unittest discover -s dev -p 'test_notification_long_press.py' -v
+python3 -O -B -m unittest discover -s dev -p 'test_notification_long_press.py' -v
+python3 -B -m unittest discover -s dev -p 'test_notification_roi.py' -v
+python3 -O -B -m unittest discover -s dev -p 'test_notification_roi.py' -v
 echo
 
 echo "== 3/4 gradle: testDebugUnitTest assembleDebug assembleDebugAndroidTest lintDebug =="

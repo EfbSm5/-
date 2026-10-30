@@ -1,6 +1,8 @@
 package com.example.agent.rootpilot.input
 
 import android.inputmethodservice.InputMethodService
+import android.app.KeyguardManager
+import com.example.agent.rootpilot.model.ConfirmationStage
 import android.text.InputType
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -30,6 +32,13 @@ import kotlinx.coroutines.withTimeoutOrNull
 class RootPilotInputMethodService : InputMethodService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var inputViewJob: Job? = null
+    private var renderedCommitToken: String? = null
+
+    private fun cancelRenderedCommit() {
+        val token = renderedCommitToken ?: return
+        renderedCommitToken = null
+        RootPilotService.cancelTypeFromIme(token)
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -44,7 +53,6 @@ class RootPilotInputMethodService : InputMethodService() {
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (120 * resources.displayMetrics.density).toInt()))
         val confirm = Button(context).apply {
             text = "确认输入到当前输入框"
-            setOnClickListener { RootPilotService.send(context, RootPilotService.ACTION_CONFIRM) }
         }
         addView(confirm)
         addView(Button(context).apply {
@@ -59,13 +67,42 @@ class RootPilotInputMethodService : InputMethodService() {
         inputViewJob = scope.launch {
             RootPilotService.uiState.collect { state ->
                 val action = state.pendingAction as? RootPilotAction.Type
-                confirm.isEnabled = state.status == RootPilotStatus.WAITING_CONFIRMATION && action != null
-                preview.text = if (confirm.isEnabled) "待输入文本（仅本地预览）：\n${action!!.text}" else ""
-                confirm.text = if (confirm.isEnabled) "确认输入 ${action!!.text.length} 字符：${action.reason}" else "等待输入动作"
+                val stage = state.confirmation?.stage
+                val locked = runCatching {
+                    getSystemService(KeyguardManager::class.java).isKeyguardLocked
+                }.getOrDefault(true)
+                val displayedEditor = InputConnectionBridge.editor.value
+                confirm.isEnabled = state.status == RootPilotStatus.WAITING_CONFIRMATION && action != null &&
+                    stage != ConfirmationStage.TYPE_PREPARE && !locked &&
+                    displayedEditor?.owner === this@RootPilotInputMethodService &&
+                    (stage != ConfirmationStage.TYPE_COMMIT ||
+                        (state.confirmation.localImeToken != null &&
+                            currentInputConnection === displayedEditor.connection))
+                val renderedToken = state.confirmation?.localImeToken?.takeIf {
+                    confirm.isEnabled && stage == ConfirmationStage.TYPE_COMMIT
+                }
+                renderedCommitToken = renderedToken
+                confirm.setOnClickListener {
+                    if (renderedToken != null) RootPilotService.confirmTypeFromIme(renderedToken)
+                    else if (stage == null || stage == ConfirmationStage.ACTION)
+                        RootPilotService.send(context, RootPilotService.ACTION_CONFIRM)
+                }
+                if (locked && stage == ConfirmationStage.TYPE_COMMIT)
+                    state.confirmation?.localImeToken?.let(RootPilotService::cancelTypeFromIme)
+                preview.text = if (confirm.isEnabled) {
+                    val target = if (stage == ConfirmationStage.TYPE_COMMIT)
+                        "目标应用：${displayedEditor!!.info.packageName}\n" else ""
+                    "$target${action!!.reason}\n待输入全文（仅本地预览）：\n${action.text}"
+                } else ""
+                confirm.text = if (confirm.isEnabled) {
+                    if (stage == ConfirmationStage.TYPE_COMMIT) "最终确认输入 ${action!!.text.length} 字符"
+                    else "确认输入 ${action!!.text.length} 字符：${action.reason}"
+                } else "等待输入动作"
             }
         }
     }
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
+        cancelRenderedCommit()
         super.onStartInput(attribute, restarting)
         val connection = currentInputConnection
         InputConnectionBridge.editor.value = if (attribute != null && connection != null) {
@@ -74,11 +111,13 @@ class RootPilotInputMethodService : InputMethodService() {
     }
 
     override fun onFinishInput() {
+        cancelRenderedCommit()
         clearConnection()
         super.onFinishInput()
     }
 
     override fun onDestroy() {
+        cancelRenderedCommit()
         scope.cancel()
         clearConnection()
         super.onDestroy()

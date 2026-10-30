@@ -49,7 +49,10 @@ internal object RootCommandBuilder {
             output.lineSequence().none { it.trimStart().startsWith("Error:") }
 }
 
+enum class TypeConfirmationFlow { LEGACY_BOUND, MAIN_IME_TWO_STAGE }
+
 interface RootExecutor {
+    val typeConfirmationFlow: TypeConfirmationFlow get() = TypeConfirmationFlow.LEGACY_BOUND
     suspend fun beginRun(config: com.example.agent.rootpilot.model.RootPilotConfig): RootExecutionResult =
         if (config.executionDisplay == com.example.agent.rootpilot.model.ExecutionDisplay.MAIN) RootExecutionResult.Success()
         else RootExecutionResult.Failure("当前执行端不支持副屏")
@@ -94,6 +97,7 @@ class SuRootExecutor(
         RootExecutionResult.Failure("文本输入通道未配置")
     },
     private val uiTreeProvider: UiTreeProvider? = null,
+    override val typeConfirmationFlow: TypeConfirmationFlow = TypeConfirmationFlow.LEGACY_BOUND,
 ) : RootExecutor {
     private val screenObserver = RootScreenObserver()
     private val deviceInfoProvider = RootDeviceInfoProvider()

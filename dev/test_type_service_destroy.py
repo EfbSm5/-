@@ -75,6 +75,15 @@ class ServiceHostTests(unittest.TestCase):
             with self.subTest(text=text[-100:]), self.assertRaises(RuntimeError):
                 parse(text).verified(RID, 123)
 
+    def test_initialization_diagnostics_are_not_in_service_profile(self):
+        self.assertEqual(host.SERVICE_PROFILE.diagnostic_fields, ())
+        self.assertEqual(host.SERVICE_PROFILE.report_fields, host.REPORT_FIELDS)
+        fields = ('accessibilityEnabledBefore', 'accessibilityEnabledWhileConnected', 'enabledServicesUnchanged')
+        evidence = parse(report_text(**dict.fromkeys(fields, 'PRIVATE_SYNTHETIC_VALUE')))
+        receipt = evidence.verified(RID, 123)
+        self.assertTrue(all(field not in receipt for field in fields))
+        self.assertNotIn('PRIVATE_SYNTHETIC_VALUE', str(receipt))
+
     def test_arbitrary_output_not_retained(self):
         evidence = parse('SECRET_MODEL_OUTPUT\nINSTRUMENTATION_STATUS: stream=SECRET_TOKEN\n' + report_text())
         self.assertNotIn('SECRET', json.dumps(evidence.verified(RID, 123)))

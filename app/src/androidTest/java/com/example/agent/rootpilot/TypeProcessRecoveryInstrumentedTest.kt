@@ -1,7 +1,12 @@
 package com.example.agent.rootpilot
 
+import android.app.Activity
 import android.app.Application
+import android.app.Notification
+import android.app.NotificationManager
 import android.app.KeyguardManager
+import android.app.PendingIntent
+import android.app.UiAutomation
 import android.content.Context
 import android.hardware.display.DisplayManager
 import android.os.Bundle
@@ -20,6 +25,12 @@ import android.view.inspector.WindowInspector
 import android.widget.Button
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.uiautomator.By
+import androidx.test.uiautomator.Condition
+import androidx.test.uiautomator.Configurator
+import androidx.test.uiautomator.UiDevice
+import androidx.test.uiautomator.UiObject2
+import androidx.test.uiautomator.Until
 import com.example.agent.rootpilot.history.RunHistoryRecord
 import com.example.agent.rootpilot.history.RunHistoryStatus
 import com.example.agent.rootpilot.input.AndroidImeEnvironment
@@ -50,6 +61,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -64,6 +76,11 @@ import org.junit.runner.RunWith
 
 /**
  * Real production Service / saved API / IME; the test never injects text directly.
+ * realNotificationApprovesTypeOnce has its own typeNotificationConfirmation=true gate. It
+ * reuses prepare's guards, runs ACTION_SINGLE_STEP to avoid another screenshot/model request,
+ * clicks only the exact own SystemUI row's action, then verifies the retained old real
+ * PendingIntent is cancelled and has no effect during a one-second quiet window. It does not
+ * test forged tokens, a new pending action, physical touch, or process/Service death.
  * realServiceDestroyedAtUnapprovedType is separately gated by typeServiceDestroy=true, runs once
  * without process death, and reuses prepare's ownership/privacy guards. It retains the waiting
  * snapshot, permits only cancellation's RUN_END (plus the reject/cancel race), checks a retained
@@ -73,8 +90,9 @@ import org.junit.runner.RunWith
  * click the actual secure overlay confirmation once, and require the same target to contain
  * exactly EXPECTED with one commitText call after IME restoration. This is after-submit recovery,
  * not death inside the sender's commitText or recovery during an unfinished IME switch.
- * Invoke each method separately with --no-restart, typeProcessRecovery=true,
- * recoveryReceiptId=<fresh UUID>, expectedRootPilotPid=<host-verified current main PID>.
+ * Invoke each method separately with --no-restart, recoveryReceiptId=<fresh UUID>,
+ * expectedRootPilotPid=<host-verified current main PID>. Process-death methods also require
+ * typeProcessRecovery=true; standalone notification/Service-destroy methods use only their own gate.
  * Prepare also requires recoveryBaseline=empty_task_saved_api_or_defaults and a normally
  * foreground RootPilotActivity. Prepare opens the signed fixture once; neither phase reopens
  * it after binding its identity, and verify never launches any Activity.
@@ -94,6 +112,259 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class TypeProcessRecoveryInstrumentedTest {
+    /** Fixed local model; only the external operator presses the real A/B controls. */
+    @Test
+    fun noModelTwoStageTypeRequiresNotificationAndImeConfirmation() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val args = InstrumentationRegistry.getArguments()
+        val keys = setOf("class", "twoStageTypeNoModelAcceptance", "twoStageActor", "testNonce",
+            "expectedMainPid", "expectedFreshSessionId", "expectedFixtureInstanceId", "expectedFixturePid",
+            "expectedFixtureTaskId", "expectedFixtureDisplayId", "expectedFixtureProcessStartTicks")
+        check(args.keySet() == keys && args.getString("twoStageTypeNoModelAcceptance") == "true" &&
+            args.getString("twoStageActor") == "manual") { "two_stage_parameters" }
+        fun id(key: String): String = checkNotNull(args.getString(key)).also {
+            check(it.length == 36 && UUID.fromString(it).toString() == it) { "two_stage_identity" }
+        }
+        fun number(key: String): Long = checkNotNull(args.getString(key)).also {
+            check(it.matches(Regex("0|[1-9][0-9]*"))) { "two_stage_number" }
+        }.toLong()
+        fun integer(key: String): Int = number(key).also { check(it <= Int.MAX_VALUE) }.toInt()
+        val nonce = id("testNonce")
+        check(Application.getProcessName() == context.packageName &&
+            Process.myUid() == context.applicationInfo.uid) { "two_stage_main_process" }
+        val pid = if (args.getString("expectedMainPid") == "instrumentation-main") Process.myPid()
+            else integer("expectedMainPid")
+        check(pid == Process.myPid() && pid > 0) { "two_stage_process" }
+        val identity = RootPilotModelClientFactory.FixtureIdentity(id("expectedFreshSessionId"),
+            id("expectedFixtureInstanceId"), integer("expectedFixturePid"), integer("expectedFixtureTaskId"),
+            integer("expectedFixtureDisplayId"), number("expectedFixtureProcessStartTicks"))
+        check(identity.pid > 0 && identity.pid != pid && identity.task > 0 && identity.display == 0 &&
+            identity.startTicks > 0) { "two_stage_fixture_identity" }
+        val fixture = FixtureClient(context)
+        val result = org.json.JSONObject().put("schemaVersion", 1).put("diagnosticKind", "TWO_STAGE_LOCAL_MODEL")
+            .put("nonce", nonce).put("mainPid", pid).put("freshSessionId", identity.session)
+            .put("fixtureInstanceId", identity.instance).put("fixturePid", identity.pid)
+            .put("fixtureTaskId", identity.task).put("fixtureDisplayId", identity.display)
+            .put("fixtureProcessStartTicks", identity.startTicks)
+            .put("imeShowInputRequested", org.json.JSONObject.NULL)
+            .put("imeInputViewShown", org.json.JSONObject.NULL)
+        fun stage(value: String, target: Pair<android.graphics.Rect, Long>? = null) =
+            instrumentation.sendStatus(0, Bundle().apply {
+                putString("twoStageTypeStage", value)
+                putString("twoStageTypeNonce", nonce)
+                putInt("twoStageTypeMainPid", pid)
+                target?.let { (bounds, observedAt) ->
+                    putBoolean("twoStageImePreviewMatches", true)
+                    putInt("twoStageImeLeft", bounds.left)
+                    putInt("twoStageImeTop", bounds.top)
+                    putInt("twoStageImeRight", bounds.right)
+                    putInt("twoStageImeBottom", bounds.bottom)
+                    putLong("twoStageImeObservedElapsed", observedAt)
+                }
+            })
+        fun secure(key: String) = Settings.Secure.getString(context.contentResolver, key)
+        fun imeMarkersAbsent() = listOf("rootpilot_original_ime", "rootpilot_original_ime.bak",
+            "rootpilot_original_ime.new").none { File(context.noBackupFilesDir, it).exists() }
+        fun runMarkersAbsent() = context.filesDir.listFiles()?.none {
+            it.name == "rootpilot_run.json" || (it.name.startsWith("rootpilot_run.json.") && it.name.endsWith(".tmp"))
+        } == true
+        @Suppress("DEPRECATION")
+        suspend fun state(): Bundle = fixture.call("state").also { b ->
+            check(b.keySet() == setOf("freshSessionId", "instanceId", "processId", "fixtureTaskId",
+                "fixtureDisplayId", "fixtureProcessStartTicks", "ready", "empty", "matches", "fieldId", "commitCalls"))
+            check(b["freshSessionId"] == identity.session && b["instanceId"] == identity.instance &&
+                b["processId"] is Int && b["processId"] == identity.pid &&
+                b["fixtureTaskId"] is Int && b["fixtureTaskId"] == identity.task &&
+                b["fixtureDisplayId"] is Int && b["fixtureDisplayId"] == identity.display &&
+                b["fixtureProcessStartTicks"] is Long && b["fixtureProcessStartTicks"] == identity.startTicks)
+            check(listOf("ready", "empty", "matches").all { b[it] is Boolean } &&
+                b["fieldId"] is Int && b["fieldId"] == 16908291 &&
+                b["commitCalls"] is Int && b.getInt("commitCalls") >= 0)
+        }
+        val originalIme = secure(Settings.Secure.DEFAULT_INPUT_METHOD)
+        val originalA11y = secure(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+        val originalA11yEnabled = secure(Settings.Secure.ACCESSIBILITY_ENABLED)
+        val ownIme = "${context.packageName}/.rootpilot.input.RootPilotInputMethodService"
+        val normalizedOwnIme = "${context.packageName}/${context.packageName}.rootpilot.input.RootPilotInputMethodService"
+        fun isOwnIme(value: String?) = value == ownIme || value == normalizedOwnIme
+        val initial = RootPilotService.uiState.value
+        // Restore only the five non-API fields; do not inspect or serialize API fields.
+        val originalConfig = RootPilotConfig(task = initial.config.task,
+            manualConfirmation = initial.config.manualConfirmation, allowScreenUpload = initial.config.allowScreenUpload,
+            executionDisplay = initial.config.executionDisplay,
+            virtualDisplayStartPackage = initial.config.virtualDisplayStartPackage)
+        var armed = false
+        var observedA = false
+        var observedB = false
+        var completed = false
+        var cleaned = false
+        var reason = "ADMISSION"
+        try {
+            reason = "ADMISSION_IDLE"
+            check(!initial.running && initial.pendingAction == null && initial.confirmation == null &&
+                initial.status != RootPilotStatus.RECOVERY_REQUIRED)
+            reason = "ADMISSION_RECOVERY_MARKERS"
+            check(!originalIme.isNullOrBlank() && !isOwnIme(originalIme) && imeMarkersAbsent() && runMarkersAbsent())
+            reason = "ADMISSION_ENABLED_IME"
+            val enabled = context.getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+                .enabledInputMethodList.map { it.id }
+            check(originalIme in enabled && enabled.any(::isOwnIme))
+            reason = "ADMISSION_UNLOCKED_INTERACTIVE"
+            check(context.getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == false &&
+                context.getSystemService(PowerManager::class.java)?.isInteractive == true)
+            reason = "ADMISSION_NOTIFICATION_OVERLAY"
+            check(context.getSystemService(NotificationManager::class.java)?.areNotificationsEnabled() == true &&
+                Settings.canDrawOverlays(context))
+            reason = "ADMISSION_HISTORY"
+            val history = RootPilotService.historyState(context).value
+            check(history.error == null && history.records.size < 50 &&
+                history.records.none { it.status == RunHistoryStatus.RUNNING })
+            reason = "ADMISSION_FIXTURE_IDENTITY"
+            fixture.verifyIdentity()
+            val before = state()
+            reason = "ADMISSION_FIXTURE_READY_EMPTY"
+            check(before.getBoolean("ready") && before.getBoolean("empty") && !before.getBoolean("matches") &&
+                before.getInt("commitCalls") == 0)
+            reason = "ADMISSION_ROOT_OBSERVATION"
+            val observation = SuRootExecutor().observeScreen()
+            check(observation?.foregroundPackage == "com.example.rootpilot.fixture" &&
+                observation.focusedPackage == "com.example.rootpilot.fixture" && observation.displayId == 0 &&
+                observation.sessionId == null && observation.foregroundActivity in setOf(
+                    "com.example.rootpilot.fixture.ExecutionFixtureActivity", ".ExecutionFixtureActivity",
+                    "com.example.rootpilot.fixture/.ExecutionFixtureActivity"))
+            reason = "ADMISSION_FACTORY_ARM"
+            withContext(Dispatchers.Main.immediate) { RootPilotModelClientFactory.arm(nonce, pid, identity) }
+            armed = true
+            reason = "ADMISSION_SERVICE_START"
+            RootPilotService.send(context, RootPilotService.ACTION_SINGLE_STEP, RootPilotConfig(
+                task = RootPilotModelClientFactory.task(nonce), manualConfirmation = true,
+                allowScreenUpload = true, executionDisplay = ExecutionDisplay.MAIN))
+            withTimeout(120_000) {
+                reason = "PREPARATION"
+                val a = RootPilotService.uiState.first {
+                    it.confirmation?.stage == com.example.agent.rootpilot.model.ConfirmationStage.TYPE_PREPARE ||
+                        it.status in setOf(RootPilotStatus.FAILED, RootPilotStatus.STOPPED, RootPilotStatus.RECOVERY_REQUIRED)
+                }
+                check(a.confirmation?.stage == com.example.agent.rootpilot.model.ConfirmationStage.TYPE_PREPARE)
+                check(secure(Settings.Secure.DEFAULT_INPUT_METHOD) == originalIme && imeMarkersAbsent())
+                check(state().getInt("commitCalls") == 0)
+                check(RootPilotModelClientFactory.evidence(nonce).let { it.fixedRequests == 1 &&
+                    it.responseReturned && it.ownerActive == true && it.registeredHttpConstructions == 0 })
+                observedA = true
+                stage("WAITING_NOTIFICATION_PREPARE")
+                reason = "FINAL_CONFIRMATION"
+                val b = RootPilotService.uiState.first {
+                    it.confirmation?.stage == com.example.agent.rootpilot.model.ConfirmationStage.TYPE_COMMIT ||
+                        it.status in setOf(RootPilotStatus.FAILED, RootPilotStatus.STOPPED, RootPilotStatus.RECOVERY_REQUIRED)
+                }
+                check(b.confirmation?.stage == com.example.agent.rootpilot.model.ConfirmationStage.TYPE_COMMIT)
+                check(isOwnIme(secure(Settings.Secure.DEFAULT_INPUT_METHOD)) && state().getInt("commitCalls") == 0)
+                check(RootPilotModelClientFactory.evidence(nonce).ownerActive == true)
+                observedB = true
+                reason = "IME_LOCATION_MAIN_ENTRY"
+                val target = withContext(Dispatchers.Main.immediate) {
+                    val imeOwner = com.example.agent.rootpilot.input.InputConnectionBridge.editor.value?.owner
+                    result.put("imeShowInputRequested", runCatching { imeOwner?.isShowInputRequested }.getOrNull()
+                        ?: org.json.JSONObject.NULL)
+                    result.put("imeInputViewShown", runCatching { imeOwner?.isInputViewShown }.getOrNull()
+                        ?: org.json.JSONObject.NULL)
+                    reason = "IME_LOCATION_SCOPE_BEFORE"
+                    check(Process.myPid() == pid && RootPilotService.uiState.value.confirmation === b.confirmation &&
+                        RootPilotModelClientFactory.evidence(nonce).ownerActive == true)
+                    reason = "IME_LOCATION_ROOT_INSPECTION"
+                    val roots = android.view.inspector.WindowInspector.getGlobalWindowViews().filter { view ->
+                        val params = view.layoutParams as? android.view.WindowManager.LayoutParams
+                        view.isAttachedToWindow && view.isShown && view.display?.displayId == 0 &&
+                            params?.type == android.view.WindowManager.LayoutParams.TYPE_INPUT_METHOD &&
+                            params.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE != 0
+                    }
+                    reason = if (roots.isEmpty()) "IME_LOCATION_ROOT_NONE" else "IME_LOCATION_ROOT_MULTIPLE"
+                    check(roots.size == 1)
+                    reason = "IME_LOCATION_NODE_LIMIT"
+                    val queue = java.util.ArrayDeque<android.view.View>().apply { add(roots.single()) }
+                    val buttons = mutableListOf<android.widget.Button>()
+                    var previewMatches = 0
+                    var inspected = 0
+                    val expectedPreview = "目标应用：com.example.rootpilot.fixture\nfixture\n待输入全文（仅本地预览）：\n执行模式验收通过"
+                    while (queue.isNotEmpty()) {
+                        check(++inspected <= 128)
+                        val view = queue.removeFirst()
+                        if (view.isShown && view is android.widget.TextView && view.text.toString() == expectedPreview)
+                            previewMatches++
+                        if (view is android.widget.Button && view.isShown && view.isEnabled && view.isClickable &&
+                            view.text.toString() == "最终确认输入 8 字符") buttons.add(view)
+                        if (view is android.view.ViewGroup) {
+                            check(queue.size + view.childCount <= 128)
+                            repeat(view.childCount) { queue.add(view.getChildAt(it)) }
+                        }
+                    }
+                    reason = "IME_LOCATION_PREVIEW_NOT_UNIQUE"
+                    check(previewMatches == 1)
+                    reason = "IME_LOCATION_BUTTON_NOT_UNIQUE"
+                    check(buttons.size == 1)
+                    val button = buttons.single()
+                    val visible = android.graphics.Rect()
+                    reason = "IME_LOCATION_BUTTON_NOT_FULLY_VISIBLE"
+                    check(button.isAttachedToWindow && button.getLocalVisibleRect(visible) &&
+                        visible == android.graphics.Rect(0, 0, button.width, button.height) &&
+                        button.width > 0 && button.height > 0)
+                    reason = "IME_LOCATION_OUTSIDE_DISPLAY"
+                    val location = IntArray(2).also(button::getLocationOnScreen)
+                    val bounds = android.graphics.Rect(location[0], location[1],
+                        location[0] + button.width, location[1] + button.height)
+                    val screen = android.graphics.Point().also { button.display.getRealSize(it) }
+                    check(android.graphics.Rect(0, 0, screen.x, screen.y).contains(bounds))
+                    reason = "IME_LOCATION_SCOPE_AFTER"
+                    check(RootPilotService.uiState.value.confirmation === b.confirmation &&
+                        RootPilotModelClientFactory.evidence(nonce).ownerActive == true)
+                    bounds to android.os.SystemClock.elapsedRealtime()
+                }
+                stage("WAITING_IME_FINAL", target)
+                reason = "COMMIT"
+                val terminal = RootPilotService.uiState.first {
+                    !it.running && it.status in setOf(RootPilotStatus.COMPLETED, RootPilotStatus.FAILED,
+                        RootPilotStatus.STOPPED, RootPilotStatus.RECOVERY_REQUIRED)
+                }
+                check(terminal.status == RootPilotStatus.COMPLETED && terminal.pendingAction == null)
+                val after = state()
+                check(after.getInt("commitCalls") == 1 && after.getBoolean("matches") && !after.getBoolean("empty"))
+                completed = true
+            }
+        } catch (_: Throwable) {
+            // Fixed stage only; no model/task/error text enters instrumentation output.
+        } finally {
+            withContext(NonCancellable) {
+                val joined = if (armed) runCatching { withTimeout(10_000) {
+                    RootPilotModelClientFactory.sealAndJoin(nonce)
+                } }.getOrDefault(false) else false
+                val evidence = if (armed) runCatching { RootPilotModelClientFactory.evidence(nonce) }.getOrNull() else null
+                result.put("fixedRequests", evidence?.fixedRequests ?: org.json.JSONObject.NULL)
+                    .put("registeredHttpConstructions", evidence?.registeredHttpConstructions ?: org.json.JSONObject.NULL)
+                    .put("ownerCompleted", evidence?.ownerCompleted ?: org.json.JSONObject.NULL)
+                val finalState = runCatching { state() }.getOrNull()
+                val ui = RootPilotService.uiState.value
+                val restored = runCatching {
+                    secure(Settings.Secure.DEFAULT_INPUT_METHOD) == originalIme && imeMarkersAbsent() &&
+                        secure(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) == originalA11y &&
+                        secure(Settings.Secure.ACCESSIBILITY_ENABLED) == originalA11yEnabled
+                }.getOrDefault(false)
+                cleaned = joined && evidence?.ownerCompleted == true && !ui.running && ui.pendingAction == null &&
+                    ui.confirmation == null && restored && finalState != null && runMarkersAbsent()
+                if (cleaned) withContext(Dispatchers.Main.immediate) { RootPilotService.updateConfig(originalConfig) }
+                result.put("commitCalls", finalState?.getInt("commitCalls") ?: org.json.JSONObject.NULL)
+                    .put("matches", finalState?.getBoolean("matches") ?: org.json.JSONObject.NULL)
+                    .put("fixtureRetained", finalState != null).put("resourcesRestored", restored)
+                    .put("cleanupConfirmed", cleaned).put("observedPreparation", observedA)
+                    .put("observedFinalConfirmation", observedB).put("passed", completed && cleaned)
+                    .put("failureStage", if (completed && cleaned) "NONE" else reason)
+                    .put("clickLedgerExternal", true)
+                instrumentation.sendStatus(0, Bundle().apply { putString("twoStageTypeReport", result.toString()) })
+            }
+        }
+        check(completed && cleaned) { "TWO_STAGE_LOCAL_MODEL_NOT_PASSED" }
+    }
+
     @Test fun prepareServiceAtUnapprovedType() = invoke(prepare = true)
 
     @Test fun prepareServiceAfterSubmittedType() = invoke(prepare = true, submitted = true)
@@ -124,6 +395,68 @@ class TypeProcessRecoveryInstrumentedTest {
                     catch (error: Throwable) { test.cleanupReason = reason(error) }
                     if (failure == null) failure = test.cleanupReason
                     try { test.reportServiceDestroy(failure) }
+                    catch (_: Throwable) { if (failure == null) failure = Reason.REPORT_FAILED }
+                }
+            }
+            failure?.let(::fail)
+        }
+    }
+
+    /** First approval is a SystemUI action click, never a direct PendingIntent/controller call. */
+    @Test fun realNotificationApprovesTypeOnce() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("typeNotificationConfirmation") == "true")
+        runBlocking {
+            val test = Recovery(InstrumentationRegistry.getInstrumentation().targetContext, false, null, notification = true)
+            var failure: Reason? = null
+            try {
+                test.checkInvocation()
+                test.prepare()
+            } catch (error: Throwable) { failure = reason(error) }
+            finally {
+                withContext(NonCancellable) {
+                    if (failure != null) try { test.invalidate(failure!!) }
+                    catch (_: Throwable) { test.cleanupReason = Reason.RECEIPT_INVALIDATION_FAILED }
+                    try { test.cleanup(prepare = true) }
+                    catch (error: Throwable) { test.cleanupReason = reason(error) }
+                    try { test.finishNotificationObservation() }
+                    catch (error: Throwable) { if (test.cleanupReason == null) test.cleanupReason = reason(error) }
+                    try { test.finishNotificationUi() }
+                    catch (error: Throwable) { if (test.cleanupReason == null) test.cleanupReason = reason(error) }
+                    if (failure == null) failure = test.cleanupReason
+                    try { test.reportNotification(failure) }
+                    catch (_: Throwable) { if (failure == null) failure = Reason.REPORT_FAILED }
+                }
+            }
+            failure?.let(::fail)
+        }
+    }
+
+    /** Human cooperation plus the real Activity/confirmation chain, not automated click evidence. */
+    @Test fun realNotificationManuallyApprovesTypeOnce() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("typeNotificationManualConfirmation") == "true")
+        runBlocking {
+            val test = Recovery(InstrumentationRegistry.getInstrumentation().targetContext, false, null,
+                notification = true, manualNotification = true)
+            var failure: Reason? = null
+            try {
+                test.checkInvocation()
+                test.prepare()
+            } catch (error: Throwable) { failure = reason(error) }
+            finally {
+                withContext(NonCancellable) {
+                    if (failure != null) try { test.invalidate(failure!!) }
+                    catch (_: Throwable) { test.cleanupReason = Reason.RECEIPT_INVALIDATION_FAILED }
+                    try {
+                        withTimeout(35_000) {
+                            try { test.cleanup(prepare = true) }
+                            catch (error: Throwable) { if (test.cleanupReason == null) test.cleanupReason = reason(error) }
+                            finally { test.finishManualNotificationObservation() }
+                        }
+                    } catch (error: Throwable) { if (test.cleanupReason == null) test.cleanupReason = reason(error) }
+                    try { test.finishNotificationUi() }
+                    catch (error: Throwable) { if (test.cleanupReason == null) test.cleanupReason = reason(error) }
+                    if (failure == null) failure = test.cleanupReason
+                    try { test.reportNotification(failure) }
                     catch (_: Throwable) { if (failure == null) failure = Reason.REPORT_FAILED }
                 }
             }
@@ -166,7 +499,70 @@ class TypeProcessRecoveryInstrumentedTest {
         }
     }
 
-    private class Recovery(private val context: Context, private val submitted: Boolean, private val boundary: CommitBoundaryGate.Boundary?) {
+    private class NotificationUiSession(private val context: Context) {
+        private val instrumentation = InstrumentationRegistry.getInstrumentation()
+        private var configurator: Configurator? = null
+        private var originalFlags: Int? = null
+        private var originalAccessibility: Pair<String?, String?>? = null
+        private var automation: UiAutomation? = null
+        lateinit var device: UiDevice
+            private set
+        private var finished = false
+        val cleanupReasons = mutableListOf<Reason>()
+        val restored get() = finished && originalAccessibility != null && cleanupReasons.isEmpty()
+
+        fun begin() {
+            originalAccessibility = fixed(Reason.NOTIFICATION_ACCESSIBILITY_BASELINE) { accessibility() }
+            fixed(Reason.NOTIFICATION_UI_CONFIGURATOR) {
+                val config = Configurator.getInstance()
+                configurator = config
+                originalFlags = config.uiAutomationFlags
+                config.uiAutomationFlags = UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES
+                check(config.uiAutomationFlags == UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES,
+                    Reason.NOTIFICATION_UI_CONFIGURATOR)
+            }
+            automation = fixed(Reason.NOTIFICATION_UI_AUTOMATION) {
+                instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+                    ?: fail(Reason.NOTIFICATION_UI_AUTOMATION)
+            }
+            device = fixed(Reason.NOTIFICATION_UI_DEVICE) { UiDevice.getInstance(instrumentation) }
+        }
+
+        fun finish() {
+            fun attempt(code: Reason, block: () -> Unit) {
+                try { fixed(code, block) }
+                catch (error: Throwable) { cleanupReasons += reason(error) }
+            }
+            // This boundary follows all UI/observer cleanup. Never acquire UiDevice afterwards:
+            // its configured flags would reconnect accessibility and invalidate the readback.
+            if (automation != null) attempt(Reason.NOTIFICATION_UI_AUTOMATION_RELEASE) {
+                check(instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES or
+                    UiAutomation.FLAG_DONT_USE_ACCESSIBILITY) != null, Reason.NOTIFICATION_UI_AUTOMATION_RELEASE)
+            }
+            originalFlags?.let { flags -> attempt(Reason.NOTIFICATION_UI_CONFIGURATOR_RESTORE) {
+                val config = configurator ?: fail(Reason.NOTIFICATION_UI_CONFIGURATOR_RESTORE)
+                config.uiAutomationFlags = flags
+                check(config.uiAutomationFlags == flags, Reason.NOTIFICATION_UI_CONFIGURATOR_RESTORE)
+            } }
+            originalAccessibility?.let { before -> attempt(Reason.NOTIFICATION_ACCESSIBILITY_RESTORE) {
+                check(accessibility() == before, Reason.NOTIFICATION_ACCESSIBILITY_RESTORE)
+            } }
+            finished = true
+        }
+
+        private fun accessibility() = Pair(
+            Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES),
+            Settings.Secure.getString(context.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED),
+        )
+    }
+
+    private class Recovery(
+        private val context: Context,
+        private val submitted: Boolean,
+        private val boundary: CommitBoundaryGate.Boundary?,
+        private val notification: Boolean = false,
+        private val manualNotification: Boolean = false,
+    ) {
         private var approved = false
         private var submittedReady = false
         private var boundaryReady = false
@@ -280,11 +676,28 @@ class TypeProcessRecoveryInstrumentedTest {
             checkFixture(base, foreground = true)
             check(state === original && !exists(snapshotFile) && ime.currentId() == originalIme, Reason.ENVIRONMENT_CHANGED)
             checkImeFileAbsent()
+            if (notification) {
+                val session = NotificationUiSession(context)
+                notificationUiSession = session
+                session.begin()
+            }
             configChanged = true
             RootPilotService.updateApiConfig(saved)
+            if (manualNotification) {
+                val observer = ManualNotificationActivityObservation()
+                manualActivityObservation = observer
+                withContext(Dispatchers.Main.immediate) {
+                    fixed(Reason.NOTIFICATION_OBSERVER_REGISTER) {
+                        (context.applicationContext as Application).registerActivityLifecycleCallbacks(observer)
+                    }
+                }
+                // Even a premature human approval can already have effects after START.
+                approved = true
+            }
             requestedAt = System.currentTimeMillis()
             startSent = true
-            RootPilotService.send(context, RootPilotService.ACTION_AUTO_EXECUTE, testConfig())
+            RootPilotService.send(context, if (notification) RootPilotService.ACTION_SINGLE_STEP else RootPilotService.ACTION_AUTO_EXECUTE,
+                testConfig())
             withTimeout(10_000) {
                 while (bindRun() == null) {
                     check(!state.running || state.config == testConfig(), Reason.RUN_IDENTITY)
@@ -293,6 +706,7 @@ class TypeProcessRecoveryInstrumentedTest {
             }
             withTimeout(180_000) {
                 while (true) {
+                    if (manualNotification) checkManualEvidence(manualObserver().evidence.snapshot(SystemClock.elapsedRealtime()))
                     val owned = bindRun() ?: fail(Reason.RUN_IDENTITY)
                     check(state.config == testConfig() && state.status in PREPARING_STATES && state.step == 0,
                         Reason.UNEXPECTED_ACTIVITY)
@@ -309,6 +723,10 @@ class TypeProcessRecoveryInstrumentedTest {
                     }
                     delay(POLL)
                 }
+            }
+            if (notification) {
+                if (manualNotification) awaitManualNotificationAndVerify(base) else approveNotificationAndVerify(base)
+                return
             }
             if (serviceDestroy) {
                 destroyServiceAndVerify(base)
@@ -339,6 +757,522 @@ class TypeProcessRecoveryInstrumentedTest {
                 delay(POLL)
             }
             fail(Reason.HOST_KILL_TIMEOUT)
+        }
+
+        private var notificationUiSession: NotificationUiSession? = null
+        private var notificationUiClicked = false
+        private var notificationActivityObserved = false
+        private var oldConfirmationInvalid = false
+        private var targetSameInstance = false
+        private var targetTextMatches = false
+        private var originalImeRestored = false
+        private var historyFinalized = false
+        private var snapshotCleared = false
+        private var confirmedActions = -1
+        private var targetCommitCalls = -1
+        private var duplicateExecutions = -1
+        private var notificationRecords: List<RunHistoryRecord>? = null
+        private var notificationLogs: List<String>? = null
+        private var activityObservation: NotificationActivityObservation? = null
+        private val notificationUi = NotificationUiGuards<Reason>(::fail)
+        private var manualActivityObservation: ManualNotificationActivityObservation? = null
+        private var manualWaitArmed = false
+
+        private fun manualObserver() = manualActivityObservation ?: fail(Reason.NOTIFICATION_ACTIVITY_UNOBSERVED)
+
+        private fun checkManualEvidence(value: NotificationManualConfirmationEvidence.Snapshot) {
+            value.failure?.let {
+                fail(when (it) {
+                    NotificationManualConfirmationEvidence.Failure.EARLY_ACTIVITY -> Reason.MANUAL_NOTIFICATION_EARLY_ACTIVITY
+                    NotificationManualConfirmationEvidence.Failure.TIMEOUT -> Reason.MANUAL_NOTIFICATION_TIMEOUT
+                    NotificationManualConfirmationEvidence.Failure.AUTOMATIC_APPROVAL -> Reason.MANUAL_NOTIFICATION_AUTOMATIC_APPROVAL
+                    NotificationManualConfirmationEvidence.Failure.ACTIVITY -> Reason.NOTIFICATION_ACTIVITY_UNOBSERVED
+                    NotificationManualConfirmationEvidence.Failure.STATE -> Reason.MANUAL_NOTIFICATION_STATE
+                })
+            }
+            check(value.noAutomaticApproval && !notificationUiClicked, Reason.MANUAL_NOTIFICATION_AUTOMATIC_APPROVAL)
+        }
+
+        private suspend fun awaitManualNotificationAndVerify(base: Baseline) {
+            val owned = runId ?: fail(Reason.RUN_IDENTITY)
+            val observer = manualObserver()
+            val manager = fixed(Reason.NOTIFICATION_MANAGER_ACCESS) {
+                context.getSystemService(NotificationManager::class.java).also {
+                    check(it.areNotificationsEnabled() && (it.getNotificationChannel(NOTIFICATION_CHANNEL)?.importance
+                        ?: NotificationManager.IMPORTANCE_NONE) != NotificationManager.IMPORTANCE_NONE, Reason.NOTIFICATION_UNAVAILABLE)
+                }
+            }
+            var retained: PendingIntent? = null
+            withTimeout(5_000) {
+                while (retained == null) {
+                    checkManualEvidence(observer.evidence.snapshot(SystemClock.elapsedRealtime()))
+                    checkPendingType()
+                    retained = fixed(Reason.NOTIFICATION_QUERY) { ownNotificationConfirmation(manager) }
+                    if (retained == null) delay(POLL)
+                }
+            }
+            val oldConfirmation = retained ?: fail(Reason.NOTIFICATION_UNAVAILABLE)
+            val device = notificationUiSession?.device ?: fail(Reason.NOTIFICATION_UI_DEVICE)
+            checkPendingType()
+            checkFixtureZero(base)
+            check(ownSnapshot().status == RootPilotStatus.WAITING_CONFIRMATION.name, Reason.SNAPSHOT_IDENTITY)
+            check(ime.currentId() == ime.ownId && FileImeRestoreStore(context).read() == base.originalIme,
+                Reason.IME_RECOVERY)
+            // The callbacks and final pending/zero-approval check share the main queue with
+            // notification dispatch. No lifecycle event is discarded between arm and shade return.
+            withContext(Dispatchers.Main.immediate) {
+                checkPendingType()
+                checkLogPrefix(owned, complete = true)
+                val disk = diskHistory().document.records
+                check(history.value.records == disk, Reason.HISTORY_CHANGED)
+                checkCompleteHistory(disk.single { it.id == owned }, RunHistoryStatus.RUNNING)
+                check(fixed(Reason.NOTIFICATION_QUERY) { ownNotificationConfirmation(manager) } == oldConfirmation,
+                    Reason.TYPE_IDENTITY)
+                checkManualEvidence(observer.evidence.arm(SystemClock.elapsedRealtime()))
+                manualWaitArmed = true
+            }
+            // This is the only automated UI action in manual mode: a human start signal,
+            // not row discovery, expansion, an action click, or a first PendingIntent send.
+            fixed(Reason.NOTIFICATION_UI_OPEN) {
+                check(device.openNotification(), Reason.NOTIFICATION_UI_OPEN_REJECTED)
+            }
+            checkManualEvidence(observer.evidence.beginWait(SystemClock.elapsedRealtime()))
+            while (true) {
+                check(bindRun() == owned && state.config == testConfig() && state.step == 0 && state.status in
+                    setOf(RootPilotStatus.WAITING_CONFIRMATION, RootPilotStatus.EXECUTING,
+                        RootPilotStatus.WAITING_SCREEN, RootPilotStatus.COMPLETED), Reason.NOTIFICATION_EXECUTION_FAILED)
+                checkMainUnlocked()
+                checkUnchangedFiles(base)
+                val trace = logs().filter { it.runId == owned }
+                check(trace.map { it.shape } == NOTIFICATION_TRACE.take(trace.size) &&
+                    trace.all { it.reason == "none" } &&
+                    logs().none { it.runId !in previousLogIds && it.runId != owned }, Reason.UNEXPECTED_ACTIVITY)
+                val disk = diskHistory().document.records
+                val record = disk.singleOrNull { it.id == owned } ?: fail(Reason.RUN_IDENTITY)
+                check(disk.filter { it.id != owned } == previousRecords && !record.eventsTruncated &&
+                    record.events.map(::shape) == NOTIFICATION_TRACE.take(record.events.size) &&
+                    record.events.all { it.runId == owned && it.reason == TraceReason.NONE }, Reason.UNEXPECTED_ACTIVITY)
+                val value = fixtureState()
+                check(value.getString("instanceId") == base.fixtureInstanceId && value.getInt("processId") == base.fixturePid,
+                    Reason.FIXTURE_IDENTITY)
+                // Sample evidence after asynchronous readbacks: a legitimate destruction/
+                // approval between the reads must not be mistaken for an alternate entry.
+                val evidence = observer.evidence.snapshot(SystemClock.elapsedRealtime())
+                checkManualEvidence(evidence)
+                if (evidence.complete) break
+                check(trace.none { it.shape !in EXPECTED_TRACE } &&
+                    record.events.none { it.stage == TraceStage.EXECUTION || it.event == TraceEvent.CONFIRMED },
+                    Reason.MANUAL_NOTIFICATION_WRONG_ENTRY)
+                check(value.getBoolean("empty") && !value.getBoolean("matches") &&
+                    value.getInt("commitCalls", -1) == 0 && value.getInt("fieldId") == android.R.id.edit,
+                    Reason.FIXTURE_STATE)
+                delay(POLL)
+            }
+            notificationActivityObserved = true
+            withTimeout(20_000) {
+                while (true) {
+                    checkManualEvidence(observer.evidence.snapshot(SystemClock.elapsedRealtime()))
+                    check(bindRun() == owned && state.config == testConfig() && state.step == 0 && state.status in
+                        setOf(RootPilotStatus.WAITING_CONFIRMATION, RootPilotStatus.EXECUTING,
+                            RootPilotStatus.WAITING_SCREEN, RootPilotStatus.COMPLETED), Reason.NOTIFICATION_EXECUTION_FAILED)
+                    val disk = diskHistory().document.records
+                    if (!state.running && state.status == RootPilotStatus.COMPLETED && history.value.records == disk &&
+                        disk.singleOrNull { it.id == owned }?.status == RunHistoryStatus.COMPLETED) break
+                    delay(POLL)
+                }
+            }
+            checkNotificationTerminal(base)
+            notificationRecords = diskHistory().document.records
+            notificationLogs = state.logs.toList()
+            // Post-terminal negative control only; never used to obtain the first approval.
+            try {
+                oldConfirmation.send()
+                fail(Reason.OLD_CONFIRMATION_ACCEPTED)
+            } catch (_: PendingIntent.CanceledException) { oldConfirmationInvalid = true }
+            val until = SystemClock.elapsedRealtime() + QUIET_WINDOW
+            while (SystemClock.elapsedRealtime() < until) {
+                checkNotificationTerminal(base)
+                checkManualEvidence(observer.evidence.snapshot(SystemClock.elapsedRealtime()))
+                check(diskHistory().document.records == notificationRecords && state.logs == notificationLogs,
+                    Reason.UNEXPECTED_ACTIVITY)
+                delay(POLL)
+            }
+            checkManualEvidence(observer.evidence.snapshot(SystemClock.elapsedRealtime()))
+            verified = true
+        }
+
+        private suspend fun approveNotificationAndVerify(base: Baseline) {
+            val owned = runId ?: fail(Reason.RUN_IDENTITY)
+            checkPendingType()
+            checkLogPrefix(owned, complete = true)
+            checkCompleteHistory(diskHistory().document.records.single { it.id == owned }, RunHistoryStatus.RUNNING)
+            checkFixtureZero(base)
+            check(ownSnapshot().status == RootPilotStatus.WAITING_CONFIRMATION.name, Reason.SNAPSHOT_IDENTITY)
+            check(ime.currentId() == ime.ownId && FileImeRestoreStore(context).read() == base.originalIme,
+                Reason.IME_RECOVERY)
+            val manager = fixed(Reason.NOTIFICATION_MANAGER_ACCESS) {
+                context.getSystemService(NotificationManager::class.java).also {
+                    check(it.areNotificationsEnabled() && (it.getNotificationChannel(NOTIFICATION_CHANNEL)?.importance
+                        ?: NotificationManager.IMPORTANCE_NONE) != NotificationManager.IMPORTANCE_NONE, Reason.NOTIFICATION_UNAVAILABLE)
+                }
+            }
+            var retained: PendingIntent? = null
+            withTimeout(5_000) {
+                while (retained == null) {
+                    retained = fixed(Reason.NOTIFICATION_QUERY) { ownNotificationConfirmation(manager) }
+                    if (retained == null) delay(POLL)
+                }
+            }
+            val oldConfirmation = retained ?: fail(Reason.NOTIFICATION_UNAVAILABLE)
+            val observer = NotificationActivityObservation()
+            activityObservation = observer
+            withContext(Dispatchers.Main.immediate) {
+                fixed(Reason.NOTIFICATION_OBSERVER_REGISTER) {
+                    (context.applicationContext as Application).registerActivityLifecycleCallbacks(observer)
+                }
+            }
+            val device = notificationUiSession?.device ?: fail(Reason.NOTIFICATION_UI_DEVICE)
+            fixed(Reason.NOTIFICATION_UI_OPEN) {
+                notificationUi.require(device.openNotification(), Reason.NOTIFICATION_UI_OPEN_REJECTED)
+            }
+            val initial = fixed(Reason.NOTIFICATION_UI_ROW_QUERY) { notificationRow(device, waitForTitle = true) }
+            val identity = fixed(Reason.NOTIFICATION_UI_ROW_QUERY) { notificationIdentity(initial) }
+            val actions = fixed(Reason.NOTIFICATION_UI_ACTION_QUERY) {
+                initial.row.findObjects(By.pkg(SYSTEM_UI).text(NOTIFICATION_ACTION))
+            }
+            val identityDeferred = NotificationTypeApprovalUi.mayExpandWithoutIdentity(identity.result,
+                identity.namedCount, identity.iconCount, actions.size)
+            if (!identityDeferred) requireNotificationIdentity(identity.result)
+            if (actions.isEmpty()) {
+                fixed(Reason.NOTIFICATION_UI_EXPAND) {
+                    val expected = notificationExpand(initial)
+                    notificationUi.require(expected.enabled, Reason.NOTIFICATION_UI_EXPAND_DISABLED)
+                    notificationUi.require(expected.clickable, Reason.NOTIFICATION_UI_EXPAND_NOT_CLICKABLE)
+                    checkNotificationApprovalIdentity(owned, manager, oldConfirmation)
+                    val rebound = notificationRow(device)
+                    notificationUi.require(NotificationTypeApprovalUi.sameBinding(initial.title, initial.row,
+                        rebound.title, rebound.row), Reason.NOTIFICATION_UI_ROW_CHANGED)
+                    val reboundIdentity = notificationIdentity(rebound)
+                    val reboundActions = rebound.row.findObjects(By.pkg(SYSTEM_UI).text(NOTIFICATION_ACTION))
+                    if (!identityDeferred || !NotificationTypeApprovalUi.mayExpandWithoutIdentity(reboundIdentity.result,
+                            reboundIdentity.namedCount, reboundIdentity.iconCount, reboundActions.size))
+                        requireNotificationIdentity(reboundIdentity.result)
+                    notificationUi.require(reboundActions.isEmpty(), Reason.NOTIFICATION_UI_EXPAND_CHANGED)
+                    val expand = try {
+                        NotificationIdentityExpand.fresh(expected, notificationExpandCandidates(rebound))
+                    } catch (error: NotificationIdentityExpand.Failure) {
+                        fail(if (error.code == NotificationIdentityExpand.Code.AMBIGUOUS)
+                            Reason.NOTIFICATION_UI_EXPAND_AMBIGUOUS else Reason.NOTIFICATION_UI_EXPAND_CHANGED)
+                    }
+                    checkNotificationApprovalIdentity(owned, manager, oldConfirmation)
+                    expand.node.click()
+                    notificationUi.require(device.wait(object : Condition<UiDevice, Boolean> {
+                        override fun apply(container: UiDevice): Boolean {
+                            val titles = container.findObjects(By.pkg(SYSTEM_UI).res(NotificationIdentityEvidence.titleResourcePattern).text(NOTIFICATION_TITLE))
+                            if (titles.isEmpty()) return false
+                            val title = notificationUi.single(titles,
+                                Reason.NOTIFICATION_UI_TITLE_MISSING, Reason.NOTIFICATION_UI_TITLE_AMBIGUOUS)
+                            val expandedRow = notificationRowAncestor(title, required = false) ?: return false
+                            return expandedRow.findObjects(By.pkg(SYSTEM_UI).text(NOTIFICATION_ACTION)).isNotEmpty()
+                        }
+                    }, 5_000), Reason.NOTIFICATION_UI_EXPAND_WAIT_TIMEOUT)
+                }
+            }
+            checkNotificationApprovalIdentity(owned, manager, oldConfirmation)
+            val binding = fixed(Reason.NOTIFICATION_UI_ROW_QUERY) {
+                notificationRow(device).also {
+                    if (actions.isNotEmpty()) notificationUi.require(NotificationTypeApprovalUi.sameBinding(
+                        initial.title, initial.row, it.title, it.row), Reason.NOTIFICATION_UI_ROW_CHANGED)
+                    requireNotificationIdentity(notificationIdentity(it).result)
+                }
+            }
+            // Identity is mandatory here, including after an identity-deferred expand. Never
+            // query approval text globally or reuse the pre-expand row/action wrappers.
+            val action = fixed(Reason.NOTIFICATION_UI_ACTION_QUERY) {
+                val candidate = notificationUi.single(binding.row.findObjects(By.pkg(SYSTEM_UI).text(NOTIFICATION_ACTION)),
+                    Reason.NOTIFICATION_UI_ACTION_MISSING, Reason.NOTIFICATION_UI_ACTION_AMBIGUOUS)
+                notificationUi.require(candidate.isEnabled, Reason.NOTIFICATION_UI_ACTION_DISABLED)
+                notificationUi.require(candidate.isClickable, Reason.NOTIFICATION_UI_ACTION_NOT_CLICKABLE)
+                candidate
+            }
+            checkNotificationApprovalIdentity(owned, manager, oldConfirmation)
+            approved = true // A throwing UI click can already have dispatched; cleanup must allow that side effect.
+            fixed(Reason.NOTIFICATION_UI_CLICK) { action.click() }
+            notificationUiClicked = true
+            withTimeout(20_000) {
+                while (true) {
+                    check(bindRun() == owned && state.config == testConfig() && state.step == 0 && state.status in
+                        setOf(RootPilotStatus.WAITING_CONFIRMATION, RootPilotStatus.EXECUTING,
+                            RootPilotStatus.WAITING_SCREEN, RootPilotStatus.COMPLETED), Reason.NOTIFICATION_EXECUTION_FAILED)
+                    val disk = diskHistory().document.records
+                    if (!state.running && state.status == RootPilotStatus.COMPLETED && history.value.records == disk &&
+                        disk.singleOrNull { it.id == owned }?.status == RunHistoryStatus.COMPLETED) break
+                    delay(POLL)
+                }
+            }
+            check(observer.created == 1 && observer.resumed == 1 && observer.destroyed == 1,
+                Reason.NOTIFICATION_ACTIVITY_UNOBSERVED)
+            notificationActivityObserved = true
+            checkNotificationTerminal(base)
+            notificationRecords = diskHistory().document.records
+            notificationLogs = state.logs.toList()
+            // This is only the retained real old notification's cancellation boundary, not a
+            // forged intent/token test and not an attempt to approve a later pending action.
+            try {
+                oldConfirmation.send()
+                fail(Reason.OLD_CONFIRMATION_ACCEPTED)
+            } catch (_: PendingIntent.CanceledException) { oldConfirmationInvalid = true }
+            val until = SystemClock.elapsedRealtime() + QUIET_WINDOW
+            while (SystemClock.elapsedRealtime() < until) {
+                checkNotificationTerminal(base)
+                check(diskHistory().document.records == notificationRecords && state.logs == notificationLogs &&
+                    observer.created == 1 && observer.resumed == 1 && observer.destroyed == 1,
+                    Reason.UNEXPECTED_ACTIVITY)
+                delay(POLL)
+            }
+            verified = true
+        }
+
+        private fun ownNotificationConfirmation(manager: NotificationManager): PendingIntent? {
+            val own = manager.activeNotifications.filter { it.packageName == TARGET && it.id == NOTIFICATION_ID &&
+                it.tag == null && it.notification.channelId == NOTIFICATION_CHANNEL }
+            check(own.size <= 1, Reason.NOTIFICATION_UNAVAILABLE)
+            val notification = own.singleOrNull()?.notification ?: return null
+            check(notification.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() == NOTIFICATION_TITLE,
+                Reason.NOTIFICATION_UNAVAILABLE)
+            val action = notification.actions.orEmpty().filter { it.title?.toString() == NOTIFICATION_ACTION }
+            check(action.size <= 1, Reason.NOTIFICATION_UNAVAILABLE)
+            return action.singleOrNull()?.actionIntent?.also {
+                check(it.creatorPackage == TARGET && it.creatorUid == Process.myUid() && it.isActivity,
+                    Reason.NOTIFICATION_UNAVAILABLE)
+            }
+        }
+
+        private data class NotificationRowBinding(val title: UiObject2, val row: UiObject2)
+        private data class NotificationRowIdentity(val result: NotificationAppIdentity.Result,
+            val namedCount: Int, val iconCount: Int)
+
+        private fun checkNotificationApprovalIdentity(owned: String, manager: NotificationManager, expected: PendingIntent) {
+            check(bindRun() == owned && state.running && state.config == testConfig() && state.step == 0 &&
+                state.status == RootPilotStatus.WAITING_CONFIRMATION && state.pendingAction === boundAction &&
+                fixed(Reason.NOTIFICATION_QUERY) { ownNotificationConfirmation(manager) } == expected, Reason.TYPE_IDENTITY)
+        }
+
+        private fun notificationRow(device: UiDevice, waitForTitle: Boolean = false): NotificationRowBinding {
+            if (waitForTitle) notificationUi.require(device.wait(Until.hasObject(By.pkg(SYSTEM_UI)
+                .res(NotificationIdentityEvidence.titleResourcePattern).text(NOTIFICATION_TITLE)), 5_000),
+                Reason.NOTIFICATION_UI_TITLE_WAIT_TIMEOUT)
+            val title = notificationUi.single(device.findObjects(By.pkg(SYSTEM_UI).res(NotificationIdentityEvidence.titleResourcePattern).text(NOTIFICATION_TITLE)),
+                Reason.NOTIFICATION_UI_TITLE_MISSING, Reason.NOTIFICATION_UI_TITLE_AMBIGUOUS)
+            val row = notificationRowAncestor(title, required = true) ?: fail(Reason.NOTIFICATION_UI_ROW_ANCESTOR_LIMIT)
+            notificationUi.require(row.applicationPackage == SYSTEM_UI && row.className == "android.widget.FrameLayout" &&
+                row.isEnabled && row.isClickable && !row.isScrollable, Reason.NOTIFICATION_UI_ROW_STRUCTURE)
+            val rowTitle = notificationUi.single(row.findObjects(By.pkg(SYSTEM_UI)
+                .res(NotificationIdentityEvidence.titleResourcePattern).text(NOTIFICATION_TITLE)),
+                Reason.NOTIFICATION_UI_ROW_TITLE_MISSING, Reason.NOTIFICATION_UI_ROW_TITLE_AMBIGUOUS)
+            notificationUi.require(rowTitle == title, Reason.NOTIFICATION_UI_ROW_CHANGED)
+            return NotificationRowBinding(title, row)
+        }
+
+        private fun notificationIdentity(binding: NotificationRowBinding): NotificationRowIdentity {
+            val appLabel = context.applicationInfo.loadLabel(context.packageManager).toString()
+            notificationUi.require(appLabel.isNotBlank(), Reason.NOTIFICATION_UI_APP_LABEL_EMPTY)
+            val names = binding.row.findObjects(By.res(NotificationAppIdentity.namedResourcePattern))
+            var iconCount = 0
+            val result = NotificationAppIdentity.verify(
+                namedCandidates = names,
+                iconCandidates = { binding.row.findObjects(By.res(SYSTEM_UI, "app_icon")).also { iconCount = it.size } },
+                describe = { NotificationAppIdentity.Node(it.resourceName, it.applicationPackage, it.className,
+                    it.contentDescription == appLabel, it.text == appLabel, it.isClickable, it.isLongClickable,
+                    it.isEnabled, it.isScrollable) },
+                parent = { it.parent },
+                isBoundRow = { it == binding.row },
+                title = binding.title,
+                sameNode = { first, second -> first == second },
+            )
+            return NotificationRowIdentity(result, names.size, iconCount)
+        }
+
+        private fun requireNotificationIdentity(result: NotificationAppIdentity.Result) {
+            when (result) {
+                NotificationAppIdentity.Result.VERIFIED -> Unit
+                NotificationAppIdentity.Result.MISSING -> fail(Reason.NOTIFICATION_UI_APP_LABEL_MISSING)
+                NotificationAppIdentity.Result.AMBIGUOUS -> fail(Reason.NOTIFICATION_UI_APP_LABEL_AMBIGUOUS)
+            }
+        }
+
+        private fun notificationExpandCandidates(binding: NotificationRowBinding) =
+            binding.row.findObjects(By.res(NotificationIdentityExpand.resourcePattern)).map {
+                NotificationIdentityExpand.Candidate(it, it.applicationPackage, it.resourceName, it.isEnabled, it.isClickable)
+            }
+
+        private fun notificationExpand(binding: NotificationRowBinding): NotificationIdentityExpand.Candidate<UiObject2> {
+            val found = notificationExpandCandidates(binding)
+            val candidate = notificationUi.single(found,
+                Reason.NOTIFICATION_UI_EXPAND_MISSING, Reason.NOTIFICATION_UI_EXPAND_AMBIGUOUS)
+            return try {
+                NotificationIdentityExpand.initial(listOf(candidate)) ?: fail(Reason.NOTIFICATION_UI_EXPAND_MISSING)
+            } catch (_: NotificationIdentityExpand.Failure) { fail(Reason.NOTIFICATION_UI_EXPAND_CHANGED) }
+        }
+
+        private fun notificationRowAncestor(title: UiObject2, required: Boolean): UiObject2? {
+            var node: UiObject2? = title
+            var child: UiObject2? = null
+            repeat(12) {
+                val current = node ?: if (required) fail(Reason.NOTIFICATION_UI_ROW_ANCESTOR_MISSING) else return null
+                val named = NotificationRowStructure.isRow(NotificationRowStructure.Node(resourceName = current.resourceName))
+                val parent = if (named) null else current.parent
+                if (named || NotificationRowStructure.isRow(
+                        NotificationRowStructure.Node(current.resourceName, current.applicationPackage, current.className,
+                            current.isEnabled, current.isClickable, current.isScrollable),
+                        child?.let { NotificationRowStructure.Node(it.resourceName, it.applicationPackage) },
+                        parent?.let { NotificationRowStructure.Node(it.resourceName, it.applicationPackage, it.className) },
+                    )) return current
+                child = current
+                node = parent
+            }
+            if (required) fail(Reason.NOTIFICATION_UI_ROW_ANCESTOR_LIMIT)
+            return null
+        }
+
+        private suspend fun checkNotificationTerminal(base: Baseline) {
+            if (manualNotification) {
+                // Service notification approval runs on Main. Queue behind that callback so a
+                // completed decision cannot be mistaken for missing evidence before its hook ran.
+                val (success, expectedDigest) = withContext(Dispatchers.Main.immediate) {
+                    NotificationApprovalObservation.lastSuccess to manualObserver().approvalTokenDigest
+                }
+                check(success?.runId == runId && expectedDigest != null && success?.approvalTokenDigest == expectedDigest,
+                    Reason.MANUAL_NOTIFICATION_WRONG_ENTRY)
+            }
+            check(Process.myPid() == base.mainPid && Process.myUid() == base.appUid && bootCount() == base.bootCount,
+                Reason.TARGET_PROCESS)
+            checkMainUnlocked()
+            check(!state.running && state.status == RootPilotStatus.COMPLETED && state.pendingAction == null &&
+                state.config == testConfig() && state.savedTodos.isEmpty() && !state.modelReportedResult,
+                Reason.NOTIFICATION_EXECUTION_FAILED)
+            val value = fixtureState()
+            check(value.getString("instanceId") == base.fixtureInstanceId && value.getInt("processId") == base.fixturePid,
+                Reason.FIXTURE_IDENTITY)
+            targetSameInstance = true
+            targetCommitCalls = value.getInt("commitCalls", -1)
+            check(value.getBoolean("matches") && !value.getBoolean("empty") && targetCommitCalls == 1 &&
+                value.getInt("fieldId") == android.R.id.edit, Reason.FIXTURE_STATE)
+            targetTextMatches = true
+            check(ime.currentId() == base.originalIme, Reason.IME_NOT_RESTORED)
+            checkImeFileAbsent()
+            originalImeRestored = true
+            checkUnchangedFiles(base)
+            check(!exists(snapshotFile), Reason.SNAPSHOT_CHANGED)
+            snapshotCleared = true
+            val records = diskHistory().document.records
+            check(history.value.error == null && history.value.records == records &&
+                records.filter { it.id != runId } == previousRecords, Reason.HISTORY_CHANGED)
+            val record = records.singleOrNull { it.id == runId } ?: fail(Reason.RUN_IDENTITY)
+            check(record.status == RunHistoryStatus.COMPLETED && record.reason == TraceReason.NONE &&
+                !record.eventsTruncated && record.stepCount == 1 && record.events.map(::shape) == NOTIFICATION_TRACE &&
+                record.events.all { it.runId == runId && it.reason == TraceReason.NONE && it.modelFailure == null },
+                Reason.UNEXPECTED_ACTIVITY)
+            confirmedActions = record.events.count { it.stage == TraceStage.APPROVAL && it.event == TraceEvent.CONFIRMED &&
+                it.actionType == TraceActionType.TYPE && it.status == TraceStatus.SUCCESS }
+            val executions = record.events.count { it.stage == TraceStage.EXECUTION && it.event == TraceEvent.START &&
+                it.actionType == TraceActionType.TYPE }
+            val results = record.events.count { it.stage == TraceStage.EXECUTION && it.event == TraceEvent.RESULT &&
+                it.actionType == TraceActionType.TYPE && it.status == TraceStatus.SUCCESS }
+            duplicateExecutions = maxOf(confirmedActions - 1, executions - 1, results - 1, targetCommitCalls - 1)
+            check(confirmedActions == 1 && executions == 1 && results == 1 && duplicateExecutions == 0,
+                Reason.UNEXPECTED_ACTIVITY)
+            val current = logs().filter { it.runId == runId }
+            check(current.map { it.shape } == NOTIFICATION_TRACE && current.all { it.reason == "none" } &&
+                logs().none { it.runId !in previousLogIds && it.runId != runId }, Reason.UNEXPECTED_ACTIVITY)
+            historyFinalized = true
+        }
+
+        suspend fun finishNotificationObservation() {
+            withContext(Dispatchers.Main.immediate) {
+                activityObservation?.let { (context.applicationContext as Application).unregisterActivityLifecycleCallbacks(it) }
+                activityObservation = null
+            }
+            if (verified && restored && cleanupReason == null) {
+                val base = baseline ?: fail(Reason.CLEANUP_UNCONFIRMED)
+                check(state.config == originalConfig(base) && state.apiConfigured == base.apiConfigured && !state.running &&
+                    state.pendingAction == null && !exists(snapshotFile), Reason.RESTORE_FAILED)
+                check(ime.currentId() == base.originalIme, Reason.IME_NOT_RESTORED)
+                checkImeFileAbsent()
+                checkUnchangedFiles(base)
+                checkFixture(base, foreground = false, allowApproved = true)
+                check(diskHistory().document.records == notificationRecords && state.logs == notificationLogs,
+                    Reason.HISTORY_CHANGED)
+            }
+        }
+
+        suspend fun finishManualNotificationObservation() {
+            val observer = manualActivityObservation ?: return
+            try {
+                if (verified && restored && cleanupReason == null) {
+                    val base = baseline ?: fail(Reason.CLEANUP_UNCONFIRMED)
+                    check(state.config == originalConfig(base) && state.apiConfigured == base.apiConfigured && !state.running &&
+                        state.pendingAction == null && !exists(snapshotFile), Reason.RESTORE_FAILED)
+                    check(ime.currentId() == base.originalIme, Reason.IME_NOT_RESTORED)
+                    checkImeFileAbsent()
+                    checkUnchangedFiles(base)
+                    checkFixture(base, foreground = false, allowApproved = true)
+                    val value = fixtureState()
+                    check(value.getBoolean("matches") && !value.getBoolean("empty") && value.getInt("commitCalls", -1) == 1,
+                        Reason.FIXTURE_STATE)
+                    check(diskHistory().document.records == notificationRecords && state.logs == notificationLogs,
+                        Reason.HISTORY_CHANGED)
+                }
+            } finally {
+                // Unregister even when the bounded cleanup coroutine has timed out. Main-queue
+                // closure keeps the observer active through the final restoration readbacks.
+                withContext(NonCancellable + Dispatchers.Main.immediate) {
+                    try { checkManualEvidence(observer.evidence.finish(SystemClock.elapsedRealtime(), requireComplete = verified)) }
+                    finally { (context.applicationContext as Application).unregisterActivityLifecycleCallbacks(observer) }
+                }
+            }
+        }
+
+        fun finishNotificationUi() {
+            val session = notificationUiSession ?: return
+            session.finish()
+            if (cleanupReason == null) cleanupReason = session.cleanupReasons.firstOrNull()
+            if (verified && restored && session.restored && cleanupReason == null) marker("completed")
+        }
+
+        fun reportNotification(failure: Reason?) {
+            InstrumentationRegistry.getInstrumentation().sendStatus(0, Bundle().apply {
+                val baselineRestored = restored && notificationUiSession?.restored == true && cleanupReason == null
+                val passed = verified && baselineRestored && failure == null && cleanupReason == null
+                putString("notificationUiCleanupReasonCodes", notificationUiSession?.cleanupReasons
+                    ?.joinToString(",") { it.name }.orEmpty())
+                putString(if (manualNotification) "manualNotificationStage" else "notificationStage", if (passed) "verified" else "failed")
+                if (manualNotification) {
+                    val evidence = manualActivityObservation?.evidence?.snapshot(SystemClock.elapsedRealtime())
+                    putBoolean("manualMode", true)
+                    putBoolean("manualWaitArmed", manualWaitArmed)
+                    putBoolean("noAutomaticApproval", !notificationUiClicked && (evidence?.noAutomaticApproval ?: true))
+                    putInt("automaticApprovalAttempts", evidence?.automaticApprovalAttempts ?: 0)
+                }
+                putString("reasonCode", failure?.name ?: "NONE")
+                putString("cleanupReasonCode", cleanupReason?.name ?: "NONE")
+                if (::id.isInitialized && validId(id)) putString("recoveryReceiptId", id)
+                runId?.let { putString("runId", it) }
+                putInt("mainPid", Process.myPid())
+                putBoolean("passed", passed)
+                putBoolean("baselineRestored", baselineRestored)
+                putBoolean("notificationUiClicked", notificationUiClicked)
+                putBoolean("notificationActivityObserved", notificationActivityObserved)
+                putBoolean("oldConfirmationInvalid", oldConfirmationInvalid)
+                putBoolean("targetSameInstance", targetSameInstance)
+                putBoolean("targetTextMatches", targetTextMatches)
+                putBoolean("originalImeRestored", originalImeRestored)
+                putBoolean("historyFinalized", historyFinalized)
+                putBoolean("snapshotCleared", snapshotCleared)
+                putInt("confirmedActions", confirmedActions)
+                putInt("targetCommitCalls", targetCommitCalls)
+                putInt("duplicateExecutions", duplicateExecutions)
+            })
         }
 
         private var destroyedInstance: ServiceDestroyObservation.Instance? = null
@@ -1005,6 +1939,51 @@ class TypeProcessRecoveryInstrumentedTest {
         }
     }
 
+    /** Own-component lifecycle and token digest only; no plaintext token is retained or reported. */
+    private class ManualNotificationActivityObservation : Application.ActivityLifecycleCallbacks {
+        val evidence = NotificationManualConfirmationEvidence()
+        @Volatile var approvalTokenDigest: String? = null
+            private set
+        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+            evidence.onCreated(activity, activity is RootPilotNotificationActivity, SystemClock.elapsedRealtime())
+            if (activity is RootPilotNotificationActivity) {
+                approvalTokenDigest = runCatching {
+                    activity.intent.getStringExtra(RootPilotService.EXTRA_APPROVAL_TOKEN)?.takeIf { it.isNotBlank() }
+                        ?.let { digest(it.toByteArray(Charsets.UTF_8)) }
+                }.getOrNull()
+            }
+        }
+        override fun onActivityStarted(activity: Activity) {
+            if (activity !is RootPilotNotificationActivity) evidence.onOtherActivityStarted(SystemClock.elapsedRealtime())
+        }
+        override fun onActivityResumed(activity: Activity) {
+            evidence.onResumed(activity, activity is RootPilotNotificationActivity, SystemClock.elapsedRealtime())
+        }
+        override fun onActivityDestroyed(activity: Activity) {
+            evidence.onDestroyed(activity, activity is RootPilotNotificationActivity, SystemClock.elapsedRealtime())
+        }
+        override fun onActivityPaused(activity: Activity) = Unit
+        override fun onActivityStopped(activity: Activity) = Unit
+        override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+    }
+
+    /** Observe only this in-process component; never inspect notification extras or system events. */
+    private class NotificationActivityObservation : Application.ActivityLifecycleCallbacks {
+        @Volatile var created = 0
+        @Volatile var resumed = 0
+        @Volatile var destroyed = 0
+        private var instance: Activity? = null
+        override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+            if (activity is RootPilotNotificationActivity) { created++; instance = activity }
+        }
+        override fun onActivityResumed(activity: Activity) { if (activity === instance) resumed++ }
+        override fun onActivityDestroyed(activity: Activity) { if (activity === instance) destroyed++ }
+        override fun onActivityStarted(activity: Activity) = Unit
+        override fun onActivityPaused(activity: Activity) = Unit
+        override fun onActivityStopped(activity: Activity) = Unit
+        override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+    }
+
     @Serializable
     private data class Baseline(
         val id: String, val mainPid: Int, val appUid: Int, val bootCount: Int, val apiConfigured: Boolean,
@@ -1037,12 +2016,36 @@ class TypeProcessRecoveryInstrumentedTest {
         RECEIPT_EXPIRED, RECOVERY_STATE, UPLOAD_CONSENT, RECOVER_NOT_REJECTED, CLEANUP_UNCONFIRMED,
         DISCARD_FAILED, RESTORE_FAILED, REPORT_FAILED, APPROVAL_UNAVAILABLE, BOUNDARY_INVALID, TIMEOUT, UNEXPECTED,
         SERVICE_OBSERVATION, SERVICE_STOP_REJECTED,
+        NOTIFICATION_UNAVAILABLE, NOTIFICATION_UI_UNAVAILABLE, NOTIFICATION_ACTIVITY_UNOBSERVED,
+        NOTIFICATION_EXECUTION_FAILED, OLD_CONFIRMATION_ACCEPTED,
+        MANUAL_NOTIFICATION_EARLY_ACTIVITY, MANUAL_NOTIFICATION_TIMEOUT, MANUAL_NOTIFICATION_AUTOMATIC_APPROVAL,
+        MANUAL_NOTIFICATION_STATE, MANUAL_NOTIFICATION_WRONG_ENTRY,
+        NOTIFICATION_MANAGER_ACCESS, NOTIFICATION_QUERY, NOTIFICATION_OBSERVER_REGISTER,
+        NOTIFICATION_ACCESSIBILITY_BASELINE, NOTIFICATION_UI_CONFIGURATOR, NOTIFICATION_UI_AUTOMATION,
+        NOTIFICATION_UI_AUTOMATION_RELEASE, NOTIFICATION_UI_CONFIGURATOR_RESTORE, NOTIFICATION_ACCESSIBILITY_RESTORE,
+        NOTIFICATION_UI_DEVICE, NOTIFICATION_UI_OPEN, NOTIFICATION_UI_ROW_QUERY,
+        NOTIFICATION_UI_EXPAND, NOTIFICATION_UI_ACTION_QUERY, NOTIFICATION_UI_CLICK,
+        NOTIFICATION_UI_OPEN_REJECTED, NOTIFICATION_UI_TITLE_WAIT_TIMEOUT,
+        NOTIFICATION_UI_TITLE_MISSING, NOTIFICATION_UI_TITLE_AMBIGUOUS,
+        NOTIFICATION_UI_ROW_ANCESTOR_MISSING, NOTIFICATION_UI_ROW_ANCESTOR_LIMIT,
+        NOTIFICATION_UI_APP_LABEL_EMPTY, NOTIFICATION_UI_APP_LABEL_MISSING, NOTIFICATION_UI_APP_LABEL_AMBIGUOUS,
+        NOTIFICATION_UI_ROW_TITLE_MISSING, NOTIFICATION_UI_ROW_TITLE_AMBIGUOUS,
+        NOTIFICATION_UI_ROW_STRUCTURE, NOTIFICATION_UI_ROW_CHANGED, NOTIFICATION_UI_EXPAND_CHANGED,
+        NOTIFICATION_UI_EXPAND_MISSING, NOTIFICATION_UI_EXPAND_AMBIGUOUS,
+        NOTIFICATION_UI_EXPAND_DISABLED, NOTIFICATION_UI_EXPAND_NOT_CLICKABLE, NOTIFICATION_UI_EXPAND_WAIT_TIMEOUT,
+        NOTIFICATION_UI_ACTION_MISSING, NOTIFICATION_UI_ACTION_AMBIGUOUS,
+        NOTIFICATION_UI_ACTION_DISABLED, NOTIFICATION_UI_ACTION_NOT_CLICKABLE,
     }
 
     private companion object {
         const val TARGET = "com.example.agent"
         const val FIXTURE = "com.example.rootpilot.fixture"
         const val EXPECTED = "执行模式验收通过"
+        const val SYSTEM_UI = "com.android.systemui"
+        const val NOTIFICATION_TITLE = "RootPilot · 第 1 步"
+        const val NOTIFICATION_ACTION = "确认当前动作"
+        const val NOTIFICATION_CHANNEL = "rootpilot_agent"
+        const val NOTIFICATION_ID = 2001
         const val UPLOAD_REJECTION = "发送截图前请先打开上传确认"
         const val MAX_FILE = 64 * 1024
         const val POLL = 50L
@@ -1065,6 +2068,8 @@ class TypeProcessRecoveryInstrumentedTest {
         val SUBMITTED_TRACE = EXPECTED_TRACE + listOf(
             "APPROVAL/CONFIRMED/SUCCESS/TYPE/0", "EXECUTION/START/STARTED/TYPE/0", "EXECUTION/RESULT/SUCCESS/TYPE/0",
         )
+
+        val NOTIFICATION_TRACE = SUBMITTED_TRACE + "SETTLE/RUN_END/SUCCESS/TYPE/0"
 
         fun descendants(view: View): Sequence<View> = sequence {
             yield(view)

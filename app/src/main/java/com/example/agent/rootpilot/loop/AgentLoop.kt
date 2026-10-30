@@ -26,6 +26,8 @@ import com.example.agent.rootpilot.screen.ScreenshotProvider
 import com.example.agent.rootpilot.screen.ScreenObservation
 import com.example.agent.rootpilot.screen.sameTarget
 import com.example.agent.rootpilot.model.ExecutionDisplay
+import com.example.agent.rootpilot.model.ConfirmationStage
+import com.example.agent.rootpilot.root.TypeConfirmationFlow
 import java.security.MessageDigest
 import java.util.UUID
 import java.time.OffsetDateTime
@@ -55,21 +57,65 @@ data class AgentLoopRequest(
 
 class ActionApproval internal constructor(
     private val decision: CompletableDeferred<Boolean>,
+    val stage: ConfirmationStage = ConfirmationStage.ACTION,
 ) {
     val token: String = UUID.randomUUID().toString()
 
     fun approve() {
-        decision.complete(true)
+        if (stage == ConfirmationStage.ACTION) decision.complete(true)
     }
 
     fun approve(expectedToken: String): Boolean =
-        expectedToken == token && decision.complete(true)
+        stage == ConfirmationStage.ACTION && expectedToken == token && decision.complete(true)
 
-    fun reject() {
-        decision.complete(false)
+    internal fun acceptPreparationFromNotification(expectedToken: String): Boolean =
+        stage == ConfirmationStage.TYPE_PREPARE && expectedToken == token && decision.complete(true)
+
+    internal fun approveTypeFromIme(expectedToken: String): Boolean =
+        stage == ConfirmationStage.TYPE_COMMIT && expectedToken == token && decision.complete(true)
+
+    fun reject() { decision.complete(false) }
+    suspend fun await(): Boolean = decision.await()
+}
+
+/** One immutable Type step, including the gap between preparation and bound confirmation. */
+class TypeApprovalScope internal constructor(val step: Int, val action: RootPilotAction.Type) {
+    private val lock = Any()
+    val id: String = UUID.randomUUID().toString()
+    val preparation = ActionApproval(CompletableDeferred(), ConfirmationStage.TYPE_PREPARE)
+    private var commit: ActionApproval? = null
+    private var prepared = false
+    private var closed = false
+    val isClosed: Boolean get() = synchronized(lock) { closed }
+
+    fun acceptPreparationFromNotification(token: String): Boolean = synchronized(lock) {
+        if (closed || prepared || token != preparation.token) return false
+        prepared = true
+        if (preparation.acceptPreparationFromNotification(token)) true
+        else { prepared = false; false }
     }
 
-    suspend fun await(): Boolean = decision.await()
+    internal fun beginCommit(): ActionApproval? = synchronized(lock) {
+        if (closed || !prepared || commit != null) return null
+        ActionApproval(CompletableDeferred(), ConfirmationStage.TYPE_COMMIT).also {
+            check(it.token != preparation.token)
+            commit = it
+        }
+    }
+
+    fun approveTypeFromIme(token: String): Boolean = synchronized(lock) {
+        !closed && prepared && commit?.approveTypeFromIme(token) == true
+    }
+
+    fun close() = synchronized(lock) {
+        closed = true
+        preparation.reject()
+        commit?.reject()
+    }
+
+    internal fun ensureOpen() {
+        if (isClosed) throw CancellationException("Type confirmation closed")
+    }
 }
 
 sealed interface AgentLoopEvent {
@@ -83,10 +129,13 @@ sealed interface AgentLoopEvent {
 
     data class ModelOutput(val step: Int, val snapshot: ModelStreamSnapshot) : AgentLoopEvent
 
+    data class PreparingType(val scope: TypeApprovalScope) : AgentLoopEvent
+
     data class AwaitingConfirmation(
         val step: Int,
         val action: RootPilotAction,
         val approval: ActionApproval,
+        val typeScope: TypeApprovalScope? = null,
     ) : AgentLoopEvent
 
     data class Executing(val step: Int, val action: RootPilotAction) : AgentLoopEvent
@@ -449,8 +498,11 @@ class AgentLoop(
                 is ActionPolicyResult.Allowed -> policyResult.action
             }
 
+            val stagedType = action is RootPilotAction.Type &&
+                request.config.executionDisplay == ExecutionDisplay.MAIN &&
+                rootExecutor.typeConfirmationFlow == TypeConfirmationFlow.MAIN_IME_TWO_STAGE
             val approval = if (
-                actionPolicy.requiresConfirmation(
+                !stagedType && actionPolicy.requiresConfirmation(
                     action = action,
                     manualConfirmation = request.config.manualConfirmation || request.config.executionDisplay == ExecutionDisplay.VIRTUAL,
                 )
@@ -464,18 +516,45 @@ class AgentLoop(
                 onEvent(AgentLoopEvent.Failed("当前执行屏幕不支持该动作"))
                 return
             }
+            val typeScope = if (stagedType) TypeApprovalScope(step, action as RootPilotAction.Type) else null
+            try {
+            if (typeScope != null) {
+                onEvent(AgentLoopEvent.PreparingType(typeScope))
+                if (!typeScope.preparation.await()) {
+                    onEvent(AgentLoopEvent.Stopped)
+                    return
+                }
+                currentCoroutineContext().ensureActive()
+                typeScope.ensureOpen()
+                if (!observation.sameWindow(rootExecutor.observeScreen())) {
+                    trace.fail(TraceReason.SCREEN_CONTEXT_CHANGED)
+                    onEvent(AgentLoopEvent.Failed("准备输入后目标窗口已变化，未切换输入法或输入文字"))
+                    return
+                }
+                currentCoroutineContext().ensureActive()
+                typeScope.ensureOpen()
+            }
             var rejected = false
             var contextChanged = false
             trace.stage = TraceStage.EXECUTION
             val executionResult = rootExecutor.executeConfirmed(executableAction) { targetPackage ->
-                if (approval != null) {
+                if (typeScope != null && (targetPackage == null || targetPackage != observation.focusedPackage)) {
+                    contextChanged = true
+                    return@executeConfirmed false
+                }
+                val finalApproval = if (typeScope != null) {
+                    typeScope.ensureOpen()
+                    typeScope.beginCommit() ?: throw CancellationException("Type confirmation unavailable")
+                } else approval
+                if (finalApproval != null) {
                     trace.stage = TraceStage.APPROVAL
                     trace.record(TraceEvent.WAITING, TraceStatus.WAITING)
                     val preview = if (action is RootPilotAction.Type && targetPackage != null) {
                         action.copy(reason = "输入到 $targetPackage：${action.reason}")
                     } else action
-                    onEvent(AgentLoopEvent.AwaitingConfirmation(step, preview, approval))
-                    rejected = !approval.await()
+                    onEvent(AgentLoopEvent.AwaitingConfirmation(step, preview, finalApproval, typeScope))
+                    rejected = !finalApproval.await()
+                    if (!rejected) typeScope?.ensureOpen()
                     trace.approval(!rejected)
                 }
                 if (!rejected) {
@@ -520,6 +599,9 @@ class AgentLoop(
                     trace.record(TraceEvent.RESULT, TraceStatus.SUCCESS)
                     history += "step=$step action=${action.describeForHistory()} result=success"
                 }
+            }
+            } finally {
+                typeScope?.close()
             }
             trace.stage = TraceStage.SETTLE
             onEvent(AgentLoopEvent.WaitingScreen(step))

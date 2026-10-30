@@ -258,6 +258,7 @@ class RootPilotLiveOverlayInstrumentedTest {
                                 panelOverlay.hide()
                                 report("not_completed")
                             }
+                            is AgentLoopEvent.PreparingType,
                             is AgentLoopEvent.Executing, is AgentLoopEvent.WaitingScreen,
                             is AgentLoopEvent.TodoSaved -> error("unexpected_action_event")
                         }

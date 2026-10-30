@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import uuid
+from typing import NamedTuple
 
 PACKAGE = 'com.example.agent'
 METHOD = 'realServiceDestroyedAtUnapprovedType'
@@ -33,19 +34,46 @@ REPORT_FIELDS = set(TRUE_FIELDS + ZERO_FIELDS) | {
 }
 
 
+class AcceptanceProfile(NamedTuple):
+    method: str
+    gate: str
+    stage: str
+    true_fields: tuple
+    counts: tuple
+    authorization: str
+    authorization_help: str
+    test_class: str = TEST_CLASS
+    timeout_seconds: int = 0
+    diagnostic_fields: tuple = ()
+
+    @property
+    def report_fields(self):
+        return set(self.true_fields) | {key for key, _ in self.counts} | set(self.diagnostic_fields) | {
+            self.stage, 'reasonCode', 'cleanupReasonCode', 'recoveryReceiptId', 'runId', 'mainPid',
+        }
+
+
+SERVICE_PROFILE = AcceptanceProfile(
+    METHOD, 'typeServiceDestroy', 'serviceDestroyStage', TRUE_FIELDS,
+    tuple((key, 0) for key in ZERO_FIELDS),
+    '--allow-live-execution-and-service-destroy',
+    'Authorize real model/screenshot upload of the fixed fixture and Context.stopService; zero approvals',
+)
+
+
 def require(condition, reason):
     if not condition:
         raise RuntimeError(reason)
 
 
-def parse_args(argv=None):
+def parse_args(argv=None, *, profile=SERVICE_PROFILE):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serial', required=True)
     parser.add_argument('--expected-hardware-serial', required=True)
     parser.add_argument('--expected-model', required=True)
     parser.add_argument('--output', required=True, help='Fresh direct child directory of /tmp')
-    parser.add_argument('--allow-live-execution-and-service-destroy', action='store_true', required=True,
-                        help='Authorize real model/screenshot upload of the fixed fixture and Context.stopService; zero approvals')
+    parser.add_argument(profile.authorization, action='store_true', required=True,
+                        help=profile.authorization_help)
     args = parser.parse_args(argv)
     for value in (args.serial, args.expected_hardware_serial, args.expected_model):
         if not value.strip() or value.startswith('-') or any(ord(c) < 32 for c in value):
@@ -55,27 +83,49 @@ def parse_args(argv=None):
 
 class Evidence:
     """Read instrumentation frames without persisting arbitrary runner/error output."""
-    def __init__(self):
+    def __init__(self, profile=SERVICE_PROFILE):
+        self.profile = profile
         self.frame = {}
         self.reports = []
         self.ok_count = 0
         self.success_codes = 0
         self.failure = False
+        self.status_counts = {}
+
+    def failure_diagnostics(self, receipt_id, pid):
+        # Keep only bounded counters and an identity-bound, scalar-whitelisted receipt.
+        # Neither a partial frame nor arbitrary runner messages are diagnostic evidence.
+        result = dict(reportCount=len(self.reports), openReport=bool(self.frame),
+                      statusCounts=dict(self.status_counts), runnerFailure=self.failure,
+                      okCount=self.ok_count, successCodeCount=self.success_codes)
+        if len(self.reports) == 1:
+            report = self.reports[0]
+            required = self.profile.report_fields - set(self.profile.diagnostic_fields) - {'runId'}
+            if self.profile == SERVICE_PROFILE and report.get(self.profile.stage) == 'failed':
+                # Service failures intentionally omit success-only facts and may lack a runId.
+                required = {self.profile.stage, 'reasonCode', 'cleanupReasonCode',
+                            'recoveryReceiptId', 'mainPid', 'passed', 'baselineRestored'}
+            if (required <= report.keys() and report.get(self.profile.stage) in ('failed', 'verified')
+                    and report.get('recoveryReceiptId') == receipt_id and report.get('mainPid') == str(pid)):
+                result['receipt'] = dict(report)
+        return result
 
     def feed(self, line):
         line = line.strip()
         if line.startswith('INSTRUMENTATION_STATUS: '):
             key, sep, value = line[len('INSTRUMENTATION_STATUS: '):].partition('=')
-            if sep and key in REPORT_FIELDS:
+            if sep and key in self.profile.report_fields:
                 require(key not in self.frame, 'duplicate_receipt_field')
                 # Only a constrained scalar can ever enter an evidence file.
                 require(re.fullmatch(r'[A-Za-z0-9_\-]{1,128}', value) is not None, 'invalid_receipt_scalar')
                 self.frame[key] = value
         elif line.startswith('INSTRUMENTATION_STATUS_CODE: '):
             code = line.partition(': ')[2]
+            category = code if code in ('-4', '-3', '-2', '-1', '0', '1', '2') else 'other'
+            self.status_counts[category] = self.status_counts.get(category, 0) + 1
             if code not in ('0', '1', '2'):
                 self.failure = True
-            if 'serviceDestroyStage' in self.frame:
+            if self.profile.stage in self.frame:
                 self.reports.append(self.frame)
             self.frame = {}
         elif line == 'INSTRUMENTATION_CODE: -1':
@@ -94,7 +144,7 @@ class Evidence:
         require(self.ok_count == 1 and self.success_codes == 1, 'single_test_completion_missing')
         require(len(self.reports) == 1 and not self.frame, 'single_receipt_missing')
         report = self.reports[0]
-        require(report.get('serviceDestroyStage') == 'verified', 'verification_not_completed')
+        require(report.get(self.profile.stage) == 'verified', 'verification_not_completed')
         require(report.get('reasonCode') == 'NONE' and report.get('cleanupReasonCode') == 'NONE', 'verification_or_cleanup_failed')
         require(report.get('recoveryReceiptId') == receipt_id and report.get('mainPid') == str(pid), 'receipt_identity_mismatch')
         try:
@@ -102,12 +152,12 @@ class Evidence:
         except ValueError:
             valid_run = False
         require(valid_run, 'invalid_run_identity')
-        require(all(report.get(k) == 'true' for k in TRUE_FIELDS), 'required_evidence_missing')
-        require(all(report.get(k) == '0' for k in ZERO_FIELDS), 'side_effect_evidence_missing')
+        require(all(report.get(k) == 'true' for k in self.profile.true_fields), 'required_evidence_missing')
+        require(all(report.get(k) == str(expected) for k, expected in self.profile.counts), 'side_effect_evidence_missing')
         return report
 
 
-def run(args):
+def run(args, *, profile=SERVICE_PROFILE):
     path = pathlib.Path(args.output)
     root = path.resolve()
     if path.is_symlink() or root.exists() or root.parent != pathlib.Path('/tmp').resolve():
@@ -117,7 +167,7 @@ def run(args):
     summary = {'receiptId': receipt_id, 'passed': False, 'deviceCleanupUnconfirmed': False}
     child = None
     thread = None
-    evidence = Evidence()
+    evidence = Evidence(profile)
     adb_prefix = ['adb', '-s', args.serial]
 
     def adb(argv):
@@ -146,8 +196,8 @@ def run(args):
         accessibility = adb(['shell', 'settings', 'get', 'secure', 'enabled_accessibility_services'])
         summary.update(mainPid=before[0], mainUid=before[1], mainStartTicks=before[2])
         command = adb_prefix + ['shell', 'am', 'instrument', '-w', '-r', '--no-restart',
-            '-e', 'class', TEST_CLASS + '#' + METHOD,
-            '-e', 'typeServiceDestroy', 'true',
+            '-e', 'class', profile.test_class + '#' + profile.method,
+            '-e', profile.gate, 'true',
             '-e', 'recoveryBaseline', 'empty_task_saved_api_or_defaults',
             '-e', 'recoveryReceiptId', receipt_id,
             '-e', 'expectedRootPilotPid', str(before[0]),
@@ -184,7 +234,7 @@ def run(args):
 
         thread = threading.Thread(target=pump, daemon=True)
         thread.start()
-        deadline = time.monotonic() + TIMEOUT_SECONDS
+        deadline = time.monotonic() + (profile.timeout_seconds or TIMEOUT_SECONDS)
         while True:
             remaining = deadline - time.monotonic()
             require(remaining > 0, 'instrumentation_timeout')
@@ -235,14 +285,15 @@ def run(args):
                     child.stdout.close()
             if not summary['passed']:
                 summary['deviceCleanupUnconfirmed'] = True
+                summary['failureDiagnostics'] = evidence.failure_diagnostics(receipt_id, summary.get('mainPid'))
         with (root / 'summary.json').open('x') as output:
             json.dump(summary, output, indent=2)
         print('passed=' + str(summary['passed']) + ' evidence=' + str(root), flush=True)
     return 0 if summary['passed'] else 2
 
 
-def main(argv=None):
-    return run(parse_args(argv))
+def main(argv=None, *, profile=SERVICE_PROFILE):
+    return run(parse_args(argv, profile=profile), profile=profile)
 
 
 if __name__ == '__main__':

@@ -303,7 +303,12 @@ fun RootPilotScreen(
                                         if (it is RootPilotAction.Type) it.overlayDetails() else it.describe()
                                     } ?: "等待动作信息", modifier = Modifier.testTag("pending_action"))
                                     if (virtualDisplay) VirtualDisplayFramePreview(state)
-                                    Button(onClick = onConfirmAction, enabled = state.pendingAction != null,
+                                    if (state.confirmation != null) Text(
+                                        if (state.confirmation.stage == com.example.agent.rootpilot.model.ConfirmationStage.TYPE_PREPARE)
+                                            "请从通知选择准备输入；这不会提交文字"
+                                        else "请在输入法面板核对完整文本并最终确认")
+                                    Button(onClick = onConfirmAction, enabled = state.pendingAction != null &&
+                                        (state.confirmation == null || state.confirmation.stage == com.example.agent.rootpilot.model.ConfirmationStage.ACTION),
                                         colors = ButtonDefaults.buttonColorsPrimary(),
                                         modifier = Modifier.fillMaxWidth().testTag("confirm_action")) {
                                         Text(if (state.pendingAction is RootPilotAction.AskUser) "我已按提示处理，继续" else "确认执行当前动作")

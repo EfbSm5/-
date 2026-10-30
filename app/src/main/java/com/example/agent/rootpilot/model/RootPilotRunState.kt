@@ -17,7 +17,13 @@ enum class RootPilotStatus {
     RECOVERY_REQUIRED,
 }
 
+enum class ConfirmationStage { ACTION, TYPE_PREPARE, TYPE_COMMIT }
+
+/** Ephemeral UI binding; never part of a run snapshot. */
+data class ConfirmationUi(val stage: ConfirmationStage, val localImeToken: String? = null)
+
 data class RootPilotUiState(
+    val confirmation: ConfirmationUi? = null,
     val config: RootPilotConfig = RootPilotConfig(),
     val apiConfigured: Boolean = false,
     val running: Boolean = false,
