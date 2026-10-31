@@ -56,8 +56,10 @@ fun ChatScreen(
     modifier: Modifier = Modifier,
     fileControls: (@Composable () -> Unit)? = null,
     onWebSearchChange: ((Boolean) -> Unit)? = null,
+    historyDialog: (@Composable (onClose: () -> Unit) -> Unit)? = null,
 ) {
     val keyboardVisible = WindowInsets.isImeVisible
+    var showHistory by rememberSaveable { mutableStateOf(false) }
     val list = rememberLazyListState()
     var followTail by remember { mutableStateOf(true) }
     var autoScrolling by remember { mutableStateOf(false) }
@@ -83,11 +85,15 @@ fun ChatScreen(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Text("DeepSeek 聊天", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                if (historyDialog != null) Button(onClick = { showHistory = true }, enabled = !state.generating,
+                    insideMargin = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = Modifier.testTag("chat_history")) { Text("历史") }
                 Button(onClick = onNewConversation, enabled = !state.generating,
                     insideMargin = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                     modifier = Modifier.testTag("chat_new")) { Text("新对话") }
             }
-            Text("聊天不截图、不操作手机界面；历史仅保留在本次会话内存中，不跨进程。",
+            Text(if (historyDialog != null) "聊天不截图、不操作手机界面；普通聊天的已完成问答加密保存在本机，文件 Agent 对话不保存。"
+                else "聊天不截图、不操作手机界面；历史仅保留在本次会话内存中，不跨进程。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
             if (onWebSearchChange != null) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -185,6 +191,7 @@ fun ChatScreen(
                 item(key = "tail") { Spacer(Modifier.height(1.dp)) }
             }
         }
+        if (showHistory && historyDialog != null) historyDialog { showHistory = false }
         if (!configured) Text("请先在设置中保存 API 配置。")
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         Card(Modifier.fillMaxWidth()) {

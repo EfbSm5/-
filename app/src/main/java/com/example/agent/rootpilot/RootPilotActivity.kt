@@ -25,6 +25,7 @@ import androidx.compose.runtime.setValue
 import com.example.agent.ui.theme.AgentTheme
 import com.example.agent.rootpilot.ui.RootPilotScreen
 import com.example.agent.rootpilot.ui.ChatScreen
+import com.example.agent.rootpilot.ui.ChatHistoryDialog
 import com.example.agent.rootpilot.ui.RunHistoryScreen
 import com.example.agent.rootpilot.ui.FileAgentPanel
 import com.example.agent.rootpilot.ui.WorkspaceBrowserDialog
@@ -72,6 +73,7 @@ class RootPilotActivity : ComponentActivity() {
                 val browserState by viewModel.workspaceBrowserState.collectAsState()
                 val fileWorkspaceBusy by viewModel.fileWorkspaceBusy.collectAsState()
                 val historyState by viewModel.historyState.collectAsState()
+                val chatHistoryState by viewModel.chatHistoryState.collectAsState()
                 val uiTreeConnected by RootPilotAccessibilityService.connected.collectAsState()
                 DisposableEffect(apiState.editing) {
                     if (apiState.editing) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -93,6 +95,13 @@ class RootPilotActivity : ComponentActivity() {
                             onStop = viewModel::stopChat,
                             onNewConversation = viewModel::newChat,
                             onWebSearchChange = if (fileState.enabled) null else viewModel::setChatWebSearch,
+                            historyDialog = { onClose ->
+                                ChatHistoryDialog(chatHistoryState, chatState.sessionId, chatState.generating,
+                                    onOpen = if (fileState.enabled || fileWorkspaceBusy) null else viewModel::openChatSession,
+                                    onDelete = viewModel::deleteChatSession,
+                                    onClear = viewModel::clearChatHistory,
+                                    onClose = onClose)
+                            },
                             fileControls = {
                                 FileAgentPanel(fileState.copy(busy = fileState.busy || fileWorkspaceBusy), chatState.generating,
                                     onChooseDirectory = {

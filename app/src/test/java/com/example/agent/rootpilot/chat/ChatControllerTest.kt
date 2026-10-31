@@ -30,6 +30,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
+import java.io.IOException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -451,6 +452,210 @@ class ChatControllerTest {
         assertFalse(controller.state.value.webSearch)
     }
 
+    @Test
+    fun completedPlainChatIsSavedToOneSessionWithoutReasoningOrIncompleteTurns() = runTest {
+        val storage = MemoryHistory()
+        val history = ChatHistoryRepository(storage, backgroundScope)
+        val client = RecordingClient { messages, update ->
+            update(ModelStreamSnapshot(reasoning = "PRIVATE_REASONING", content = "draft"))
+            if (messages.last().content == "fail") DeepSeekActionResult.Failure("request failed")
+            else DeepSeekActionResult.Success("answer to ${messages.last().content}")
+        }
+        val controller = ChatController(this, client, history = history, clock = { 42 })
+        for (prompt in listOf("  first\nquestion ", "fail", "second")) {
+            controller.updateDraft(prompt)
+            controller.send(config, configured = true)
+            runCurrent()
+        }
+        val saved = storage.sessions.values.single()
+        assertEquals(controller.state.value.sessionId, saved.id)
+        assertEquals("first question", saved.title)
+        assertEquals(42L, saved.updatedAtEpochMs)
+        assertEquals(listOf(
+            SavedChatMessage("user", "first\nquestion"), SavedChatMessage("assistant", "answer to first\nquestion"),
+            SavedChatMessage("user", "second"), SavedChatMessage("assistant", "answer to second"),
+        ), saved.messages)
+        assertEquals(listOf(saved.id), history.state.value.sessions.map { it.id })
+        assertEquals(2, storage.writes)
+    }
+
+    @Test
+    fun searchedAnswerKeepsSourcesWhenSaved() = runTest {
+        val storage = MemoryHistory()
+        val controller = ChatController(this, RecordingClient(), search = RecordingSearch(),
+            history = ChatHistoryRepository(storage, backgroundScope))
+        controller.setWebSearch(true)
+        controller.updateDraft("news")
+        controller.send(config, configured = true)
+        runCurrent()
+        assertEquals(SavedChatMessage("assistant", "a", searched = true,
+            sources = listOf(SavedChatSource("Title A", "https://example.com/a", "Site"))),
+            storage.sessions.values.single().messages.last())
+    }
+
+    @Test
+    fun fileAgentConversationIsNeverSavedEvenAfterAgentIsTurnedOff() = runTest {
+        val storage = MemoryHistory()
+        val fileAgent = FileAgentController(NoFiles(), RecordingToolClient())
+        val controller = ChatController(this, RecordingClient(), fileAgent, history = ChatHistoryRepository(storage, backgroundScope))
+        fileAgent.updateWorkspace("Test directory", emptyList())
+        fileAgent.setEnabled(true)
+        controller.updateDraft("edit notes")
+        controller.send(config, configured = true)
+        runCurrent()
+        fileAgent.setEnabled(false)
+        controller.updateDraft("plain follow up")
+        controller.send(config, configured = true)
+        runCurrent()
+        assertTrue(storage.sessions.isEmpty())
+        assertNull(controller.state.value.sessionId)
+
+        controller.newConversation()
+        controller.updateDraft("fresh plain chat")
+        controller.send(config, configured = true)
+        runCurrent()
+        assertEquals(1, storage.sessions.size)
+    }
+
+    @Test
+    fun apiConfigChangeStartsNewSessionAndKeepsEarlierSavedSession() = runTest {
+        val storage = MemoryHistory()
+        val client = RecordingClient()
+        val controller = ChatController(this, client, history = ChatHistoryRepository(storage, backgroundScope))
+        controller.updateDraft("old account question")
+        controller.send(config, configured = true)
+        runCurrent()
+        val first = controller.state.value.sessionId!!
+        controller.updateDraft("new model question")
+        controller.send(config.copy(model = "other-test-model"), configured = true)
+        runCurrent()
+        val second = controller.state.value.sessionId!!
+        assertTrue(first != second)
+        assertEquals(listOf(ChatTurn("user", "new model question")), client.requests.last())
+        assertEquals(setOf(first, second), storage.sessions.keys)
+        assertEquals("old account question", storage.sessions.getValue(first).messages.first().content)
+    }
+
+    @Test
+    fun openedSessionContinuesAsHistoryAndSavesBackToTheSameSession() = runTest {
+        val existing = SavedChatSession(UUID_A, "earlier", 1, listOf(
+            SavedChatMessage("user", "earlier"),
+            SavedChatMessage("assistant", "reply", searched = true, sources = listOf(SavedChatSource("T", "https://example.com/t"))),
+        ))
+        val storage = MemoryHistory(existing)
+        val history = ChatHistoryRepository(storage, backgroundScope)
+        val client = RecordingClient()
+        val controller = ChatController(this, client, history = history, clock = { 7 })
+        controller.setWebSearch(true)
+        controller.updateDraft("kept draft")
+        controller.openSession(UUID_A)
+        runCurrent()
+        val state = controller.state.value
+        assertEquals(UUID_A, state.sessionId)
+        assertEquals("kept draft", state.draft)
+        assertFalse(state.webSearch)
+        assertTrue(state.messages.all { it.complete && it.reasoning.isEmpty() })
+        assertEquals(listOf(WebSearchSource("T", "https://example.com/t")), state.messages.last().sources)
+        assertTrue(client.requests.isEmpty())
+
+        controller.send(config, configured = true)
+        runCurrent()
+        assertEquals(listOf(ChatTurn("user", "earlier"), ChatTurn("assistant", "reply"), ChatTurn("user", "kept draft")),
+            client.requests.single())
+        val saved = storage.sessions.getValue(UUID_A)
+        assertEquals(4, saved.messages.size)
+        assertEquals(7L, saved.updatedAtEpochMs)
+        assertEquals("earlier", saved.title)
+    }
+
+    @Test
+    fun openIsRefusedForFileAgentAndUnreadableSessionsAndStaleReadsAreDropped() = runTest {
+        val existing = SavedChatSession(UUID_A, "earlier", 1, listOf(SavedChatMessage("user", "q"), SavedChatMessage("assistant", "a")))
+        val storage = MemoryHistory(existing)
+        val history = ChatHistoryRepository(storage, backgroundScope)
+        val fileAgent = FileAgentController(NoFiles(), RecordingToolClient())
+        val controller = ChatController(this, RecordingClient(), fileAgent, history = history)
+        fileAgent.updateWorkspace("Test directory", emptyList())
+        fileAgent.setEnabled(true)
+        controller.openSession(UUID_A)
+        runCurrent()
+        assertTrue(controller.state.value.messages.isEmpty())
+        fileAgent.setEnabled(false)
+
+        controller.openSession(UUID_A)
+        controller.newConversation()
+        runCurrent()
+        assertTrue(controller.state.value.messages.isEmpty())
+        assertNull(controller.state.value.sessionId)
+
+        storage.damaged += UUID_A
+        controller.openSession(UUID_A)
+        runCurrent()
+        assertTrue(controller.state.value.messages.isEmpty())
+        assertEquals("会话无法读取，可能已删除或已损坏", controller.state.value.error)
+    }
+
+    @Test
+    fun deletingOrClearingOpenSessionClosesItSoLaterTurnsCannotRecreateIt() = runTest {
+        val storage = MemoryHistory()
+        val history = ChatHistoryRepository(storage, backgroundScope)
+        val controller = ChatController(this, RecordingClient(), history = history)
+        controller.updateDraft("first")
+        controller.send(config, configured = true)
+        runCurrent()
+        val id = controller.state.value.sessionId!!
+        controller.deleteSession(id)
+        runCurrent()
+        assertTrue(storage.sessions.isEmpty())
+        assertTrue(controller.state.value.messages.isEmpty())
+        assertNull(controller.state.value.sessionId)
+
+        controller.updateDraft("second")
+        controller.send(config, configured = true)
+        runCurrent()
+        val other = controller.state.value.sessionId!!
+        assertTrue(other != id)
+        controller.clearHistory()
+        runCurrent()
+        assertTrue(storage.sessions.isEmpty())
+        assertTrue(controller.state.value.messages.isEmpty())
+        assertTrue(history.state.value.sessions.isEmpty())
+    }
+
+    @Test
+    fun historyChangesAreLockedWhileGenerating() = runTest {
+        val existing = SavedChatSession(UUID_A, "earlier", 1, listOf(SavedChatMessage("user", "q"), SavedChatMessage("assistant", "a")))
+        val storage = MemoryHistory(existing)
+        val client = RecordingClient { _, _ -> kotlinx.coroutines.awaitCancellation() }
+        val controller = ChatController(this, client, history = ChatHistoryRepository(storage, backgroundScope))
+        controller.updateDraft("running")
+        controller.send(config, configured = true)
+        runCurrent()
+        controller.openSession(UUID_A)
+        controller.deleteSession(UUID_A)
+        controller.clearHistory()
+        runCurrent()
+        assertEquals(setOf(UUID_A), storage.sessions.keys)
+        assertEquals("running", controller.state.value.messages.first().content)
+        controller.stop()
+        runCurrent()
+        assertEquals(setOf(UUID_A), storage.sessions.keys)
+    }
+
+    private class MemoryHistory(vararg initial: SavedChatSession) : ChatHistoryStorage {
+        val sessions = linkedMapOf<String, SavedChatSession>().apply { initial.forEach { put(it.id, it) } }
+        val damaged = mutableSetOf<String>()
+        var writes = 0
+        override fun list() = ChatHistoryListing(sessions.values.map { it.summary() }, 0)
+        override fun read(id: String): SavedChatSession? {
+            if (id in damaged) throw IOException("damaged")
+            return sessions[id]
+        }
+        override fun write(session: SavedChatSession) { writes++; sessions[session.id] = session }
+        override fun delete(id: String) { sessions.remove(id) }
+        override fun clear() = sessions.clear()
+    }
+
     private class RecordingSearch(
         private val respond: suspend (String) -> WebSearchResult = {
             WebSearchResult.Success(listOf(WebSearchHit(WebSearchSource("Title A", "https://example.com/a", "Site"), "summary A")))
@@ -499,5 +704,9 @@ class ChatControllerTest {
             efforts += effort
             return respond(messages, onUpdate)
         }
+    }
+
+    private companion object {
+        const val UUID_A = "00000000-0000-4000-8000-000000000001"
     }
 }

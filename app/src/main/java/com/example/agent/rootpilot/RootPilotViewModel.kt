@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.HttpDeepSeekClient
 import com.example.agent.rootpilot.chat.ChatController
+import com.example.agent.rootpilot.chat.ChatHistoryRepository
 import com.example.agent.rootpilot.chat.FileAgentController
 import com.example.agent.rootpilot.files.FileWorkspace
 import com.example.agent.rootpilot.files.FileEntry
@@ -58,6 +59,7 @@ class RootPilotViewModel(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val appCatalog: AppCatalog = AndroidAppCatalog(appContext),
     private val appLaunchStore: AppLaunchAllowlistStore = AppLaunchAllowlistStore.create(appContext),
+    private val chatHistory: ChatHistoryRepository = ChatHistoryRepository.shared(appContext),
 ) : ViewModel() {
     val uiState: StateFlow<RootPilotUiState> = RootPilotService.uiState
     val historyState = RootPilotService.historyState(appContext)
@@ -77,8 +79,16 @@ class RootPilotViewModel(
     private val _fileWorkspaceBusy = MutableStateFlow(true)
     val fileWorkspaceBusy = _fileWorkspaceBusy.asStateFlow()
     private val chatClient = HttpDeepSeekClient()
-    private val chat = ChatController(viewModelScope, chatClient, fileAgent, chatClient)
+    private val chat = ChatController(viewModelScope, chatClient, fileAgent, chatClient, chatHistory)
     val chatState = chat.state
+    val chatHistoryState = chatHistory.state
+    fun openChatSession(id: String) {
+        if (_fileWorkspaceBusy.value) return
+        browser.close()
+        chat.openSession(id)
+    }
+    fun deleteChatSession(id: String) = chat.deleteSession(id)
+    fun clearChatHistory() = chat.clearHistory()
     fun updateChatDraft(value: String) = chat.updateDraft(value)
     fun setChatEffort(value: com.example.agent.rootpilot.deepseek.ThinkingEffort) = chat.setEffort(value)
     fun setChatWebSearch(enabled: Boolean) = chat.setWebSearch(enabled)

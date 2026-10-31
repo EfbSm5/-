@@ -19,7 +19,10 @@ import androidx.compose.ui.test.swipeDown
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.example.agent.rootpilot.chat.ChatHistoryError
+import com.example.agent.rootpilot.chat.ChatHistoryState
 import com.example.agent.rootpilot.chat.ChatMessage
+import com.example.agent.rootpilot.chat.ChatSessionSummary
 import com.example.agent.rootpilot.chat.ChatUiState
 import com.example.agent.rootpilot.chat.FileAgentUiState
 import com.example.agent.rootpilot.files.PreparedFileChange
@@ -28,6 +31,7 @@ import com.example.agent.rootpilot.files.WorkspaceBrowserState
 import com.example.agent.rootpilot.ui.WorkspaceBrowserDialog
 import com.example.agent.rootpilot.ui.FileAgentPanel
 import com.example.agent.rootpilot.ui.FileWriteConfirmation
+import com.example.agent.rootpilot.ui.ChatHistoryDialog
 import com.example.agent.rootpilot.ui.ChatScreen
 import com.example.agent.rootpilot.ui.RootPilotTheme
 import com.example.agent.rootpilot.deepseek.ThinkingEffort
@@ -215,6 +219,72 @@ class ChatScreenInstrumentedTest {
     }
 
     @Test
+    fun historyDialogOpensDeletesAndClearsOnlyAfterConfirmation() {
+        val opened = mutableListOf<String>()
+        val deleted = mutableListOf<String>()
+        var cleared = 0
+        val history = mutableStateOf(ChatHistoryState(loading = false, unreadable = 1, sessions = listOf(
+            ChatSessionSummary(SESSION_A, "第一个会话", 1_000, 4),
+            ChatSessionSummary(SESSION_B, "第二个会话", 2_000, 2),
+        )))
+        val chat = mutableStateOf(ChatUiState(sessionId = SESSION_B))
+        setContent {
+            RootPilotTheme {
+                ChatScreen(chat.value, true, {}, {}, {}, {}, {}, historyDialog = { onClose ->
+                    ChatHistoryDialog(history.value, chat.value.sessionId, chat.value.generating,
+                        onOpen = { opened += it }, onDelete = { deleted += it }, onClear = { cleared++ }, onClose = onClose)
+                })
+            }
+        }
+        compose.onNodeWithTag("chat_history").performClick()
+        compose.onNodeWithTag("chat_history_unreadable").assertExists()
+        // The session already shown cannot be reopened over itself.
+        compose.onNodeWithTag("chat_history_open_1").assertIsNotEnabled()
+        compose.onNodeWithTag("chat_history_delete_0").performClick()
+        compose.onNodeWithTag("chat_history_list").assertDoesNotExist()
+        compose.runOnIdle { assertEquals(emptyList<String>(), deleted) }
+        compose.onNodeWithTag("chat_history_confirm_delete").performClick()
+        compose.runOnIdle { assertEquals(listOf(SESSION_A), deleted) }
+
+        compose.onNodeWithTag("chat_history_clear").performClick()
+        compose.runOnIdle { assertEquals(0, cleared) }
+        compose.onNodeWithTag("chat_history_confirm_clear").performClick()
+        compose.runOnIdle { assertEquals(1, cleared) }
+
+        compose.onNodeWithTag("chat_history_open_0").performClick()
+        compose.onNodeWithTag("chat_history_list").assertDoesNotExist()
+        compose.runOnIdle { assertEquals(listOf(SESSION_A), opened) }
+
+        compose.runOnIdle {
+            history.value = history.value.copy(error = ChatHistoryError.WRITE_FAILED)
+            chat.value = chat.value.copy(generating = true)
+        }
+        compose.onNodeWithTag("chat_history").assertIsNotEnabled()
+    }
+
+    @Test
+    fun historyDialogBlocksOpeningWhileFileAgentIsOnAndShowsEmptyState() {
+        setContent {
+            RootPilotTheme {
+                ChatHistoryDialog(ChatHistoryState(loading = false, sessions = listOf(
+                    ChatSessionSummary(SESSION_A, "会话", 1_000, 2))), null, false,
+                    onOpen = null, onDelete = {}, onClear = {}, onClose = {})
+            }
+        }
+        compose.onNodeWithTag("chat_history_open_blocked").assertExists()
+        compose.onNodeWithTag("chat_history_open_0").assertIsNotEnabled()
+        compose.onNodeWithTag("chat_history_delete_0").assertIsEnabled()
+        setContent {
+            RootPilotTheme {
+                ChatHistoryDialog(ChatHistoryState(loading = false), null, false,
+                    onOpen = {}, onDelete = {}, onClear = {}, onClose = {})
+            }
+        }
+        compose.onNodeWithTag("chat_history_empty").assertExists()
+        compose.onNodeWithTag("chat_history_clear").assertIsNotEnabled()
+    }
+
+    @Test
     fun webSearchToggleIsHiddenWithoutCallback() {
         setContent { RootPilotTheme { ChatScreen(ChatUiState(), true, {}, {}, {}, {}, {}) } }
         compose.onNodeWithTag("chat_web_search").assertDoesNotExist()
@@ -284,5 +354,10 @@ class ChatScreenInstrumentedTest {
             assertEquals("你好🙂\n第二行", state.value.draft)
             assertEquals(1, sends)
         }
+    }
+
+    private companion object {
+        const val SESSION_A = "00000000-0000-4000-8000-00000000000a"
+        const val SESSION_B = "00000000-0000-4000-8000-00000000000b"
     }
 }
