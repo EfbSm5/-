@@ -8,7 +8,7 @@
 
 - **手机直连模型**：默认 DeepSeek API（`https://api.deepseek.com`，模型 `deepseek-flash`），支持自定义 Base URL、模型和开发 Relay。首次保存后自动加载，不需要电脑桥接；服务端可用性和账号权限以连接测试为准。
 - **保存 API 配置**：Token 使用 Android Keystore 管理的密钥加密，密文保存在私有、不参与备份的目录，支持更换、清除和测试连接。
-- **纯文字聊天**：聊天页复用已保存 API 配置，支持多轮、停止生成、新对话、流式 Markdown 和折叠思考；可选关闭、低、高、最高思考强度。聊天不截图、不调用 Root、不执行设备动作，会话仅保留在内存中。
+- **纯文字聊天**：聊天页复用已保存 API 配置，支持多轮、停止生成、新对话、流式 Markdown 和折叠思考；可选关闭、低、高、最高思考强度。聊天不截图、不调用 Root、不执行设备动作。普通聊天的已完成问答在本机加密保存，可从“历史”续聊、删除或全部清除。可按会话开启 DeepSeek 官方联网搜索（默认关闭），回答下方列出来源链接，不会自动打开。
 - **文件 Agent（受限验收通过）**：从聊天的“工作区”选择单个系统授权目录，再明确同意发送文件内容并开启。模型可列目录、读 UTF-8 文本、按文件名／内容有界检索、读取元信息，以及提出创建或精确替换；每次写入都需核对修改前后并确认。没有删除、Shell、Root 或目录外访问工具。已有小米专用空目录的真实模型和导出验收；隔离 Provider 用例不代替系统授权或文件 UI 验收，新增检索状态见 `SPEC.md`。
 - **模型输出预览**：任务思考期间可展开悬浮窗查看输出；流式草稿不触发动作，完整响应仍需解析、策略校验与原有确认。
 - **截图驱动操作**：模型按步规划点击、滑动、按键、等待、应用启动和文本输入；由本地策略校验后执行。
@@ -16,7 +16,7 @@
 - **只读手机信息工具（测试页限定通过，稳定性 PARTIAL）**：模型可在选择动作前调用 `get_screen_context`、`get_activity_stack`、`get_ui_tree`。前两项复用本机 Root；控件树来自可选、手动启用的无障碍服务，返回当前应用文字、状态及物理像素位置，过滤密码／敏感节点文字。工具不点击或输入，最终动作仍走原有策略与确认。生产 Service 的真实模型、一次中文输入、输入后查询及完成用例通过；确认／停止按钮由脚本调用实际监听器，不代表真人触摸。确认时停止、查询中停止及用户关闭服务后的不可用分支已通过。模型响应协议曾实际失败，成功复跑不等于根因已修复。
 - **通用应用启动与中文输入**：动态查询可启动应用；通过临时输入法输入 Unicode 文本，校验目标编辑框，拒绝密码框，结束后恢复原输入法。
 - **允许启动的应用**：按名称或包名搜索并勾选，自动保存，可一键全不选。首次默认不允许启动任何应用；模型的应用目录只包含勾选项，执行启动前再次校验。
-- **人工确认**：提供 App、悬浮面板和通知入口。打开应用、文本输入和系统按键始终确认；点击/滑动在手动模式确认。主屏 ServiceIME Type 已实现两阶段确认：通知 A 仅准备，回到目标后在 IME 全文预览中进行 B 最终确认；当前静态审查通过、端到端验收未通过，不可视为可靠无人值守输入。跨会话进度与恢复条件见 [TASKS](<TASKS.md>)。
+- **人工确认**：提供 App、悬浮面板和通知入口。打开应用、文本输入和系统按键始终确认；点击/滑动在手动模式确认。主屏 ServiceIME Type 采用两阶段确认：通知 A 仅准备，回到目标且原输入连接仍绑定时 IME 主动显示全文预览，B 最终确认后单次提交；仅在 API 35 模拟器限定端到端通过（无模型与真实模型各一次），不可视为可靠无人值守输入。跨会话进度与恢复条件见 [TASKS](<TASKS.md>)。
 - **本地待办**：确认标题和截止时间后保存到应用私有存储，与旧 Agent 共用数据；同一任务内防重复。不创建系统闹钟或提醒。
 - **任务与诊断**：中断任务需人工决定恢复；结构化日志按任务和步骤记录阶段、结果及耗时。模型失败区分请求契约、HTTP、网络、超时、响应协议、配置和未知类；协议失败进一步标记固定原因。诊断不记录凭据、正文、模型原文或异常原文，不改变重试与执行策略。
 - **任务结果**：主页展示完成、失败、停止与接管提示，区分模型报告和本地待办保存回执；完整文案仅保留在内存中，停止不会撤销已经执行的操作。
@@ -53,7 +53,13 @@
 
 应用选择只限制 `open_app`，不是完整访问隔离：链接、桌面点击、返回键仍可能进入其他应用，其界面和查询信息也可能上传。避免在密码、支付、聊天隐私等页面运行；自动模式不代表安全保证。
 
-只需问答时进入“聊天”，发送的文本及本会话已完成的问答会发至配置的 API，不发送截图。思考强度仅影响聊天；高档位可能更慢、消耗更多 Token，仍受单请求 120 秒时限约束。聊天不落盘，进程退出会丢失；保存或清除 API 配置会清空聊天，生成时先停止才能切回任务或修改配置。流式 Markdown 支持标题、列表、引用、代码块，不自动打开链接或加载外部图片。自定义地址需要支持 SSE，现有开发 Relay 会缓冲响应，不保证实时预览。
+只需问答时进入“聊天”，发送的文本及本会话已完成的问答会发至配置的 API，不发送截图。思考强度仅影响聊天；高档位可能更慢、消耗更多 Token，仍受单请求 120 秒时限约束。保存或清除 API 配置会开始新对话，已保存的会话保留；生成时先停止才能切回任务或修改配置。流式 Markdown 支持标题、列表、引用、代码块，不自动打开链接或加载外部图片。自定义地址需要支持 SSE，现有开发 Relay 会缓冲响应，不保证实时预览。
+
+聊天页“联网搜索”默认关闭，只对当前对话有效，新对话或切换文件模式后重置；开启文件 Agent 时不可用。开启后每条消息先以用户消息前 128 个字符调用一次 DeepSeek 官方 Search API（单独计费，见[官方说明](https://api-docs.deepseek.com/guides/search)），再把最多 5 条结果作为本轮参考交给模型；搜索失败时不会请求模型，也不会自动重试。仅当 Base URL 为 `https://api.deepseek.com` 时可用，避免把中转 Token 发给官方。来源以可复制纯文本显示，不会自动打开或加载网页。搜索结果属于外部网页内容，可能不准确。
+
+真实搜索验收 `DeepSeekLiveSearchInstrumentedTest` 需显式 `-e rootpilotLiveSearch true`，读取已保存的官方配置，产生 1 次搜索与 1 次聊天计费请求，不修改配置。
+
+聊天页“历史”列出最近 30 个已保存会话（超出时删除最旧的）。每轮问答成功完成后保存该会话全部已完成问答及搜索来源，不保存思考过程、停止或失败的轮次、草稿和搜索上下文；使用过文件 Agent 的对话整段不保存。文件为每会话一份，以单独的 Android Keystore 密钥加密，位于应用私有、不参与备份的目录；与 API 配置和任务历史分开。续聊会把该会话的已完成问答作为上下文发送给当前配置的模型；联网搜索开关不随会话恢复。删除单个和清除全部都需确认，删除当前会话会清空当前对话。无法解密或损坏的会话不列出，只计数，可通过“清除全部”删除。开启文件 Agent 时不能打开历史会话。显式 `rootpilotLiveChat=true` 的真实聊天 UI 测试也会按此保存一个会话。
 
 ### 文件工作区
 
@@ -198,6 +204,12 @@ python3 dev/type-notification-confirmation.py \
 通知行定位保留既有 `expandableNotificationRow`，并按本机无模型探针的实际祖先支持严格结构路径：标题向上的 `expanded` 直接属于 SystemUI 的 enabled／clickable、非 scrollable FrameLayout，后者直接属于 SystemUI `notification_stack_scroller`／ScrollView。不会把整个通知列表当行，也不推断脱敏资源值的真实 ID。两条路径都继续要求唯一标题、本应用 label 和行内动作；展开后的单次 5 秒等待复用相同判据，不全局搜索确认动作。结构匹配不等于业务通过，实际结果见 [SPEC](<SPEC.md#通知确认>)。
 
 [verify.sh](dev/verify.sh) 已集成新宿主普通／`-O` 离线 mock；设备是否通过及精确证据范围以 [SPEC.md](SPEC.md) 为准。
+
+### 两阶段 Type 验收（通知 A 准备 + IME B 最终确认）
+
+入口为 [TypeProcessRecoveryInstrumentedTest](app/src/androidTest/java/com/example/agent/rootpilot/TypeProcessRecoveryInstrumentedTest.kt) 的 `noModelTwoStageTypeRequiresNotificationAndImeConfirmation`（`twoStageTypeNoModelAcceptance=true`，固定响应、不联网）与 `realModelTwoStageTypeRequiresNotificationAndImeConfirmation`（`twoStageTypeRealModelAcceptance=true`，调用手机已保存的 DeepSeek 配置）。两者默认关闭，参数为闭合集合：`twoStageActor=manual`、`testNonce`、`expectedMainPid`（可填 `instrumentation-main`）及新建空白 fixture 的六元组身份（`expectedFreshSessionId`、`expectedFixtureInstanceId`、`expectedFixturePid`、`expectedFixtureTaskId`、`expectedFixtureDisplayId=0`、`expectedFixtureProcessStartTicks`）。准入要求 fixture 就绪、为空、提交 0，且无 run／IME 恢复标记；真实模式还要求新进程尚未加载 API 配置（运行前不要打开 RootPilot 主界面）。成功过的 fixture 不能复用，debug 工厂注册锁存到进程结束，每轮须新进程。
+
+用 `am instrument -w -r`（不加 `--no-restart`）运行。测试输出阶段回执：`WAITING_NOTIFICATION_PREPARE` 后由外部点击通知“准备输入”（A）；`WAITING_IME_FINAL` 给出按钮屏幕坐标后才点击 IME“最终确认输入 N 字符”（B），拿不到坐标不猜、不点。真实模式只把签名 fixture 自身画面发给模型、禁止工具调用，最多委托 2 次。最终 `twoStageTypeReport` 用 [two_stage_type_report.py](dev/two_stage_type_report.py) 严格校验（`kind=LOCAL`／`REAL`）；点击计数由外部台账记录，失败保留现场，不盲重跑。
 
 ### 人工配合通知批准（独立入口，真机初始化未通过）
 

@@ -1,28 +1,21 @@
 # RootPilot 当前待办
 
-更新日期：2026-10-30。能力、已完成验收与安全边界统一见 [SPEC](<SPEC.md>)。
+更新日期：2026-10-31。能力、已完成验收与安全边界统一见 [SPEC](<SPEC.md>)。
 
 ## 跨会话交接（当前状态优先于下方历史记录）
 
-- **开发与设备验收已按用户要求停止**。本次仅授权更新交接文档、提交并推送当前代码；不恢复设备操作或模型调用。新会话须取得明确继续指令，不把旧额度、历史脚本或本文件当作自动执行授权。
-- 两阶段主体及 v6 最小诊断增量均已独立静态审查 PASS。v6 测试包构建、lint、diff 检查通过，但**未安装、未设备运行**；其 JVM 测试未单独重跑。主体此前 1096 项单测及 Debug／Release 验证通过，不等于端到端成功。
-- 累计肯定点击保守记 **2/100**（代理操作真实通知准备 A，不是人工；最终 B 为 0）；本任务真实模型 API **0/100**。原单次通知失败及两阶段失败均保留，不改判通过。
-- 最近 v5 失败位置 `IME_TARGET_LOCATION`，提交 0；原报告 `cleanupConfirmed=false`。后续产品“放弃上次任务”已核实无恢复标记／业务 Service、恢复 LatinIME、保留原 fixture；五项任务配置完整恢复未证实。模拟器未关闭，临时 Root 冷启动会消失，不能直接复用旧 PID／端口／窗口或 fixture 身份。
-- 现场最后使用 Medium_Phone / emulator-5554；Pixel 硬件 56121FDCH00D30 的完整验收仍未完成。新会话必须重新核验授权设备、空闲状态和所有权，不操作其他设备。
+- 2026-10-31 用户恢复开发，顺序为：两阶段 Type 验收及收尾 → DeepSeek 官方搜索（聊天页）→ 聊天历史保存。设备仅限 Medium_Phone 模拟器；之后用户授权本地提交已验证代码，不推送、不读取其他凭据。
+- **主屏 Type 两阶段确认已在模拟器限定 PASS**（无模型与真实模型各一次，详见 [SPEC](<SPEC.md#当前结论>)）。累计肯定点击 12/100（含两次 B），API 累计 6/100（两阶段 Type v12 失败与 v13 通过各 1 次；官方搜索验收搜索与聊天各 1 次；聊天历史手工验收 2 次）。Pixel 硬件验收与“单次通知直接批准”旧合同仍未通过，不由此改判。
+- 已提交（本地）：IME 在 TYPE_COMMIT 且原连接仍绑定时每个令牌只调用一次 `requestShowSelf(0)`；debug 工厂真实模式只上传签名 fixture 自身画面、禁止工具；两阶段仪器测试支持 `twoStageTypeRealModelAcceptance`、等待 IME root 完成布局后一次定位；[离线报告校验器](dev/two_stage_type_report.py) 已接入 `verify.sh`。均经独立审查 PASS。
+- **聊天页 DeepSeek 官方联网搜索已实现**：默认关闭、按会话开启，仅官方 Base URL；搜索失败不请求模型，来源纯文本展示不自动打开，文件 Agent／设备任务不接入。独立静态审查 PASS；JVM 1114 项、ChatScreen UI 12 项通过；显式 opt-in 真实验收 1 次通过（5 条来源）。
+- 收尾后模拟器状态：默认 LatinIME、无 RootPilot Service／通知／run 与 IME 恢复标记；已保存的 API 配置保留在 Keystore；最后一次 fixture 为非空成功实例，不能复用为新空目标。临时 Root 冷启动后消失。
 
-### 本次交接提交前验证
+- **聊天历史保存已实现**：只保存普通聊天已完成问答（含来源、不含思考），每会话一份 Keystore 加密文件于 noBackup，最多 30 个；支持续聊、确认删除单个、确认全部清除；用过文件 Agent 的对话不保存，更换 API 配置只开新对话。独立静态审查 PASS；JVM 1137 项通过；模拟器 15 项仪器测试（真实 Keystore 存储＋ChatScreen）通过；手工验证落盘加密、强停后续聊恢复、删除当前会话。全部清除、30 上限剪枝与配置切换仅单测覆盖。
+- 当前模拟器：历史目录为空，应用已强停，LatinIME，无 Service。
 
-- `bash dev/verify.sh` 通过：宿主纯 mock 回归普通／`-O` 模式各 120 项；Gradle 构建与 lint 检查成功。App JVM 任务为 UP-TO-DATE，复核已有 XML 为 1096 项、0 失败／错误／跳过，不冒称重新执行。
-- fixture 单测／APK 与 Release Kotlin 编译检查成功（UP-TO-DATE）；未安装、未连接设备运行测试、未调用真实模型。
-- 已按明确文件清单排除 `log/`、临时证据、APK 与凭据；敏感凭据特征扫描无命中，不代表通用安全审计。
+### 下一步
 
-### 恢复开发后的顺序（尚未执行）
-
-1. 从 `TypeProcessRecoveryInstrumentedTest.noModelTwoStageTypeRequiresNotificationAndImeConfirmation` 进入，先核验 v6 源码与重新构建的包；接收端需更新闭合 report 字段／固定原因白名单，严格接受 `imeShowInputRequested`、`imeInputViewShown` 的 Boolean 或 null，不能把未知记成 false。
-2. 基于一次 Main 快照的子原因区分 root、预览、按钮、布局与 scope；`stateAlwaysHidden` 和缺少显示请求只证明绑定不保证面板显示，不能直接认定失败根因。不得盲重跑、增等待、绕过连接保护或自动 approve；如果需要改变显示行为，先明确触发点、取消／连接保护与独审验证范围。
-3. 通过无模型真实 Service → 通知 A → IME 全文与按钮 B → 唯一提交及完整收尾后，才推进真实模型。成功输入后的非空 fixture 不可冒充新空目标；工厂注册锁存至进程结束，下一轮须重新核实干净进程和独立 fixture 身份。
-4. 完成 Type 后再实现 DeepSeek 官方搜索与聊天历史持久化。官方能力仅研究过，尚未接入；聊天当前仍为内存态。不得读取其他个人凭据、把密钥带入命令参数／日志／提交或擅自开启远程数据服务。
-5. 当前 `log/` 和仓库外运行证据不纳入提交；本机临时路径仅供追溯，远端 checkout 不保证可访问，缺证据不能补判成功。源码入口见 `RootPilotRunController`、`RootPilotInputMethodService`、debug/release `RootPilotModelClientFactory` 及上述仪器测试。
+1. 三项授权任务均已完成；未提交、未推送，等待用户决定提交范围。`log/` 与仓库外证据不纳入提交。
 
 ## 历史背景：功能 #5 通知确认（不代表当前执行许可）
 
@@ -75,4 +68,6 @@
 
 - 状态变化直接替换对应条目，不追加“某日更新／此前／最新一轮”流水。
 - 已完成项移出待办；必要能力结论合并至 [SPEC](<SPEC.md>)，不重复整份证据。
+- 失败、未知与未验证必须保留，但只写当前结论和下一步，不堆命令日志、旧设备端口、PID、哈希或临时目录。
+至 [SPEC](<SPEC.md>)，不重复整份证据。
 - 失败、未知与未验证必须保留，但只写当前结论和下一步，不堆命令日志、旧设备端口、PID、哈希或临时目录。
