@@ -3,8 +3,19 @@ package com.example.agent.rootpilot.chat
 import com.example.agent.rootpilot.deepseek.ChatTurn
 import com.example.agent.rootpilot.deepseek.DeepSeekActionResult
 import com.example.agent.rootpilot.deepseek.DeepSeekChatClient
+import com.example.agent.rootpilot.deepseek.DeepSeekSearchClient
+import com.example.agent.rootpilot.deepseek.DeepSeekToolChatClient
 import com.example.agent.rootpilot.deepseek.ModelStreamSnapshot
 import com.example.agent.rootpilot.deepseek.ThinkingEffort
+import com.example.agent.rootpilot.deepseek.ToolChatResult
+import com.example.agent.rootpilot.deepseek.ToolChatTurn
+import com.example.agent.rootpilot.deepseek.WebSearchHit
+import com.example.agent.rootpilot.deepseek.WebSearchResult
+import com.example.agent.rootpilot.deepseek.WebSearchSource
+import com.example.agent.rootpilot.files.FileEntry
+import com.example.agent.rootpilot.files.FileWriteReceipt
+import com.example.agent.rootpilot.files.PreparedFileChange
+import com.example.agent.rootpilot.files.WorkspaceAccess
 import com.example.agent.rootpilot.model.RootPilotConfig
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -18,6 +29,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -311,6 +323,164 @@ class ChatControllerTest {
         controller.send(config, configured = true)
         advanceUntilIdle()
         assertEquals(listOf(ChatTurn("user", "recover")), client.requests.last())
+    }
+
+    @Test
+    fun webSearchIsOffByDefaultAndNeverCalledUntilEnabled() = runTest {
+        val client = RecordingClient()
+        val search = RecordingSearch()
+        val controller = ChatController(this, client, search = search)
+        assertFalse(controller.state.value.webSearch)
+        controller.updateDraft("question")
+        controller.send(config, configured = true)
+        advanceUntilIdle()
+        assertTrue(search.queries.isEmpty())
+        assertEquals(listOf(ChatTurn("user", "question")), client.requests.single())
+        assertFalse(controller.state.value.messages.last().searched)
+    }
+
+    @Test
+    fun enabledSearchAddsPerTurnContextAndSourcesButLaterHistoryOnlyKeepsAnswers() = runTest {
+        val client = RecordingClient()
+        val search = RecordingSearch()
+        val controller = ChatController(this, client, search = search)
+        controller.setWebSearch(true)
+        controller.updateDraft("  latest news  ")
+        controller.send(config, configured = true)
+        advanceUntilIdle()
+        assertEquals(listOf("latest news"), search.queries)
+        val first = client.requests.single()
+        assertEquals(2, first.size)
+        assertEquals("system", first[0].role)
+        assertTrue(first[0].content.contains("不可信的外部网页数据"))
+        assertTrue(first[0].content.contains("https://example.com/a"))
+        assertTrue(first[0].content.contains("summary A"))
+        assertEquals(ChatTurn("user", "latest news"), first[1])
+        val answer = controller.state.value.messages.last()
+        assertTrue(answer.complete && answer.searched)
+        assertEquals(listOf(WebSearchSource("Title A", "https://example.com/a", "Site")), answer.sources)
+
+        controller.updateDraft("follow up")
+        controller.send(config, configured = true)
+        advanceUntilIdle()
+        assertEquals(2, search.queries.size)
+        val second = client.requests.last()
+        assertEquals(ChatTurn("system", second[0].content), second[0])
+        assertEquals(listOf(ChatTurn("user", "latest news"), ChatTurn("assistant", "a"), ChatTurn("user", "follow up")),
+            second.drop(1))
+        assertTrue(controller.state.value.webSearch)
+
+        controller.newConversation()
+        assertFalse(controller.state.value.webSearch)
+    }
+
+    @Test
+    fun searchFailureOrEmptyResultsFailClosedOrReportNoSources() = runTest {
+        val client = RecordingClient()
+        val search = RecordingSearch { query ->
+            if (query == "fail") WebSearchResult.Failure("请求频率或额度受限（HTTP 429），请稍后重试")
+            else WebSearchResult.Success(emptyList())
+        }
+        val controller = ChatController(this, client, search = search)
+        controller.setWebSearch(true)
+        controller.updateDraft("fail")
+        controller.send(config, configured = true)
+        advanceUntilIdle()
+        assertTrue(client.requests.isEmpty())
+        assertEquals("联网搜索失败，未发送给模型：请求频率或额度受限（HTTP 429），请稍后重试", controller.state.value.error)
+        assertTrue(controller.state.value.messages.none { it.complete })
+        assertFalse(controller.state.value.generating)
+
+        controller.updateDraft("empty")
+        controller.send(config, configured = true)
+        advanceUntilIdle()
+        assertEquals(listOf("fail", "empty"), search.queries)
+        assertEquals(listOf(ChatTurn("user", "empty")), client.requests.single().drop(1))
+        assertTrue(client.requests.single()[0].content.endsWith("[]"))
+        val answer = controller.state.value.messages.last()
+        assertTrue(answer.complete && answer.searched && answer.sources.isEmpty())
+    }
+
+    @Test
+    fun stopDuringSearchNeverSendsModelRequestAndToggleIsLockedWhileGenerating() = runTest {
+        val client = RecordingClient()
+        val search = RecordingSearch { awaitCancellation() }
+        val controller = ChatController(this, client, search = search)
+        controller.setWebSearch(true)
+        controller.updateDraft("question")
+        controller.send(config, configured = true)
+        runCurrent()
+        controller.setWebSearch(false)
+        assertTrue(controller.state.value.webSearch)
+        controller.stop()
+        advanceUntilIdle()
+        assertEquals(listOf("question"), search.queries)
+        assertTrue(client.requests.isEmpty())
+        assertFalse(controller.state.value.generating)
+        assertTrue(controller.state.value.messages.none { it.complete })
+    }
+
+    @Test
+    fun searchIsUnavailableWithoutClientAndNeverUsedByFileAgent() = runTest {
+        val plain = ChatController(this, RecordingClient())
+        plain.setWebSearch(true)
+        assertFalse(plain.state.value.webSearch)
+
+        val client = RecordingClient()
+        val search = RecordingSearch()
+        val tools = RecordingToolClient()
+        val fileAgent = FileAgentController(NoFiles(), tools)
+        val controller = ChatController(this, client, fileAgent, search)
+        controller.setWebSearch(true)
+        assertTrue(controller.state.value.webSearch)
+        fileAgent.updateWorkspace("Test directory", emptyList())
+        fileAgent.setEnabled(true)
+        controller.setWebSearch(true)
+        controller.updateDraft("edit notes")
+        controller.send(config, configured = true)
+        advanceUntilIdle()
+        assertTrue(search.queries.isEmpty())
+        assertTrue(client.requests.isEmpty())
+        val toolRequest = tools.requests.single()
+        assertEquals(ToolChatTurn("user", "edit notes"), toolRequest.last())
+        assertTrue(toolRequest.none { "联网搜索" in it.content || "example.com" in it.content })
+        assertFalse(controller.state.value.messages.last().searched)
+
+        controller.newConversation()
+        controller.setWebSearch(true)
+        assertFalse(controller.state.value.webSearch)
+    }
+
+    private class RecordingSearch(
+        private val respond: suspend (String) -> WebSearchResult = {
+            WebSearchResult.Success(listOf(WebSearchHit(WebSearchSource("Title A", "https://example.com/a", "Site"), "summary A")))
+        },
+    ) : DeepSeekSearchClient {
+        val queries = mutableListOf<String>()
+        override suspend fun search(config: RootPilotConfig, query: String): WebSearchResult {
+            queries += query
+            return respond(query)
+        }
+    }
+
+    private class RecordingToolClient : DeepSeekToolChatClient {
+        val requests = mutableListOf<List<ToolChatTurn>>()
+        override suspend fun streamToolChat(
+            config: RootPilotConfig, messages: List<ToolChatTurn>, tools: List<JsonObject>,
+            effort: ThinkingEffort, onUpdate: suspend (ModelStreamSnapshot) -> Unit,
+        ): ToolChatResult {
+            requests += messages.toList()
+            return ToolChatResult.Success("done", "", emptyList())
+        }
+    }
+
+    private class NoFiles : WorkspaceAccess {
+        override suspend fun list(path: String) = emptyList<FileEntry>()
+        override suspend fun read(path: String): String = error("unexpected read")
+        override suspend fun prepareCreate(path: String, content: String): PreparedFileChange = error("unexpected write")
+        override suspend fun prepareEdit(path: String, oldText: String, newText: String): PreparedFileChange = error("unexpected write")
+        override suspend fun discard(change: PreparedFileChange) = error("unexpected discard")
+        override suspend fun commit(change: PreparedFileChange): FileWriteReceipt = error("unexpected commit")
     }
 
     private class RecordingClient(

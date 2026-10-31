@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -54,6 +55,7 @@ fun ChatScreen(
     onNewConversation: () -> Unit,
     modifier: Modifier = Modifier,
     fileControls: (@Composable () -> Unit)? = null,
+    onWebSearchChange: ((Boolean) -> Unit)? = null,
 ) {
     val keyboardVisible = WindowInsets.isImeVisible
     val list = rememberLazyListState()
@@ -87,6 +89,21 @@ fun ChatScreen(
             }
             Text("聊天不截图、不操作手机界面；历史仅保留在本次会话内存中，不跨进程。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            if (onWebSearchChange != null) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (state.webSearch) "联网搜索 · 已开启" else "联网搜索 · 已关闭", modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium)
+                    Button(onClick = { onWebSearchChange(!state.webSearch) }, enabled = !state.generating,
+                        minWidth = 0.dp, minHeight = 48.dp,
+                        insideMargin = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.testTag("chat_web_search").semantics { selected = state.webSearch }) {
+                        Text(if (state.webSearch) "关闭" else "开启")
+                    }
+                }
+                Text("仅本次对话有效：每条消息先调用 DeepSeek 官方搜索（单独计费），再把结果交给模型；文件 Agent 不使用。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            }
             fileControls?.invoke()
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -134,6 +151,25 @@ fun ChatScreen(
                             }
                             if (message.content.isNotEmpty()) StreamingMarkdown(message.content,
                                 Modifier.fillMaxWidth().testTag("chat_content_${message.id}"))
+                            if (message.sources.isNotEmpty()) {
+                                // Remote URLs are shown for manual copying only; they never launch intents.
+                                SelectionContainer(Modifier.fillMaxWidth().testTag("chat_sources_${message.id}")) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text("来源（不会自动打开）", style = MaterialTheme.typography.labelLarge,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        message.sources.forEachIndexed { index, source ->
+                                            Text("[${index + 1}] ${source.title}" +
+                                                (source.siteName?.let { " · $it" } ?: ""),
+                                                style = MaterialTheme.typography.bodySmall)
+                                            Text(source.url, style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.primary)
+                                        }
+                                    }
+                                }
+                            } else if (message.searched && message.complete) {
+                                Text("联网搜索未返回结果", Modifier.testTag("chat_sources_empty_${message.id}"),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                            }
                             if (message.role == "assistant" && !message.complete) {
                                 if (message.id == state.messages.lastOrNull()?.id && state.generating) {
                                     Text("正在生成…", Modifier.testTag("chat_generating_${message.id}"),
@@ -153,7 +189,8 @@ fun ChatScreen(
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (!keyboardVisible) Text("思考强度：${state.effort.displayLabel()}",
+                if (!keyboardVisible) Text("思考强度：${state.effort.displayLabel()}" +
+                    if (state.webSearch) " · 联网搜索已开启" else "",
                     modifier = Modifier.padding(horizontal = 4.dp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {

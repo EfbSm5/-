@@ -76,10 +76,12 @@ class RootPilotViewModel(
     val fileAgentState = fileAgent.state
     private val _fileWorkspaceBusy = MutableStateFlow(true)
     val fileWorkspaceBusy = _fileWorkspaceBusy.asStateFlow()
-    private val chat = ChatController(viewModelScope, HttpDeepSeekClient(), fileAgent)
+    private val chatClient = HttpDeepSeekClient()
+    private val chat = ChatController(viewModelScope, chatClient, fileAgent, chatClient)
     val chatState = chat.state
     fun updateChatDraft(value: String) = chat.updateDraft(value)
     fun setChatEffort(value: com.example.agent.rootpilot.deepseek.ThinkingEffort) = chat.setEffort(value)
+    fun setChatWebSearch(enabled: Boolean) = chat.setWebSearch(enabled)
     fun sendChat() {
         if (_fileWorkspaceBusy.value || _apiState.value.busy || _apiState.value.editing || !canChangeApiConfig()) return
         browser.close()

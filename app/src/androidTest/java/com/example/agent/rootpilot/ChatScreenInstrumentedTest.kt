@@ -31,6 +31,7 @@ import com.example.agent.rootpilot.ui.FileWriteConfirmation
 import com.example.agent.rootpilot.ui.ChatScreen
 import com.example.agent.rootpilot.ui.RootPilotTheme
 import com.example.agent.rootpilot.deepseek.ThinkingEffort
+import com.example.agent.rootpilot.deepseek.WebSearchSource
 import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.After
@@ -184,6 +185,39 @@ class ChatScreenInstrumentedTest {
         compose.onNodeWithTag("chat_empty").assertDoesNotExist()
         compose.onNodeWithTag("chat_message_2").assertExists()
         compose.onNodeWithTag("chat_send").assertIsNotEnabled()
+    }
+
+    @Test
+    fun webSearchToggleIsLockedWhileGeneratingAndSourcesStayAsPlainText() {
+        val toggles = mutableListOf<Boolean>()
+        val state = mutableStateOf(ChatUiState(messages = listOf(
+            ChatMessage(1, "user", "问题", complete = true),
+            ChatMessage(2, "assistant", "回答 [1]", complete = true, searched = true,
+                sources = listOf(WebSearchSource("来源标题", "https://example.com/a", "示例站点"))),
+            ChatMessage(3, "user", "空结果", complete = true),
+            ChatMessage(4, "assistant", "未找到", complete = true, searched = true),
+        )))
+        setContent {
+            RootPilotTheme {
+                ChatScreen(state.value, true, {}, {}, {}, {}, {}, onWebSearchChange = { toggles += it })
+            }
+        }
+        compose.onNodeWithTag("chat_web_search").assertIsEnabled().assertIsNotSelected().performClick()
+        compose.runOnIdle {
+            assertEquals(listOf(true), toggles)
+            state.value = state.value.copy(webSearch = true)
+        }
+        compose.onNodeWithTag("chat_web_search").assertIsSelected()
+        compose.onNodeWithTag("chat_sources_2").performScrollTo().assertExists()
+        compose.onNodeWithTag("chat_sources_empty_4").performScrollTo().assertExists()
+        compose.runOnIdle { state.value = state.value.copy(generating = true) }
+        compose.onNodeWithTag("chat_web_search").assertIsNotEnabled()
+    }
+
+    @Test
+    fun webSearchToggleIsHiddenWithoutCallback() {
+        setContent { RootPilotTheme { ChatScreen(ChatUiState(), true, {}, {}, {}, {}, {}) } }
+        compose.onNodeWithTag("chat_web_search").assertDoesNotExist()
     }
 
     @Test

@@ -92,7 +92,8 @@ interface DeepSeekChatClient {
 class HttpDeepSeekClient(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val requestTimeoutMillis: Long = REQUEST_TIMEOUT_MILLIS,
-) : DeepSeekClient, DeepSeekChatClient, DeepSeekToolChatClient {
+    private val officialBaseUrl: String = OFFICIAL_BASE_URL,
+) : DeepSeekClient, DeepSeekChatClient, DeepSeekToolChatClient, DeepSeekSearchClient {
     init {
         require(requestTimeoutMillis > 0) { "Request timeout must be positive" }
     }
@@ -157,6 +158,26 @@ class HttpDeepSeekClient(
         return request(config, body, onUpdate)
     }
 
+    override suspend fun search(config: RootPilotConfig, query: String): WebSearchResult {
+        // Relay tokens must never reach the official host, and relays may not offer this API.
+        if (config.baseUrl.trimEnd('/') != officialBaseUrl) {
+            return WebSearchResult.Failure("联网搜索仅支持 DeepSeek 官方 API 地址", ModelFailure(ModelFailureCategory.CONFIGURATION))
+        }
+        if (!isValidWebSearchQuery(query)) {
+            return WebSearchResult.Failure("搜索内容无效", ModelFailure(ModelFailureCategory.REQUEST_CONTRACT))
+        }
+        val body = buildJsonObject {
+            put("query", query)
+            put("count", WEB_SEARCH_RESULT_COUNT)
+            put("need_content", false)
+        }.toString()
+        return request(config, body, WebSearchResult::Failure, "$officialBaseUrl/v1/tools/search") { response ->
+            val source = response?.source() ?: throw SerializationException("Missing body")
+            if (source.request(MAX_WEB_SEARCH_RESPONSE_BYTES + 1)) throw SerializationException("Search response too large")
+            WebSearchResult.Success(parseWebSearchResponse(source.buffer.readUtf8()))
+        }
+    }
+
     suspend fun testConnection(config: RootPilotConfig): DeepSeekActionResult = request(
         config,
         buildJsonObject {
@@ -208,6 +229,7 @@ class HttpDeepSeekClient(
         config: RootPilotConfig,
         body: String,
         failure: (String, ModelFailure) -> T,
+        url: String? = null,
         readResponse: suspend (ResponseBody?) -> T,
     ): T =
         withContext(dispatcher) {
@@ -218,7 +240,7 @@ class HttpDeepSeekClient(
             val call = try {
                 val payload = body.toRequestBody("application/json; charset=utf-8".toMediaType())
                 val request = Request.Builder()
-                    .url("${config.baseUrl.trimEnd('/')}/chat/completions")
+                    .url(url ?: "${config.baseUrl.trimEnd('/')}/chat/completions")
                     .post(object : RequestBody() {
                         override fun contentType() = payload.contentType()
                         override fun contentLength() = payload.contentLength()
@@ -409,6 +431,7 @@ class HttpDeepSeekClient(
     )
 
     private companion object {
+        const val OFFICIAL_BASE_URL = "https://api.deepseek.com"
         const val CONNECT_TIMEOUT_MILLIS = 10_000
         const val REQUEST_TIMEOUT_MILLIS = 120_000L
         val HTTP_CLIENT = OkHttpClient.Builder()

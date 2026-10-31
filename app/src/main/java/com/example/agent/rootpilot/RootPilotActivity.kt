@@ -92,6 +92,7 @@ class RootPilotActivity : ComponentActivity() {
                             onSend = viewModel::sendChat,
                             onStop = viewModel::stopChat,
                             onNewConversation = viewModel::newChat,
+                            onWebSearchChange = if (fileState.enabled) null else viewModel::setChatWebSearch,
                             fileControls = {
                                 FileAgentPanel(fileState.copy(busy = fileState.busy || fileWorkspaceBusy), chatState.generating,
                                     onChooseDirectory = {
