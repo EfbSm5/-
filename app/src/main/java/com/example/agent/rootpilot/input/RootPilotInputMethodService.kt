@@ -16,6 +16,7 @@ import android.view.inputmethod.InputMethodManager
 import com.example.agent.rootpilot.RootPilotService
 import com.example.agent.rootpilot.model.RootPilotAction
 import com.example.agent.rootpilot.model.RootPilotStatus
+import com.example.agent.rootpilot.model.RootPilotUiState
 import com.example.agent.rootpilot.root.RootExecutionResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
@@ -24,6 +25,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -33,6 +35,7 @@ class RootPilotInputMethodService : InputMethodService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var inputViewJob: Job? = null
     private var renderedCommitToken: String? = null
+    private var panelRequestedToken: String? = null
 
     private fun cancelRenderedCommit() {
         val token = renderedCommitToken ?: return
@@ -44,6 +47,22 @@ class RootPilotInputMethodService : InputMethodService() {
         super.onCreate()
         // The local approval preview must not expose input text in screen captures.
         window.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        // Targets may keep the keyboard hidden (stateAlwaysHidden); binding alone never shows the
+        // final confirmation. Ask once per commit token, only while the original connection is bound.
+        scope.launch {
+            combine(RootPilotService.uiState, InputConnectionBridge.editor,
+                InputConnectionBridge.confirmingEditor, ::Triple).collect { (state, editor, confirming) ->
+                val locked = runCatching {
+                    getSystemService(KeyguardManager::class.java).isKeyguardLocked
+                }.getOrDefault(true)
+                val token = commitPanelToken(state, locked, editor != null && editor === confirming &&
+                    editor.owner === this@RootPilotInputMethodService && currentInputConnection === editor.connection)
+                if (token != null && token != panelRequestedToken) {
+                    panelRequestedToken = token
+                    requestShowSelf(0)
+                }
+            }
+        }
     }
 
     override fun onCreateInputView(): View = LinearLayout(this).apply {
@@ -133,6 +152,13 @@ class RootPilotInputMethodService : InputMethodService() {
     }
 }
 
+/** Commit token whose final local confirmation may request the panel, or null. Never approves. */
+internal fun commitPanelToken(state: RootPilotUiState, locked: Boolean, boundToCurrentConnection: Boolean): String? =
+    state.confirmation?.takeIf {
+        it.stage == ConfirmationStage.TYPE_COMMIT && state.status == RootPilotStatus.WAITING_CONFIRMATION &&
+            state.pendingAction is RootPilotAction.Type && !locked && boundToCurrentConnection
+    }?.localImeToken
+
 // The system binds the IME; text never travels through an exported receiver or shell command.
 internal object InputConnectionBridge {
     data class Editor(
@@ -142,6 +168,9 @@ internal object InputConnectionBridge {
     )
 
     val editor = MutableStateFlow<Editor?>(null)
+
+    /** The already validated editor whose final confirmation is pending; never a later editor. */
+    val confirmingEditor = MutableStateFlow<Editor?>(null)
 
     suspend fun commit(text: String, ownPackage: String, confirm: suspend (String) -> Boolean): RootExecutionResult {
         if (!InputText.isValid(text)) return RootExecutionResult.Failure("输入文本不合法")
@@ -155,7 +184,13 @@ internal object InputConnectionBridge {
         }
         if (!allowed) return RootExecutionResult.Failure("不能在 RootPilot、密码框或非文本目标中自动输入")
         // Approval refers to this exact connection, not whichever editor appears afterward.
-        if (!confirm(ready.info.packageName)) return RootExecutionResult.Failure("用户取消输入")
+        confirmingEditor.value = ready
+        val confirmed = try {
+            confirm(ready.info.packageName)
+        } finally {
+            confirmingEditor.compareAndSet(ready, null)
+        }
+        if (!confirmed) return RootExecutionResult.Failure("用户取消输入")
         return TypeCommitRecoveryGate.aroundSubmission(ready.info.packageName) {
             // Revalidate after the debug-only pre-submit suspension, immediately before injection.
             withContext(Dispatchers.Main.immediate) {

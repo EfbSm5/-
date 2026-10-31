@@ -30,6 +30,8 @@ python3 -B -m unittest discover -s dev -p 'test_notification_long_press.py' -v
 python3 -O -B -m unittest discover -s dev -p 'test_notification_long_press.py' -v
 python3 -B -m unittest discover -s dev -p 'test_notification_roi.py' -v
 python3 -O -B -m unittest discover -s dev -p 'test_notification_roi.py' -v
+python3 -B -m unittest discover -s dev -p 'test_two_stage_type_report.py' -v
+python3 -O -B -m unittest discover -s dev -p 'test_two_stage_type_report.py' -v
 echo
 
 echo "== 3/4 gradle: testDebugUnitTest assembleDebug assembleDebugAndroidTest lintDebug =="

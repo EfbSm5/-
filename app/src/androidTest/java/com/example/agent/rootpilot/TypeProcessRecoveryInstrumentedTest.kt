@@ -114,14 +114,28 @@ import org.junit.runner.RunWith
 class TypeProcessRecoveryInstrumentedTest {
     /** Fixed local model; only the external operator presses the real A/B controls. */
     @Test
-    fun noModelTwoStageTypeRequiresNotificationAndImeConfirmation() = runBlocking {
+    fun noModelTwoStageTypeRequiresNotificationAndImeConfirmation() = twoStageType(realModel = false)
+
+    /**
+     * Same gates with the saved real API and one fixed fixture task. The armed session uploads only the
+     * fixture's View export without tools; the model's reason is compared in-process only, and output
+     * carries fixed codes and counts, never model or task text.
+     */
+    @Test
+    fun realModelTwoStageTypeRequiresNotificationAndImeConfirmation() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("twoStageTypeRealModelAcceptance") == "true")
+        twoStageType(realModel = true)
+    }
+
+    private fun twoStageType(realModel: Boolean) = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val args = InstrumentationRegistry.getArguments()
-        val keys = setOf("class", "twoStageTypeNoModelAcceptance", "twoStageActor", "testNonce",
+        val gate = if (realModel) "twoStageTypeRealModelAcceptance" else "twoStageTypeNoModelAcceptance"
+        val keys = setOf("class", gate, "twoStageActor", "testNonce",
             "expectedMainPid", "expectedFreshSessionId", "expectedFixtureInstanceId", "expectedFixturePid",
             "expectedFixtureTaskId", "expectedFixtureDisplayId", "expectedFixtureProcessStartTicks")
-        check(args.keySet() == keys && args.getString("twoStageTypeNoModelAcceptance") == "true" &&
+        check(args.keySet() == keys && args.getString(gate) == "true" &&
             args.getString("twoStageActor") == "manual") { "two_stage_parameters" }
         fun id(key: String): String = checkNotNull(args.getString(key)).also {
             check(it.length == 36 && UUID.fromString(it).toString() == it) { "two_stage_identity" }
@@ -142,7 +156,8 @@ class TypeProcessRecoveryInstrumentedTest {
         check(identity.pid > 0 && identity.pid != pid && identity.task > 0 && identity.display == 0 &&
             identity.startTicks > 0) { "two_stage_fixture_identity" }
         val fixture = FixtureClient(context)
-        val result = org.json.JSONObject().put("schemaVersion", 1).put("diagnosticKind", "TWO_STAGE_LOCAL_MODEL")
+        val result = org.json.JSONObject().put("schemaVersion", 1)
+            .put("diagnosticKind", if (realModel) "TWO_STAGE_REAL_MODEL" else "TWO_STAGE_LOCAL_MODEL")
             .put("nonce", nonce).put("mainPid", pid).put("freshSessionId", identity.session)
             .put("fixtureInstanceId", identity.instance).put("fixturePid", identity.pid)
             .put("fixtureTaskId", identity.task).put("fixtureDisplayId", identity.display)
@@ -195,6 +210,9 @@ class TypeProcessRecoveryInstrumentedTest {
             executionDisplay = initial.config.executionDisplay,
             virtualDisplayStartPackage = initial.config.virtualDisplayStartPackage)
         var armed = false
+        var apiLoaded = false
+        var sentAt: Long? = null
+        fun ownerActive() = RootPilotModelClientFactory.evidence(nonce).ownerActive == true
         var observedA = false
         var observedB = false
         var completed = false
@@ -204,6 +222,16 @@ class TypeProcessRecoveryInstrumentedTest {
             reason = "ADMISSION_IDLE"
             check(!initial.running && initial.pendingAction == null && initial.confirmation == null &&
                 initial.status != RootPilotStatus.RECOVERY_REQUIRED)
+            reason = "ADMISSION_API_CONFIG"
+            // A fresh process has no Service yet, so the armed factory builds the client at first start.
+            val api = if (realModel) {
+                check(initial.status == RootPilotStatus.IDLE && !initial.apiConfigured &&
+                    ServiceDestroyObservation.current == null)
+                checkNotNull(RootPilotApiConfigStore.create(context).read()).also {
+                    check(it.apiKey.isNotBlank() && it.model.isNotBlank() &&
+                        it.baseUrl.trimEnd('/') == "https://api.deepseek.com")
+                }
+            } else null
             reason = "ADMISSION_RECOVERY_MARKERS"
             check(!originalIme.isNullOrBlank() && !isOwnIme(originalIme) && imeMarkersAbsent() && runMarkersAbsent())
             reason = "ADMISSION_ENABLED_IME"
@@ -233,36 +261,77 @@ class TypeProcessRecoveryInstrumentedTest {
                 observation.sessionId == null && observation.foregroundActivity in setOf(
                     "com.example.rootpilot.fixture.ExecutionFixtureActivity", ".ExecutionFixtureActivity",
                     "com.example.rootpilot.fixture/.ExecutionFixtureActivity"))
+            if (realModel) {
+                reason = "ADMISSION_API_LOAD"
+                withContext(Dispatchers.Main.immediate) { RootPilotService.updateApiConfig(api) }
+                apiLoaded = true
+                check(RootPilotService.uiState.value.apiConfigured)
+            }
             reason = "ADMISSION_FACTORY_ARM"
-            withContext(Dispatchers.Main.immediate) { RootPilotModelClientFactory.arm(nonce, pid, identity) }
+            withContext(Dispatchers.Main.immediate) {
+                RootPilotModelClientFactory.arm(nonce, pid, identity, real = realModel)
+            }
             armed = true
             reason = "ADMISSION_SERVICE_START"
+            sentAt = System.currentTimeMillis()
             RootPilotService.send(context, RootPilotService.ACTION_SINGLE_STEP, RootPilotConfig(
-                task = RootPilotModelClientFactory.task(nonce), manualConfirmation = true,
-                allowScreenUpload = true, executionDisplay = ExecutionDisplay.MAIN))
-            withTimeout(120_000) {
+                task = if (realModel) RootPilotModelClientFactory.REAL_TASK else RootPilotModelClientFactory.task(nonce),
+                manualConfirmation = true, allowScreenUpload = true, executionDisplay = ExecutionDisplay.MAIN))
+            withTimeout(if (realModel) 240_000 else 120_000) {
                 reason = "PREPARATION"
+                // Confirmation and status are separate writes; any other pending action fails fast.
                 val a = RootPilotService.uiState.first {
-                    it.confirmation?.stage == com.example.agent.rootpilot.model.ConfirmationStage.TYPE_PREPARE ||
-                        it.status in setOf(RootPilotStatus.FAILED, RootPilotStatus.STOPPED, RootPilotStatus.RECOVERY_REQUIRED)
+                    (it.status == RootPilotStatus.WAITING_CONFIRMATION && it.pendingAction != null) ||
+                        it.status in setOf(RootPilotStatus.COMPLETED, RootPilotStatus.FAILED,
+                            RootPilotStatus.STOPPED, RootPilotStatus.RECOVERY_REQUIRED)
                 }
+                check(a.status == RootPilotStatus.WAITING_CONFIRMATION)
+                reason = "PREPARATION_ACTION"
                 check(a.confirmation?.stage == com.example.agent.rootpilot.model.ConfirmationStage.TYPE_PREPARE)
+                val prepared = checkNotNull(a.pendingAction as? RootPilotAction.Type)
+                check(prepared.text == EXPECTED && (realModel || prepared.reason == "fixture"))
+                // AgentLoop prefixes the final-confirmation reason with the bound target package.
+                val finalAction = prepared.copy(reason = "输入到 com.example.rootpilot.fixture：${prepared.reason}")
+                reason = "PREPARATION"
                 check(secure(Settings.Secure.DEFAULT_INPUT_METHOD) == originalIme && imeMarkersAbsent())
                 check(state().getInt("commitCalls") == 0)
-                check(RootPilotModelClientFactory.evidence(nonce).let { it.fixedRequests == 1 &&
-                    it.responseReturned && it.ownerActive == true && it.registeredHttpConstructions == 0 })
+                check(RootPilotModelClientFactory.evidence(nonce).let {
+                    it.responseReturned && it.ownerActive == true && it.registeredHttpConstructions == 0 &&
+                        (if (realModel) it.delegatedRequests in 1..it.fixedRequests &&
+                            it.fixedRequests <= RootPilotModelClientFactory.MAX_REAL_REQUESTS
+                        else it.fixedRequests == 1 && it.delegatedRequests == 0) })
                 observedA = true
                 stage("WAITING_NOTIFICATION_PREPARE")
                 reason = "FINAL_CONFIRMATION"
                 val b = RootPilotService.uiState.first {
-                    it.confirmation?.stage == com.example.agent.rootpilot.model.ConfirmationStage.TYPE_COMMIT ||
+                    (it.confirmation?.stage == com.example.agent.rootpilot.model.ConfirmationStage.TYPE_COMMIT &&
+                        it.pendingAction == finalAction) ||
                         it.status in setOf(RootPilotStatus.FAILED, RootPilotStatus.STOPPED, RootPilotStatus.RECOVERY_REQUIRED)
                 }
                 check(b.confirmation?.stage == com.example.agent.rootpilot.model.ConfirmationStage.TYPE_COMMIT)
                 check(isOwnIme(secure(Settings.Secure.DEFAULT_INPUT_METHOD)) && state().getInt("commitCalls") == 0)
-                check(RootPilotModelClientFactory.evidence(nonce).ownerActive == true)
+                check(ownerActive())
                 observedB = true
+                // The model's reason is compared in-process only and never reported.
+                val expectedPreview = "目标应用：com.example.rootpilot.fixture\n${finalAction.reason}\n" +
+                    "待输入全文（仅本地预览）：\n$EXPECTED"
+                fun secureImeRoots() = android.view.inspector.WindowInspector.getGlobalWindowViews().filter { view ->
+                    val params = view.layoutParams as? android.view.WindowManager.LayoutParams
+                    view.isAttachedToWindow && view.isShown && view.display?.displayId == 0 &&
+                        params?.type == android.view.WindowManager.LayoutParams.TYPE_INPUT_METHOD &&
+                        params.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE != 0
+                }
                 reason = "IME_LOCATION_MAIN_ENTRY"
+                // The panel request is asynchronous and the root is shown before its first window relayout;
+                // bounded wait for one laid-out root, then locate exactly once.
+                fun settledImeRoot() = secureImeRoots().singleOrNull()?.takeIf {
+                    it.isLaidOut && !it.isLayoutRequested && it.width > 0 && it.height > 0
+                }
+                kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                    while (withContext(Dispatchers.Main.immediate) {
+                            settledImeRoot() == null && RootPilotService.uiState.value.confirmation === b.confirmation
+                        }) delay(100)
+                }
                 val target = withContext(Dispatchers.Main.immediate) {
                     val imeOwner = com.example.agent.rootpilot.input.InputConnectionBridge.editor.value?.owner
                     result.put("imeShowInputRequested", runCatching { imeOwner?.isShowInputRequested }.getOrNull()
@@ -271,14 +340,9 @@ class TypeProcessRecoveryInstrumentedTest {
                         ?: org.json.JSONObject.NULL)
                     reason = "IME_LOCATION_SCOPE_BEFORE"
                     check(Process.myPid() == pid && RootPilotService.uiState.value.confirmation === b.confirmation &&
-                        RootPilotModelClientFactory.evidence(nonce).ownerActive == true)
+                        ownerActive())
                     reason = "IME_LOCATION_ROOT_INSPECTION"
-                    val roots = android.view.inspector.WindowInspector.getGlobalWindowViews().filter { view ->
-                        val params = view.layoutParams as? android.view.WindowManager.LayoutParams
-                        view.isAttachedToWindow && view.isShown && view.display?.displayId == 0 &&
-                            params?.type == android.view.WindowManager.LayoutParams.TYPE_INPUT_METHOD &&
-                            params.flags and android.view.WindowManager.LayoutParams.FLAG_SECURE != 0
-                    }
+                    val roots = secureImeRoots()
                     reason = if (roots.isEmpty()) "IME_LOCATION_ROOT_NONE" else "IME_LOCATION_ROOT_MULTIPLE"
                     check(roots.size == 1)
                     reason = "IME_LOCATION_NODE_LIMIT"
@@ -286,7 +350,6 @@ class TypeProcessRecoveryInstrumentedTest {
                     val buttons = mutableListOf<android.widget.Button>()
                     var previewMatches = 0
                     var inspected = 0
-                    val expectedPreview = "目标应用：com.example.rootpilot.fixture\nfixture\n待输入全文（仅本地预览）：\n执行模式验收通过"
                     while (queue.isNotEmpty()) {
                         check(++inspected <= 128)
                         val view = queue.removeFirst()
@@ -316,8 +379,7 @@ class TypeProcessRecoveryInstrumentedTest {
                     val screen = android.graphics.Point().also { button.display.getRealSize(it) }
                     check(android.graphics.Rect(0, 0, screen.x, screen.y).contains(bounds))
                     reason = "IME_LOCATION_SCOPE_AFTER"
-                    check(RootPilotService.uiState.value.confirmation === b.confirmation &&
-                        RootPilotModelClientFactory.evidence(nonce).ownerActive == true)
+                    check(RootPilotService.uiState.value.confirmation === b.confirmation && ownerActive())
                     bounds to android.os.SystemClock.elapsedRealtime()
                 }
                 stage("WAITING_IME_FINAL", target)
@@ -338,8 +400,24 @@ class TypeProcessRecoveryInstrumentedTest {
                 val joined = if (armed) runCatching { withTimeout(10_000) {
                     RootPilotModelClientFactory.sealAndJoin(nonce)
                 } }.getOrDefault(false) else false
+                // Only the run this session admitted is cancelled; a rejected admission never stops other work.
+                val started = sentAt
+                val record = if (realModel && joined && started != null) runCatching { withTimeout(5_000) {
+                    RootPilotService.historyState(context).first { h ->
+                        h.error != null || h.records.filter { it.startedAtEpochMs >= started }.let {
+                            it.size == 1 && it.single().status != RunHistoryStatus.RUNNING
+                        }
+                    }.takeIf { it.error == null }?.records?.single { it.startedAtEpochMs >= started }
+                } }.getOrNull() else null
                 val evidence = if (armed) runCatching { RootPilotModelClientFactory.evidence(nonce) }.getOrNull() else null
-                result.put("fixedRequests", evidence?.fixedRequests ?: org.json.JSONObject.NULL)
+                if (realModel) result
+                    .put("modelRequests", evidence?.delegatedRequests ?: org.json.JSONObject.NULL)
+                    .put("modelUsageReported", record?.events?.any {
+                        it.stage == TraceStage.MODEL && it.event == TraceEvent.RESULT &&
+                            it.status == TraceStatus.SUCCESS && (it.modelUsage?.totalTokens ?: 0L) > 0L
+                    } ?: org.json.JSONObject.NULL)
+                // A real run has no fixed local response; its admitted uploads are reported as modelRequests.
+                result.put("fixedRequests", evidence?.takeIf { !realModel }?.fixedRequests ?: org.json.JSONObject.NULL)
                     .put("registeredHttpConstructions", evidence?.registeredHttpConstructions ?: org.json.JSONObject.NULL)
                     .put("ownerCompleted", evidence?.ownerCompleted ?: org.json.JSONObject.NULL)
                 val finalState = runCatching { state() }.getOrNull()
@@ -349,7 +427,12 @@ class TypeProcessRecoveryInstrumentedTest {
                         secure(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) == originalA11y &&
                         secure(Settings.Secure.ACCESSIBILITY_ENABLED) == originalA11yEnabled
                 }.getOrDefault(false)
-                cleaned = joined && evidence?.ownerCompleted == true && !ui.running && ui.pendingAction == null &&
+                if (apiLoaded && !ui.running) withContext(Dispatchers.Main.immediate) {
+                    RootPilotService.updateApiConfig(null)
+                }
+                val owner = joined && evidence?.ownerCompleted == true &&
+                    (!realModel || (record != null && !RootPilotService.uiState.value.apiConfigured))
+                cleaned = owner && !ui.running && ui.pendingAction == null &&
                     ui.confirmation == null && restored && finalState != null && runMarkersAbsent()
                 if (cleaned) withContext(Dispatchers.Main.immediate) { RootPilotService.updateConfig(originalConfig) }
                 result.put("commitCalls", finalState?.getInt("commitCalls") ?: org.json.JSONObject.NULL)
@@ -362,7 +445,7 @@ class TypeProcessRecoveryInstrumentedTest {
                 instrumentation.sendStatus(0, Bundle().apply { putString("twoStageTypeReport", result.toString()) })
             }
         }
-        check(completed && cleaned) { "TWO_STAGE_LOCAL_MODEL_NOT_PASSED" }
+        check(completed && cleaned) { if (realModel) "TWO_STAGE_REAL_MODEL_NOT_PASSED" else "TWO_STAGE_LOCAL_MODEL_NOT_PASSED" }
     }
 
     @Test fun prepareServiceAtUnapprovedType() = invoke(prepare = true)
